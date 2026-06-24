@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 import os
 import time
+import docker
 
 app = FastAPI(title="TechTim Romestead Server Panel")
 
@@ -353,3 +354,29 @@ def health():
         "game": GAME_CODE,
         "version": PANEL_VERSION,
     }
+
+@app.get("/api/docker/status")
+def docker_status():
+    try:
+        client = docker.from_env()
+        containers = client.containers.list(all=True)
+
+        return {
+            "status": "ok",
+            "message": "Docker Engine 연결 성공",
+            "containers": [
+                {
+                    "name": c.name,
+                    "status": c.status,
+                    "image": c.image.tags[0] if c.image.tags else c.image.short_id,
+                }
+                for c in containers
+            ],
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": "Docker Engine 연결 실패",
+            "error": str(e),
+        }
