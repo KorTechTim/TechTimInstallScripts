@@ -43,6 +43,31 @@ def get_status() -> str:
     return INSTALL_STATUS_FILE.read_text(encoding="utf-8").strip()
 
 
+def create_default_config():
+    server_dir = DATA_DIR / "server"
+    server_dir.mkdir(parents=True, exist_ok=True)
+
+    config_path = server_dir / "config.json"
+
+    default_config = {
+        "AutoStartWorldName": "world",
+        "AutoCreateAndLoadWorld": True,
+        "AutoCreateWorldSize": 1,
+        "Password": "",
+        "Port": SERVER_PORT,
+        "MaxPlayers": 10,
+        "EnableCheats": False,
+    }
+
+    import json
+    config_path.write_text(
+        json.dumps(default_config, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    return config_path
+
+
 def install_romestead_job():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
