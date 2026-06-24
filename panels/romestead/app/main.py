@@ -476,3 +476,75 @@ def health():
         "game": GAME_CODE,
         "version": PANEL_VERSION,
     }
+
+@app.post("/api/server/start")
+def start_server():
+    try:
+        server_dir = DATA_DIR / "server"
+        host_server_dir = HOST_DATA_DIR / "server"
+
+        if not server_dir.exists():
+            return {
+                "status": "error",
+                "message": "서버 파일이 없습니다. 먼저 엔진 설치를 진행해주세요.",
+            }
+
+        server_dll = server_dir / "Server.dll"
+        if not server_dll.exists():
+            return {
+                "status": "error",
+                "message": "Server.dll 파일을 찾을 수 없습니다. Romestead 서버 파일 설치 상태를 확인해주세요.",
+            }
+
+        config_path = create_default_config()
+
+        client = docker.from_env()
+
+        existing = client.containers.list(
+            all=True,
+            filters={"name": ROMESTEAD_SERVER_CONTAINER},
+        )
+
+        for container in existing:
+            if container.name == ROMESTEAD_SERVER_CONTAINER:
+                if container.status == "running":
+                    return {
+                        "status": "running",
+                        "message": "Romestead 서버가 이미 실행 중입니다.",
+                    }
+                container.remove(force=True)
+
+        client.images.pull(DOTNET_IMAGE)
+
+        container = client.containers.run(
+            DOTNET_IMAGE,
+            command=["dotnet", "Server.dll"],
+            name=ROMESTEAD_SERVER_CONTAINER,
+            working_dir="/server",
+            detach=True,
+            restart_policy={"Name": "unless-stopped"},
+            volumes={
+                str(host_server_dir): {
+                    "bind": "/server",
+                    "mode": "rw",
+                }
+            },
+            ports={
+                f"{SERVER_PORT}/udp": SERVER_PORT,
+            },
+        )
+
+        return {
+            "status": "started",
+            "message": "Romestead 서버 컨테이너를 시작했습니다.",
+            "container": container.name,
+            "config": str(config_path),
+            "port": f"{SERVER_PORT}/udp",
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": "Romestead 서버 시작 중 오류가 발생했습니다.",
+            "error": str(e),
+        }
