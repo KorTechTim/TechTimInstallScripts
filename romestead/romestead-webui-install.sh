@@ -106,21 +106,21 @@ services:
     image: ${PANEL_IMAGE}
     container_name: romestead-panel
     restart: unless-stopped
-  environment:
-    - GAME_CODE=${GAME_CODE}
-    - INSTALL_CODE=${INSTALL_CODE}
-    - PANEL_VERSION=0.1.3
-    - DATA_DIR=/data
-    - HOST_DATA_DIR=${INSTALL_DIR}/data
-    - STEAMCMD_IMAGE=steamcmd/steamcmd:ubuntu
-    - ROMESTEAD_APP_ID=4763510
-    - DOTNET_IMAGE=mcr.microsoft.com/dotnet/runtime:8.0
-    - SERVER_PORT=8050
-  volumes:
-      - ${INSTALL_DIR}/data:/data
-      - ${INSTALL_DIR}/backups:/backups
-      - ${INSTALL_DIR}/uploads:/uploads
-      - /var/run/docker.sock:/var/run/docker.sock
+environment:
+  - GAME_CODE=${GAME_CODE}
+  - INSTALL_CODE=${INSTALL_CODE}
+  - PANEL_VERSION=0.1.3
+  - DATA_DIR=/data
+  - HOST_DATA_DIR=${INSTALL_DIR}/data
+  - STEAMCMD_IMAGE=steamcmd/steamcmd:ubuntu
+  - ROMESTEAD_APP_ID=4763510
+  - DOTNET_IMAGE=mcr.microsoft.com/dotnet/runtime:8.0
+  - SERVER_PORT=8050
+volumes:
+    - ${INSTALL_DIR}/data:/data
+    - ${INSTALL_DIR}/backups:/backups
+    - ${INSTALL_DIR}/uploads:/uploads
+    - /var/run/docker.sock:/var/run/docker.sock
 
   romestead-panel-proxy:
     image: nginx:alpine
