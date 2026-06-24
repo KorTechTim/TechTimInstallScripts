@@ -1,11 +1,16 @@
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
+from datetime import datetime
+from pathlib import Path
 import os
 
 app = FastAPI(title="TechTim Romestead Server Panel")
 
 GAME_CODE = os.getenv("GAME_CODE", "romestead")
-PANEL_VERSION = os.getenv("PANEL_VERSION", "0.1.0")
+PANEL_VERSION = os.getenv("PANEL_VERSION", "0.1.1")
+
+DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
+INSTALL_REQUEST_FILE = DATA_DIR / "install-request.txt"
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -93,6 +98,19 @@ def dashboard():
       background: #e5e7eb;
       color: #1f2937;
     }}
+    button:disabled {{
+      opacity: 0.6;
+      cursor: not-allowed;
+    }}
+    .result {{
+      margin-top: 24px;
+      padding: 16px;
+      border-radius: 12px;
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      color: #374151;
+      min-height: 22px;
+    }}
     .note {{
       margin-top: 28px;
       color: #6b7280;
@@ -109,10 +127,10 @@ def dashboard():
   <div class="wrap">
     <span class="badge">Web GUI :8080</span>
     <h1>TechTim Romestead Server Panel</h1>
-    <p>Romestead GCP 서버 관리 패널 초기 버전입니다.</p>
+    <p>Romestead GCP 서버 관리 패널 초기 기능 테스트 버전입니다.</p>
 
     <div class="status">
-      실제 Docker 이미지 기반 Web UI 실행 준비 완료
+      FastAPI 기반 Web UI 실행 중 · 엔진 설치 요청 API 테스트 가능
     </div>
 
     <div class="grid">
@@ -131,21 +149,97 @@ def dashboard():
     </div>
 
     <div class="actions">
-      <button>엔진 설치</button>
+      <button id="installBtn" onclick="requestInstall()">엔진 설치</button>
       <button class="secondary">서버 시작</button>
       <button class="secondary">로그 보기</button>
       <button class="secondary">세이브 관리</button>
     </div>
 
+    <div id="result" class="result">
+      아직 실행된 작업이 없습니다.
+    </div>
+
     <div class="note">
-      이 화면은 <code>panels/romestead</code> 소스에서 빌드될 Web UI 테스트 버전입니다.<br>
-      다음 단계에서 GitHub Actions로 Docker 이미지를 만들고,
-      startup script에서 해당 이미지를 실행하도록 변경합니다.
+      이번 단계는 실제 SteamCMD 설치 전 테스트입니다.<br>
+      <code>엔진 설치</code> 버튼을 누르면 <code>/api/install</code>이 호출되고,
+      VM 내부 <code>/data/install-request.txt</code> 파일이 생성됩니다.
     </div>
   </div>
+
+  <script>
+    async function requestInstall() {{
+      const btn = document.getElementById("installBtn");
+      const result = document.getElementById("result");
+
+      btn.disabled = true;
+      result.innerText = "엔진 설치 요청을 전송하는 중입니다...";
+
+      try {{
+        const response = await fetch("/api/install", {{
+          method: "POST"
+        }});
+
+        const data = await response.json();
+
+        if (!response.ok) {{
+          result.innerText = "오류: " + (data.detail || "설치 요청 실패");
+          return;
+        }}
+
+        result.innerText =
+          "설치 요청 완료\\n" +
+          "상태: " + data.status + "\\n" +
+          "메시지: " + data.message + "\\n" +
+          "기록 파일: " + data.request_file;
+      }} catch (err) {{
+        result.innerText = "요청 실패: " + err;
+      }} finally {{
+        btn.disabled = false;
+      }}
+    }}
+  </script>
 </body>
 </html>
 """
+
+
+@app.post("/api/install")
+def request_install():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.now().isoformat(timespec="seconds")
+
+    content = (
+        "TechTim Romestead install request received.\n"
+        f"game={GAME_CODE}\n"
+        f"panel_version={PANEL_VERSION}\n"
+        f"requested_at={now}\n"
+    )
+
+    INSTALL_REQUEST_FILE.write_text(content, encoding="utf-8")
+
+    return {
+        "status": "ok",
+        "message": "Romestead 엔진 설치 요청이 기록되었습니다.",
+        "request_file": str(INSTALL_REQUEST_FILE),
+        "requested_at": now,
+    }
+
+
+@app.get("/api/install/status")
+def install_status():
+    if not INSTALL_REQUEST_FILE.exists():
+        return {
+            "status": "not_requested",
+            "message": "아직 설치 요청이 없습니다.",
+        }
+
+    return {
+        "status": "requested",
+        "message": "설치 요청 파일이 존재합니다.",
+        "request_file": str(INSTALL_REQUEST_FILE),
+        "content": INSTALL_REQUEST_FILE.read_text(encoding="utf-8"),
+    }
 
 
 @app.get("/health")
@@ -153,5 +247,5 @@ def health():
     return {
         "status": "ok",
         "game": GAME_CODE,
-        "version": PANEL_VERSION
+        "version": PANEL_VERSION,
     }
