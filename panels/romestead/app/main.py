@@ -13,7 +13,7 @@ SERVER_PORT = int(os.getenv("SERVER_PORT", "8050"))
 app = FastAPI(title="TechTim Romestead Server Panel")
 
 GAME_CODE = os.getenv("GAME_CODE", "romestead")
-PANEL_VERSION = os.getenv("PANEL_VERSION", "0.1.4")
+PANEL_VERSION = os.getenv("PANEL_VERSION", "0.1.5")
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 HOST_DATA_DIR = Path(os.getenv("HOST_DATA_DIR", "/opt/techtim/romestead/data"))
