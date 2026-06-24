@@ -9,12 +9,14 @@ import docker
 app = FastAPI(title="TechTim Romestead Server Panel")
 
 GAME_CODE = os.getenv("GAME_CODE", "romestead")
-PANEL_VERSION = os.getenv("PANEL_VERSION", "0.1.2")
+PANEL_VERSION = os.getenv("PANEL_VERSION", "0.1.3")
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 INSTALL_REQUEST_FILE = DATA_DIR / "install-request.txt"
 INSTALL_LOG_FILE = DATA_DIR / "install.log"
 INSTALL_STATUS_FILE = DATA_DIR / "install-status.txt"
+HOST_DATA_DIR = Path(os.getenv("HOST_DATA_DIR", "/opt/techtim/romestead/data"))
+STEAMCMD_IMAGE = os.getenv("STEAMCMD_IMAGE", "steamcmd/steamcmd:ubuntu")
 
 
 def write_log(message: str):
@@ -42,35 +44,79 @@ def simulate_install_job():
     set_status("running")
 
     write_log("Romestead 엔진 설치 작업을 시작합니다.")
-    time.sleep(1)
+    write_log("이번 단계는 SteamCMD 컨테이너 실행 검증 테스트입니다.")
 
-    write_log("설치 디렉터리를 확인합니다: /data/server")
-    server_dir = DATA_DIR / "server"
-    server_dir.mkdir(parents=True, exist_ok=True)
-    time.sleep(1)
+    try:
+        server_dir = DATA_DIR / "server"
+        server_dir.mkdir(parents=True, exist_ok=True)
 
-    write_log("SteamCMD 설치 준비 단계를 확인합니다.")
-    time.sleep(1)
+        host_server_dir = HOST_DATA_DIR / "server"
+        host_server_dir.mkdir(parents=True, exist_ok=True)
 
-    write_log("Romestead Dedicated Server 다운로드 준비 중입니다.")
-    time.sleep(1)
+        write_log(f"패널 내부 데이터 경로: {server_dir}")
+        write_log(f"호스트 데이터 경로: {host_server_dir}")
+        write_log(f"SteamCMD 이미지 확인: {STEAMCMD_IMAGE}")
 
-    write_log("config.json 생성 준비 중입니다.")
-    time.sleep(1)
+        client = docker.from_env()
 
-    write_log("현재 단계는 테스트 모드입니다. 실제 SteamCMD 다운로드는 아직 실행하지 않습니다.")
-    time.sleep(1)
+        write_log("Docker Engine 연결 성공.")
+        write_log("SteamCMD 이미지를 pull 합니다. 최초 실행 시 시간이 걸릴 수 있습니다.")
 
-    INSTALL_REQUEST_FILE.write_text(
-        "TechTim Romestead install simulation completed.\n"
-        f"game={GAME_CODE}\n"
-        f"panel_version={PANEL_VERSION}\n"
-        f"completed_at={datetime.now().isoformat(timespec='seconds')}\n",
-        encoding="utf-8",
-    )
+        client.images.pull(STEAMCMD_IMAGE)
 
-    write_log("Romestead 엔진 설치 테스트 작업이 완료되었습니다.")
-    set_status("completed")
+        write_log("SteamCMD 이미지 pull 완료.")
+        write_log("SteamCMD 테스트 컨테이너를 실행합니다: +quit")
+
+        container_name = f"romestead-steamcmd-check-{int(time.time())}"
+
+        container = client.containers.run(
+            STEAMCMD_IMAGE,
+            command="+quit",
+            name=container_name,
+            detach=True,
+            remove=False,
+            volumes={
+                str(host_server_dir): {
+                    "bind": "/server",
+                    "mode": "rw",
+                }
+            },
+        )
+
+        for line in container.logs(stream=True, stdout=True, stderr=True, follow=True):
+            text = line.decode("utf-8", errors="replace").rstrip()
+            if text:
+                write_log(f"[steamcmd] {text}")
+
+        result = container.wait()
+        exit_code = result.get("StatusCode", -1)
+
+        try:
+            container.remove(force=True)
+        except Exception as remove_error:
+            write_log(f"SteamCMD 테스트 컨테이너 삭제 중 경고: {remove_error}")
+
+        if exit_code != 0:
+            write_log(f"ERROR: SteamCMD 테스트 컨테이너가 비정상 종료되었습니다. exit_code={exit_code}")
+            set_status("failed")
+            return
+
+        INSTALL_REQUEST_FILE.write_text(
+            "TechTim Romestead SteamCMD test completed.\n"
+            f"game={GAME_CODE}\n"
+            f"panel_version={PANEL_VERSION}\n"
+            f"steamcmd_image={STEAMCMD_IMAGE}\n"
+            f"completed_at={datetime.now().isoformat(timespec='seconds')}\n",
+            encoding="utf-8",
+        )
+
+        write_log("SteamCMD 컨테이너 실행 테스트가 정상 완료되었습니다.")
+        write_log("다음 단계에서 실제 Romestead Dedicated Server 다운로드 명령을 연결합니다.")
+        set_status("completed")
+
+    except Exception as e:
+        write_log(f"ERROR: 설치 작업 중 예외 발생: {e}")
+        set_status("failed")
 
 
 @app.get("/", response_class=HTMLResponse)
