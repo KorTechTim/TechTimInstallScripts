@@ -1,16 +1,75 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, BackgroundTasks
 from fastapi.responses import HTMLResponse
 from datetime import datetime
 from pathlib import Path
 import os
+import time
 
 app = FastAPI(title="TechTim Romestead Server Panel")
 
 GAME_CODE = os.getenv("GAME_CODE", "romestead")
-PANEL_VERSION = os.getenv("PANEL_VERSION", "0.1.1")
+PANEL_VERSION = os.getenv("PANEL_VERSION", "0.1.2")
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 INSTALL_REQUEST_FILE = DATA_DIR / "install-request.txt"
+INSTALL_LOG_FILE = DATA_DIR / "install.log"
+INSTALL_STATUS_FILE = DATA_DIR / "install-status.txt"
+
+
+def write_log(message: str):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    now = datetime.now().isoformat(timespec="seconds")
+    with INSTALL_LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(f"[{now}] {message}\n")
+
+
+def set_status(status: str):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    INSTALL_STATUS_FILE.write_text(status, encoding="utf-8")
+
+
+def get_status() -> str:
+    if not INSTALL_STATUS_FILE.exists():
+        return "not_started"
+    return INSTALL_STATUS_FILE.read_text(encoding="utf-8").strip()
+
+
+def simulate_install_job():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    INSTALL_LOG_FILE.write_text("", encoding="utf-8")
+    set_status("running")
+
+    write_log("Romestead 엔진 설치 작업을 시작합니다.")
+    time.sleep(1)
+
+    write_log("설치 디렉터리를 확인합니다: /data/server")
+    server_dir = DATA_DIR / "server"
+    server_dir.mkdir(parents=True, exist_ok=True)
+    time.sleep(1)
+
+    write_log("SteamCMD 설치 준비 단계를 확인합니다.")
+    time.sleep(1)
+
+    write_log("Romestead Dedicated Server 다운로드 준비 중입니다.")
+    time.sleep(1)
+
+    write_log("config.json 생성 준비 중입니다.")
+    time.sleep(1)
+
+    write_log("현재 단계는 테스트 모드입니다. 실제 SteamCMD 다운로드는 아직 실행하지 않습니다.")
+    time.sleep(1)
+
+    INSTALL_REQUEST_FILE.write_text(
+        "TechTim Romestead install simulation completed.\n"
+        f"game={GAME_CODE}\n"
+        f"panel_version={PANEL_VERSION}\n"
+        f"completed_at={datetime.now().isoformat(timespec='seconds')}\n",
+        encoding="utf-8",
+    )
+
+    write_log("Romestead 엔진 설치 테스트 작업이 완료되었습니다.")
+    set_status("completed")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -29,8 +88,8 @@ def dashboard():
       color: #1f2937;
     }}
     .wrap {{
-      max-width: 980px;
-      margin: 60px auto;
+      max-width: 1080px;
+      margin: 50px auto;
       background: #ffffff;
       border-radius: 16px;
       padding: 40px;
@@ -110,6 +169,20 @@ def dashboard():
       border: 1px solid #e5e7eb;
       color: #374151;
       min-height: 22px;
+      white-space: pre-line;
+    }}
+    .log {{
+      margin-top: 24px;
+      background: #111827;
+      color: #d1d5db;
+      border-radius: 12px;
+      padding: 18px;
+      min-height: 220px;
+      max-height: 360px;
+      overflow: auto;
+      font-family: Consolas, Monaco, monospace;
+      font-size: 13px;
+      white-space: pre-wrap;
     }}
     .note {{
       margin-top: 28px;
@@ -127,10 +200,10 @@ def dashboard():
   <div class="wrap">
     <span class="badge">Web GUI :8080</span>
     <h1>TechTim Romestead Server Panel</h1>
-    <p>Romestead GCP 서버 관리 패널 초기 기능 테스트 버전입니다.</p>
+    <p>Romestead GCP 서버 관리 패널 설치 로그 테스트 버전입니다.</p>
 
     <div class="status">
-      FastAPI 기반 Web UI 실행 중 · 엔진 설치 요청 API 테스트 가능
+      백그라운드 설치 작업 · 설치 로그 표시 테스트 가능
     </div>
 
     <div class="grid">
@@ -139,8 +212,8 @@ def dashboard():
         <div class="value">Romestead</div>
       </div>
       <div class="card">
-        <div class="label">서버 상태</div>
-        <div class="value">대기 중</div>
+        <div class="label">설치 상태</div>
+        <div id="installStatus" class="value">확인 중</div>
       </div>
       <div class="card">
         <div class="label">패널 버전</div>
@@ -153,16 +226,19 @@ def dashboard():
       <button class="secondary">서버 시작</button>
       <button class="secondary">로그 보기</button>
       <button class="secondary">세이브 관리</button>
+      <button class="secondary" onclick="loadLog()">설치 로그 새로고침</button>
     </div>
 
     <div id="result" class="result">
       아직 실행된 작업이 없습니다.
     </div>
 
+    <div id="installLog" class="log">설치 로그가 여기에 표시됩니다.</div>
+
     <div class="note">
       이번 단계는 실제 SteamCMD 설치 전 테스트입니다.<br>
-      <code>엔진 설치</code> 버튼을 누르면 <code>/api/install</code>이 호출되고,
-      VM 내부 <code>/data/install-request.txt</code> 파일이 생성됩니다.
+      <code>엔진 설치</code> 버튼을 누르면 백그라운드 작업이 시작되고,
+      <code>/data/install.log</code>에 설치 로그가 기록됩니다.
     </div>
   </div>
 
@@ -172,7 +248,7 @@ def dashboard():
       const result = document.getElementById("result");
 
       btn.disabled = true;
-      result.innerText = "엔진 설치 요청을 전송하는 중입니다...";
+      result.innerText = "엔진 설치 작업을 시작하는 중입니다...";
 
       try {{
         const response = await fetch("/api/install", {{
@@ -187,16 +263,44 @@ def dashboard():
         }}
 
         result.innerText =
-          "설치 요청 완료\\n" +
+          "설치 작업 시작됨\\n" +
           "상태: " + data.status + "\\n" +
-          "메시지: " + data.message + "\\n" +
-          "기록 파일: " + data.request_file;
+          "메시지: " + data.message;
+
+        await loadStatus();
+        await loadLog();
       }} catch (err) {{
         result.innerText = "요청 실패: " + err;
       }} finally {{
         btn.disabled = false;
       }}
     }}
+
+    async function loadStatus() {{
+      try {{
+        const response = await fetch("/api/install/status");
+        const data = await response.json();
+        document.getElementById("installStatus").innerText = data.status;
+      }} catch (err) {{
+        document.getElementById("installStatus").innerText = "error";
+      }}
+    }}
+
+    async function loadLog() {{
+      try {{
+        const response = await fetch("/api/install/log");
+        const data = await response.json();
+        document.getElementById("installLog").innerText = data.log || "로그가 없습니다.";
+      }} catch (err) {{
+        document.getElementById("installLog").innerText = "로그 조회 실패: " + err;
+      }}
+    }}
+
+    setInterval(loadStatus, 2000);
+    setInterval(loadLog, 2000);
+
+    loadStatus();
+    loadLog();
   </script>
 </body>
 </html>
@@ -204,41 +308,41 @@ def dashboard():
 
 
 @app.post("/api/install")
-def request_install():
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+def request_install(background_tasks: BackgroundTasks):
+    current_status = get_status()
 
-    now = datetime.now().isoformat(timespec="seconds")
+    if current_status == "running":
+        return {
+            "status": "running",
+            "message": "이미 설치 작업이 실행 중입니다.",
+        }
 
-    content = (
-        "TechTim Romestead install request received.\n"
-        f"game={GAME_CODE}\n"
-        f"panel_version={PANEL_VERSION}\n"
-        f"requested_at={now}\n"
-    )
-
-    INSTALL_REQUEST_FILE.write_text(content, encoding="utf-8")
+    background_tasks.add_task(simulate_install_job)
 
     return {
-        "status": "ok",
-        "message": "Romestead 엔진 설치 요청이 기록되었습니다.",
-        "request_file": str(INSTALL_REQUEST_FILE),
-        "requested_at": now,
+        "status": "started",
+        "message": "Romestead 엔진 설치 작업이 백그라운드에서 시작되었습니다.",
     }
 
 
 @app.get("/api/install/status")
 def install_status():
-    if not INSTALL_REQUEST_FILE.exists():
+    return {
+        "status": get_status(),
+    }
+
+
+@app.get("/api/install/log")
+def install_log():
+    if not INSTALL_LOG_FILE.exists():
         return {
-            "status": "not_requested",
-            "message": "아직 설치 요청이 없습니다.",
+            "status": "empty",
+            "log": "",
         }
 
     return {
-        "status": "requested",
-        "message": "설치 요청 파일이 존재합니다.",
-        "request_file": str(INSTALL_REQUEST_FILE),
-        "content": INSTALL_REQUEST_FILE.read_text(encoding="utf-8"),
+        "status": get_status(),
+        "log": INSTALL_LOG_FILE.read_text(encoding="utf-8"),
     }
 
 
