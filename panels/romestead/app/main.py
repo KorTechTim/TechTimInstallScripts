@@ -1,14 +1,12 @@
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import BackgroundTasks, FastAPI
 from fastapi.responses import HTMLResponse
 from datetime import datetime
 from pathlib import Path
+import json
 import os
 import time
-import docker
 
-ROMESTEAD_SERVER_CONTAINER = "romestead-server"
-DOTNET_IMAGE = os.getenv("DOTNET_IMAGE", "mcr.microsoft.com/dotnet/runtime:8.0")
-SERVER_PORT = int(os.getenv("SERVER_PORT", "8050"))
+import docker
 
 app = FastAPI(title="TechTim Romestead Server Panel")
 
@@ -17,23 +15,35 @@ PANEL_VERSION = os.getenv("PANEL_VERSION", "0.1.5")
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 HOST_DATA_DIR = Path(os.getenv("HOST_DATA_DIR", "/opt/techtim/romestead/data"))
+
 STEAMCMD_IMAGE = os.getenv("STEAMCMD_IMAGE", "steamcmd/steamcmd:ubuntu")
 ROMESTEAD_APP_ID = os.getenv("ROMESTEAD_APP_ID", "4763510")
+
+ROMESTEAD_SERVER_CONTAINER = os.getenv("ROMESTEAD_SERVER_CONTAINER", "romestead-server")
+DOTNET_IMAGE = os.getenv("DOTNET_IMAGE", "mcr.microsoft.com/dotnet/runtime:8.0")
+SERVER_PORT = int(os.getenv("SERVER_PORT", "8050"))
 
 INSTALL_REQUEST_FILE = DATA_DIR / "install-request.txt"
 INSTALL_LOG_FILE = DATA_DIR / "install.log"
 INSTALL_STATUS_FILE = DATA_DIR / "install-status.txt"
 
 
-def write_log(message: str):
+def ensure_data_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    (DATA_DIR / "server").mkdir(parents=True, exist_ok=True)
+    (DATA_DIR / "backups").mkdir(parents=True, exist_ok=True)
+    (DATA_DIR / "uploads").mkdir(parents=True, exist_ok=True)
+
+
+def write_log(message: str) -> None:
+    ensure_data_dirs()
     now = datetime.now().isoformat(timespec="seconds")
     with INSTALL_LOG_FILE.open("a", encoding="utf-8") as f:
         f.write(f"[{now}] {message}\n")
 
 
-def set_status(status: str):
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+def set_status(status: str) -> None:
+    ensure_data_dirs()
     INSTALL_STATUS_FILE.write_text(status, encoding="utf-8")
 
 
@@ -43,7 +53,7 @@ def get_status() -> str:
     return INSTALL_STATUS_FILE.read_text(encoding="utf-8").strip()
 
 
-def create_default_config():
+def create_default_config() -> Path:
     server_dir = DATA_DIR / "server"
     server_dir.mkdir(parents=True, exist_ok=True)
 
@@ -59,7 +69,6 @@ def create_default_config():
         "EnableCheats": False,
     }
 
-    import json
     config_path.write_text(
         json.dumps(default_config, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -68,8 +77,8 @@ def create_default_config():
     return config_path
 
 
-def install_romestead_job():
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+def install_romestead_job() -> None:
+    ensure_data_dirs()
 
     INSTALL_LOG_FILE.write_text("", encoding="utf-8")
     set_status("running")
@@ -81,8 +90,6 @@ def install_romestead_job():
 
     try:
         server_dir = DATA_DIR / "server"
-        server_dir.mkdir(parents=True, exist_ok=True)
-
         host_server_dir = HOST_DATA_DIR / "server"
         host_server_dir.mkdir(parents=True, exist_ok=True)
 
@@ -94,7 +101,6 @@ def install_romestead_job():
 
         write_log("Docker Engine 연결 성공.")
         write_log("SteamCMD 이미지를 확인합니다. 최초 실행 시 pull 시간이 걸릴 수 있습니다.")
-
         client.images.pull(STEAMCMD_IMAGE)
 
         write_log("SteamCMD 이미지 준비 완료.")
@@ -143,7 +149,6 @@ def install_romestead_job():
             return
 
         installed_files = list(server_dir.glob("*"))
-
         if not installed_files:
             write_log("ERROR: 설치 명령은 종료되었지만 /data/server 폴더가 비어 있습니다.")
             set_status("failed")
@@ -153,7 +158,7 @@ def install_romestead_job():
             "TechTim Romestead Dedicated Server install completed.\n"
             f"game={GAME_CODE}\n"
             f"panel_version={PANEL_VERSION}\n"
-            f"steam_login=anonymous\n"
+            "steam_login=anonymous\n"
             f"app_id={ROMESTEAD_APP_ID}\n"
             f"completed_at={datetime.now().isoformat(timespec='seconds')}\n",
             encoding="utf-8",
@@ -170,28 +175,28 @@ def install_romestead_job():
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
-    return f"""
+    html = """
 <!doctype html>
 <html lang="ko">
 <head>
   <meta charset="utf-8">
   <title>TechTim Romestead Server Panel</title>
   <style>
-    body {{
+    body {
       margin: 0;
       font-family: Arial, sans-serif;
       background: #f4f6f8;
       color: #1f2937;
-    }}
-    .wrap {{
+    }
+    .wrap {
       max-width: 1080px;
       margin: 50px auto;
       background: #ffffff;
       border-radius: 16px;
       padding: 40px;
       box-shadow: 0 10px 30px rgba(0,0,0,0.08);
-    }}
-    .badge {{
+    }
+    .badge {
       display: inline-block;
       padding: 6px 12px;
       border-radius: 999px;
@@ -199,12 +204,12 @@ def dashboard():
       color: #0369a1;
       font-size: 14px;
       font-weight: bold;
-    }}
-    h1 {{
+    }
+    h1 {
       margin-top: 20px;
       font-size: 34px;
-    }}
-    .status {{
+    }
+    .status {
       margin-top: 24px;
       padding: 20px;
       background: #ecfdf5;
@@ -212,35 +217,35 @@ def dashboard():
       border-radius: 12px;
       color: #166534;
       font-weight: bold;
-    }}
-    .grid {{
+    }
+    .grid {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
       gap: 16px;
       margin-top: 24px;
-    }}
-    .card {{
+    }
+    .card {
       background: #f9fafb;
       border: 1px solid #e5e7eb;
       border-radius: 12px;
       padding: 18px;
-    }}
-    .label {{
+    }
+    .label {
       font-size: 13px;
       color: #6b7280;
       margin-bottom: 8px;
-    }}
-    .value {{
+    }
+    .value {
       font-size: 20px;
       font-weight: bold;
-    }}
-    .actions {{
+    }
+    .actions {
       margin-top: 30px;
       display: flex;
       gap: 12px;
       flex-wrap: wrap;
-    }}
-    button {{
+    }
+    button {
       border: 0;
       border-radius: 10px;
       padding: 14px 20px;
@@ -248,16 +253,16 @@ def dashboard():
       cursor: pointer;
       background: #2563eb;
       color: white;
-    }}
-    button.secondary {{
+    }
+    button.secondary {
       background: #e5e7eb;
       color: #1f2937;
-    }}
-    button:disabled {{
+    }
+    button:disabled {
       opacity: 0.6;
       cursor: not-allowed;
-    }}
-    .result {{
+    }
+    .result {
       margin-top: 24px;
       padding: 16px;
       border-radius: 12px;
@@ -266,8 +271,8 @@ def dashboard():
       color: #374151;
       min-height: 22px;
       white-space: pre-line;
-    }}
-    .log {{
+    }
+    .log {
       margin-top: 24px;
       background: #111827;
       color: #d1d5db;
@@ -279,27 +284,27 @@ def dashboard():
       font-family: Consolas, Monaco, monospace;
       font-size: 13px;
       white-space: pre-wrap;
-    }}
-    .note {{
+    }
+    .note {
       margin-top: 28px;
       color: #6b7280;
       line-height: 1.6;
-    }}
-    code {{
+    }
+    code {
       background: #f3f4f6;
       padding: 2px 6px;
       border-radius: 6px;
-    }}
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
     <span class="badge">Web GUI :8080</span>
     <h1>TechTim Romestead Server Panel</h1>
-    <p>Romestead GCP 서버 관리 패널 실제 엔진 설치 테스트 버전입니다.</p>
+    <p>Romestead GCP 서버 관리 패널 테스트 버전입니다.</p>
 
     <div class="status">
-      SteamCMD anonymous 로그인 기반 Romestead Dedicated Server 다운로드 가능
+      SteamCMD anonymous 설치 · config.json 생성 · 서버 시작 테스트 가능
     </div>
 
     <div class="grid">
@@ -313,7 +318,7 @@ def dashboard():
       </div>
       <div class="card">
         <div class="label">패널 버전</div>
-        <div class="value">{PANEL_VERSION}</div>
+        <div class="value">__PANEL_VERSION__</div>
       </div>
     </div>
 
@@ -332,72 +337,30 @@ def dashboard():
     <div id="installLog" class="log">설치 로그가 여기에 표시됩니다.</div>
 
     <div class="note">
-      이번 단계는 실제 Romestead 서버 파일 다운로드 테스트입니다.<br>
-      SteamCMD anonymous 로그인을 사용하므로 Steam 계정 정보 입력은 필요하지 않습니다.<br>
-      설치 완료 후 서버 파일은 <code>/data/server</code> 경로에 저장됩니다.
+      설치 완료 후 서버 파일은 <code>/data/server</code> 경로에 저장됩니다.<br>
+      서버 시작 버튼은 <code>config.json</code>을 생성한 뒤 <code>dotnet Server.dll</code> 컨테이너를 실행합니다.
     </div>
   </div>
 
   <script>
-    async function startServer() {{
-      const result = document.getElementById("result");
-    
-      result.innerText = "Romestead 서버를 시작하는 중입니다...";
-    
-      try {
-        const response = await fetch("/api/server/start", {
-          method: "POST"
-        });
-    
-        const data = await response.json();
-    
-        result.innerText =
-          "서버 시작 요청 결과\n" +
-          "상태: " + data.status + "\n" +
-          "메시지: " + data.message + "\n" +
-          (data.port ? "포트: " + data.port + "\n" : "") +
-          (data.container ? "컨테이너: " + data.container : "");
-    
-        await loadServerLog();
-    
-      } catch (err) {
-        result.innerText = "서버 시작 요청 실패: " + err;
-      }
-    }}
-    
-    async function loadServerLog() {{
-      try {
-        const response = await fetch("/api/server/log");
-        const data = await response.json();
-    
-        document.getElementById("installLog").innerText =
-          data.log || data.error || "서버 로그가 없습니다.";
-    
-      } catch (err) {
-        document.getElementById("installLog").innerText =
-          "서버 로그 조회 실패: " + err;
-      }
-    }}
-
-  
-    async function requestInstall() {{
+    async function requestInstall() {
       const btn = document.getElementById("installBtn");
       const result = document.getElementById("result");
 
       btn.disabled = true;
       result.innerText = "Romestead 엔진 설치 작업을 시작하는 중입니다...";
 
-      try {{
-        const response = await fetch("/api/install", {{
+      try {
+        const response = await fetch("/api/install", {
           method: "POST"
-        }});
+        });
 
         const data = await response.json();
 
-        if (!response.ok) {{
+        if (!response.ok) {
           result.innerText = "오류: " + (data.detail || "설치 요청 실패");
           return;
-        }}
+        }
 
         result.innerText =
           "설치 작업 시작됨\\n" +
@@ -406,32 +369,72 @@ def dashboard():
 
         await loadStatus();
         await loadLog();
-      }} catch (err) {{
+      } catch (err) {
         result.innerText = "요청 실패: " + err;
-      }} finally {{
+      } finally {
         btn.disabled = false;
-      }}
-    }}
+      }
+    }
 
-    async function loadStatus() {{
-      try {{
+    async function startServer() {
+      const result = document.getElementById("result");
+
+      result.innerText = "Romestead 서버를 시작하는 중입니다...";
+
+      try {
+        const response = await fetch("/api/server/start", {
+          method: "POST"
+        });
+
+        const data = await response.json();
+
+        result.innerText =
+          "서버 시작 요청 결과\\n" +
+          "상태: " + data.status + "\\n" +
+          "메시지: " + (data.message || "") + "\\n" +
+          (data.port ? "포트: " + data.port + "\\n" : "") +
+          (data.container ? "컨테이너: " + data.container : "");
+
+        await loadServerLog();
+
+      } catch (err) {
+        result.innerText = "서버 시작 요청 실패: " + err;
+      }
+    }
+
+    async function loadServerLog() {
+      try {
+        const response = await fetch("/api/server/log");
+        const data = await response.json();
+
+        document.getElementById("installLog").innerText =
+          data.log || data.error || "서버 로그가 없습니다.";
+
+      } catch (err) {
+        document.getElementById("installLog").innerText =
+          "서버 로그 조회 실패: " + err;
+      }
+    }
+
+    async function loadStatus() {
+      try {
         const response = await fetch("/api/install/status");
         const data = await response.json();
         document.getElementById("installStatus").innerText = data.status;
-      }} catch (err) {{
+      } catch (err) {
         document.getElementById("installStatus").innerText = "error";
-      }}
-    }}
+      }
+    }
 
-    async function loadLog() {{
-      try {{
+    async function loadLog() {
+      try {
         const response = await fetch("/api/install/log");
         const data = await response.json();
         document.getElementById("installLog").innerText = data.log || "로그가 없습니다.";
-      }} catch (err) {{
+      } catch (err) {
         document.getElementById("installLog").innerText = "로그 조회 실패: " + err;
-      }}
-    }}
+      }
+    }
 
     setInterval(loadStatus, 2000);
     setInterval(loadLog, 2000);
@@ -442,6 +445,7 @@ def dashboard():
 </body>
 </html>
 """
+    return html.replace("__PANEL_VERSION__", PANEL_VERSION)
 
 
 @app.post("/api/install")
@@ -510,14 +514,6 @@ def docker_status():
         }
 
 
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "game": GAME_CODE,
-        "version": PANEL_VERSION,
-    }
-
 @app.post("/api/server/start")
 def start_server():
     try:
@@ -538,7 +534,6 @@ def start_server():
             }
 
         config_path = create_default_config()
-
         client = docker.from_env()
 
         existing = client.containers.list(
@@ -644,3 +639,12 @@ def server_log():
             "log": "",
             "error": str(e),
         }
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "game": GAME_CODE,
+        "version": PANEL_VERSION,
+    }
