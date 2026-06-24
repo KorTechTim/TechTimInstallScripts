@@ -7,10 +7,11 @@ METADATA_URL="http://metadata.google.internal/computeMetadata/v1/instance/attrib
 
 GAME_CODE="romestead"
 VERIFY_API="https://techtim.kr/api/install/verify"
+PANEL_IMAGE="ghcr.io/kortechtim/romestead-panel:latest"
 
 {
   echo "======================================"
-  echo "TechTim Romestead Web UI Install with API Verify"
+  echo "TechTim Romestead Panel Install"
   echo "Started at: $(date)"
   echo "======================================"
 
@@ -18,6 +19,10 @@ VERIFY_API="https://techtim.kr/api/install/verify"
   apt-get install -y curl ca-certificates gnupg openssl apache2-utils
 
   mkdir -p "$INSTALL_DIR"
+  mkdir -p "$INSTALL_DIR/data"
+  mkdir -p "$INSTALL_DIR/backups"
+  mkdir -p "$INSTALL_DIR/uploads"
+  mkdir -p "$INSTALL_DIR/nginx"
 
   echo "Reading install-code from GCP metadata..."
 
@@ -25,7 +30,7 @@ VERIFY_API="https://techtim.kr/api/install/verify"
 
   if [ -z "$INSTALL_CODE" ]; then
     echo "ERROR: install-code metadata is missing."
-    echo "ERROR: install-code metadata is missing." > "$INSTALL_DIR/install-test.txt"
+    echo "ERROR: install-code metadata is missing." > "$INSTALL_DIR/install-status.txt"
     exit 1
   fi
 
@@ -40,7 +45,7 @@ VERIFY_API="https://techtim.kr/api/install/verify"
   if [ "$VERIFY_RESULT" != "OK" ]; then
     echo "ERROR: Invalid install code."
     echo "VERIFY_RESULT=$VERIFY_RESULT"
-    echo "ERROR: Invalid install code." > "$INSTALL_DIR/install-test.txt"
+    echo "ERROR: Invalid install code." > "$INSTALL_DIR/install-status.txt"
     exit 1
   fi
 
@@ -73,8 +78,6 @@ VERIFY_API="https://techtim.kr/api/install/verify"
   echo "$ADMIN_PASSWORD" > "$INSTALL_DIR/admin_password.txt"
   chmod 600 "$INSTALL_DIR/admin_password.txt"
 
-  mkdir -p html nginx
-
   htpasswd -bc "$INSTALL_DIR/nginx/.htpasswd" admin "$ADMIN_PASSWORD"
 
   cat > "$INSTALL_DIR/nginx/default.conf" <<'EOF'
@@ -86,139 +89,47 @@ server {
     auth_basic_user_file /etc/nginx/.htpasswd;
 
     location / {
-        root /usr/share/nginx/html;
-        index index.html;
-        try_files $uri $uri/ =404;
+        proxy_pass http://romestead-panel:8080;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 EOF
 
-  cat > html/index.html <<'EOF'
-<!doctype html>
-<html lang="ko">
-<head>
-  <meta charset="utf-8">
-  <title>TechTim Romestead Server Panel</title>
-  <style>
-    body {
-      margin: 0;
-      font-family: Arial, sans-serif;
-      background: #f4f6f8;
-      color: #1f2937;
-    }
-    .wrap {
-      max-width: 900px;
-      margin: 80px auto;
-      background: #ffffff;
-      border-radius: 16px;
-      padding: 40px;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.08);
-    }
-    .badge {
-      display: inline-block;
-      padding: 6px 12px;
-      border-radius: 999px;
-      background: #e0f2fe;
-      color: #0369a1;
-      font-size: 14px;
-      font-weight: bold;
-    }
-    h1 {
-      margin-top: 20px;
-      font-size: 34px;
-    }
-    .status {
-      margin-top: 24px;
-      padding: 20px;
-      background: #ecfdf5;
-      border: 1px solid #bbf7d0;
-      border-radius: 12px;
-      color: #166534;
-      font-weight: bold;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 16px;
-      margin-top: 24px;
-    }
-    .card {
-      background: #f9fafb;
-      border: 1px solid #e5e7eb;
-      border-radius: 12px;
-      padding: 18px;
-    }
-    .label {
-      font-size: 13px;
-      color: #6b7280;
-      margin-bottom: 8px;
-    }
-    .value {
-      font-size: 20px;
-      font-weight: bold;
-    }
-    .note {
-      margin-top: 28px;
-      color: #6b7280;
-      line-height: 1.6;
-    }
-    code {
-      background: #f3f4f6;
-      padding: 2px 6px;
-      border-radius: 6px;
-    }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <span class="badge">Web GUI :8080</span>
-    <h1>TechTim Romestead Server Panel</h1>
-    <p>Romestead GCP 서버 관리 패널 테스트 화면입니다.</p>
-
-    <div class="status">
-      TechTim API 설치 코드 검증 완료 · 관리자 로그인 보호 적용 완료
-    </div>
-
-    <div class="grid">
-      <div class="card">
-        <div class="label">게임</div>
-        <div class="value">Romestead</div>
-      </div>
-      <div class="card">
-        <div class="label">서버 상태</div>
-        <div class="value">대기 중</div>
-      </div>
-      <div class="card">
-        <div class="label">관리 포트</div>
-        <div class="value">8080 TCP</div>
-      </div>
-    </div>
-
-    <div class="note">
-      이 화면이 보이면 GitHub startup script, GCP metadata install-code,
-      TechTim API 검증, Docker 설치, Web UI 컨테이너 실행,
-      관리자 로그인 보호까지 정상적으로 완료된 것입니다.<br>
-      관리자 비밀번호 파일 위치: <code>/opt/techtim/romestead/admin_password.txt</code>
-    </div>
-  </div>
-</body>
-</html>
-EOF
-
-  cat > docker-compose.yml <<'EOF'
+  cat > docker-compose.yml <<EOF
 services:
-  romestead-webui:
+  romestead-panel:
+    image: ${PANEL_IMAGE}
+    container_name: romestead-panel
+    restart: unless-stopped
+    environment:
+      - GAME_CODE=${GAME_CODE}
+      - INSTALL_CODE=${INSTALL_CODE}
+      - PANEL_VERSION=0.1.0
+    volumes:
+      - ${INSTALL_DIR}/data:/data
+      - ${INSTALL_DIR}/backups:/backups
+      - ${INSTALL_DIR}/uploads:/uploads
+
+  romestead-panel-proxy:
     image: nginx:alpine
-    container_name: romestead-webui
+    container_name: romestead-panel-proxy
     restart: unless-stopped
     ports:
       - "8080:80"
+    depends_on:
+      - romestead-panel
     volumes:
-      - ./html:/usr/share/nginx/html:ro
-      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./nginx/.htpasswd:/etc/nginx/.htpasswd:ro
+      - ${INSTALL_DIR}/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${INSTALL_DIR}/nginx/.htpasswd:/etc/nginx/.htpasswd:ro
 EOF
 
+  echo "Pulling and starting Romestead Panel image..."
+  docker compose pull
   docker compose up -d
 
   {
@@ -227,19 +138,21 @@ EOF
     echo "install-code=$INSTALL_CODE"
     echo "verify-api=$VERIFY_API"
     echo "verify-result=OK"
+    echo "panel-image=$PANEL_IMAGE"
     echo "docker=installed"
     echo "webui=running"
     echo "basic-auth=enabled"
     echo "admin-username=admin"
     echo "admin-password-file=$INSTALL_DIR/admin_password.txt"
-  } > "$INSTALL_DIR/install-test.txt"
+  } > "$INSTALL_DIR/install-status.txt"
 
   echo "======================================"
-  echo "TechTim Romestead Web UI Installed"
+  echo "TechTim Romestead Panel Installed"
   echo "URL: http://VM_EXTERNAL_IP:8080"
   echo "Admin Username: admin"
   echo "Admin Password: $ADMIN_PASSWORD"
   echo "Password file: $INSTALL_DIR/admin_password.txt"
+  echo "Status file: $INSTALL_DIR/install-status.txt"
   echo "======================================"
 
   echo "Completed at: $(date)"
