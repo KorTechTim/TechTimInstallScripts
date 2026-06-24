@@ -114,6 +114,7 @@ services:
       - ${INSTALL_DIR}/data:/data
       - ${INSTALL_DIR}/backups:/backups
       - ${INSTALL_DIR}/uploads:/uploads
+      - /var/run/docker.sock:/var/run/docker.sock
 
   romestead-panel-proxy:
     image: nginx:alpine
