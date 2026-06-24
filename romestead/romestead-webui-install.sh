@@ -114,6 +114,8 @@ services:
     - HOST_DATA_DIR=${INSTALL_DIR}/data
     - STEAMCMD_IMAGE=steamcmd/steamcmd:ubuntu
     - ROMESTEAD_APP_ID=4763510
+    - DOTNET_IMAGE=mcr.microsoft.com/dotnet/runtime:8.0
+    - SERVER_PORT=8050
   volumes:
       - ${INSTALL_DIR}/data:/data
       - ${INSTALL_DIR}/backups:/backups
