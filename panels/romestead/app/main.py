@@ -6,6 +6,10 @@ import os
 import time
 import docker
 
+ROMESTEAD_SERVER_CONTAINER = "romestead-server"
+DOTNET_IMAGE = os.getenv("DOTNET_IMAGE", "mcr.microsoft.com/dotnet/runtime:8.0")
+SERVER_PORT = int(os.getenv("SERVER_PORT", "8050"))
+
 app = FastAPI(title="TechTim Romestead Server Panel")
 
 GAME_CODE = os.getenv("GAME_CODE", "romestead")
