@@ -106,11 +106,14 @@ services:
     image: ${PANEL_IMAGE}
     container_name: romestead-panel
     restart: unless-stopped
-    environment:
-      - GAME_CODE=${GAME_CODE}
-      - INSTALL_CODE=${INSTALL_CODE}
-      - PANEL_VERSION=0.1.0
-    volumes:
+  environment:
+    - GAME_CODE=${GAME_CODE}
+    - INSTALL_CODE=${INSTALL_CODE}
+    - PANEL_VERSION=0.1.3
+    - DATA_DIR=/data
+    - HOST_DATA_DIR=${INSTALL_DIR}/data
+    - STEAMCMD_IMAGE=steamcmd/steamcmd:ubuntu
+  volumes:
       - ${INSTALL_DIR}/data:/data
       - ${INSTALL_DIR}/backups:/backups
       - ${INSTALL_DIR}/uploads:/uploads
