@@ -10,12 +10,12 @@ VALID_INSTALL_CODE="RM-2026-GCP-AABB22112211"
 
 {
   echo "======================================"
-  echo "TechTim Romestead Web UI Install Test"
+  echo "TechTim Romestead Web UI Install Test with Basic Auth"
   echo "Started at: $(date)"
   echo "======================================"
 
   apt-get update -y
-  apt-get install -y curl ca-certificates gnupg openssl
+  apt-get install -y curl ca-certificates gnupg openssl apache2-utils
 
   mkdir -p "$INSTALL_DIR"
 
@@ -68,7 +68,25 @@ VALID_INSTALL_CODE="RM-2026-GCP-AABB22112211"
   echo "$ADMIN_PASSWORD" > "$INSTALL_DIR/admin_password.txt"
   chmod 600 "$INSTALL_DIR/admin_password.txt"
 
-  mkdir -p html
+  mkdir -p html nginx
+
+  htpasswd -bc "$INSTALL_DIR/nginx/.htpasswd" admin "$ADMIN_PASSWORD"
+
+  cat > "$INSTALL_DIR/nginx/default.conf" <<'EOF'
+server {
+    listen 80;
+    server_name _;
+
+    auth_basic "TechTim Romestead Server Panel";
+    auth_basic_user_file /etc/nginx/.htpasswd;
+
+    location / {
+        root /usr/share/nginx/html;
+        index index.html;
+        try_files $uri $uri/ =404;
+    }
+}
+EOF
 
   cat > html/index.html <<'EOF'
 <!doctype html>
@@ -139,6 +157,11 @@ VALID_INSTALL_CODE="RM-2026-GCP-AABB22112211"
       color: #6b7280;
       line-height: 1.6;
     }
+    code {
+      background: #f3f4f6;
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
   </style>
 </head>
 <body>
@@ -148,7 +171,7 @@ VALID_INSTALL_CODE="RM-2026-GCP-AABB22112211"
     <p>Romestead GCP 서버 관리 패널 테스트 화면입니다.</p>
 
     <div class="status">
-      설치 코드 검증 완료 · Web UI 자동 설치 성공
+      관리자 로그인 보호 적용 완료 · Web UI 자동 설치 성공
     </div>
 
     <div class="grid">
@@ -168,7 +191,8 @@ VALID_INSTALL_CODE="RM-2026-GCP-AABB22112211"
 
     <div class="note">
       이 화면이 보이면 GitHub startup script, 설치 코드 검증, Docker 설치,
-      Web UI 컨테이너 실행까지 정상적으로 완료된 것입니다.
+      Web UI 컨테이너 실행, 관리자 로그인 보호까지 정상적으로 완료된 것입니다.<br>
+      관리자 비밀번호 파일 위치: <code>/opt/techtim/romestead/admin_password.txt</code>
     </div>
   </div>
 </body>
@@ -185,6 +209,8 @@ services:
       - "8080:80"
     volumes:
       - ./html:/usr/share/nginx/html:ro
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/.htpasswd:/etc/nginx/.htpasswd:ro
 EOF
 
   docker compose up -d
@@ -196,12 +222,15 @@ EOF
     echo "verify-result=OK"
     echo "docker=installed"
     echo "webui=running"
+    echo "basic-auth=enabled"
+    echo "admin-username=admin"
     echo "admin-password-file=$INSTALL_DIR/admin_password.txt"
   } > "$INSTALL_DIR/install-test.txt"
 
   echo "======================================"
   echo "TechTim Romestead Web UI Installed"
   echo "URL: http://VM_EXTERNAL_IP:8080"
+  echo "Admin Username: admin"
   echo "Admin Password: $ADMIN_PASSWORD"
   echo "Password file: $INSTALL_DIR/admin_password.txt"
   echo "======================================"
