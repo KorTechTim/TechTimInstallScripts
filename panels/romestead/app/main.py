@@ -578,3 +578,28 @@ def server_status():
             "status": "error",
             "error": str(e),
         }
+
+
+@app.get("/api/server/log")
+def server_log():
+    try:
+        client = docker.from_env()
+        container = client.containers.get(ROMESTEAD_SERVER_CONTAINER)
+
+        logs = container.logs(
+            stdout=True,
+            stderr=True,
+            tail=200,
+        ).decode("utf-8", errors="replace")
+
+        return {
+            "status": "ok",
+            "log": logs,
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "log": "",
+            "error": str(e),
+        }
