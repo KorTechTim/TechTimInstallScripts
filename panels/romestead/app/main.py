@@ -339,7 +339,7 @@ def dashboard():
   </div>
 
   <script>
-    async function startServer() {
+    async function startServer() {{
       const result = document.getElementById("result");
     
       result.innerText = "Romestead 서버를 시작하는 중입니다...";
@@ -363,9 +363,9 @@ def dashboard():
       } catch (err) {
         result.innerText = "서버 시작 요청 실패: " + err;
       }
-    }
+    }}
     
-    async function loadServerLog() {
+    async function loadServerLog() {{
       try {
         const response = await fetch("/api/server/log");
         const data = await response.json();
@@ -377,7 +377,7 @@ def dashboard():
         document.getElementById("installLog").innerText =
           "서버 로그 조회 실패: " + err;
       }
-    }
+    }}
 
   
     async function requestInstall() {{
