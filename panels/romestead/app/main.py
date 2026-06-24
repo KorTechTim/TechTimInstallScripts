@@ -319,8 +319,8 @@ def dashboard():
 
     <div class="actions">
       <button id="installBtn" onclick="requestInstall()">엔진 설치</button>
-      <button class="secondary">서버 시작</button>
-      <button class="secondary">로그 보기</button>
+      <button class="secondary" onclick="startServer()">서버 시작</button>
+      <button class="secondary" onclick="loadServerLog()">서버 로그 보기</button>
       <button class="secondary">세이브 관리</button>
       <button class="secondary" onclick="loadLog()">설치 로그 새로고침</button>
     </div>
@@ -339,6 +339,47 @@ def dashboard():
   </div>
 
   <script>
+    async function startServer() {
+      const result = document.getElementById("result");
+    
+      result.innerText = "Romestead 서버를 시작하는 중입니다...";
+    
+      try {
+        const response = await fetch("/api/server/start", {
+          method: "POST"
+        });
+    
+        const data = await response.json();
+    
+        result.innerText =
+          "서버 시작 요청 결과\n" +
+          "상태: " + data.status + "\n" +
+          "메시지: " + data.message + "\n" +
+          (data.port ? "포트: " + data.port + "\n" : "") +
+          (data.container ? "컨테이너: " + data.container : "");
+    
+        await loadServerLog();
+    
+      } catch (err) {
+        result.innerText = "서버 시작 요청 실패: " + err;
+      }
+    }
+    
+    async function loadServerLog() {
+      try {
+        const response = await fetch("/api/server/log");
+        const data = await response.json();
+    
+        document.getElementById("installLog").innerText =
+          data.log || data.error || "서버 로그가 없습니다.";
+    
+      } catch (err) {
+        document.getElementById("installLog").innerText =
+          "서버 로그 조회 실패: " + err;
+      }
+    }
+
+  
     async function requestInstall() {{
       const btn = document.getElementById("installBtn");
       const result = document.getElementById("result");
