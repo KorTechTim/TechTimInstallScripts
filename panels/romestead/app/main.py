@@ -548,3 +548,33 @@ def start_server():
             "message": "Romestead 서버 시작 중 오류가 발생했습니다.",
             "error": str(e),
         }
+
+
+@app.get("/api/server/status")
+def server_status():
+    try:
+        client = docker.from_env()
+
+        containers = client.containers.list(
+            all=True,
+            filters={"name": ROMESTEAD_SERVER_CONTAINER},
+        )
+
+        for container in containers:
+            if container.name == ROMESTEAD_SERVER_CONTAINER:
+                return {
+                    "status": container.status,
+                    "container": container.name,
+                    "image": container.image.tags[0] if container.image.tags else container.image.short_id,
+                }
+
+        return {
+            "status": "not_created",
+            "message": "Romestead 서버 컨테이너가 아직 생성되지 않았습니다.",
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+        }
