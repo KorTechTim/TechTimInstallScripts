@@ -6,11 +6,11 @@ INSTALL_DIR="/opt/techtim/romestead"
 METADATA_URL="http://metadata.google.internal/computeMetadata/v1/instance/attributes/install-code"
 
 GAME_CODE="romestead"
-VALID_INSTALL_CODE="RM-2026-GCP-AABB22112211"
+VERIFY_API="https://techtim.kr/api/install/verify"
 
 {
   echo "======================================"
-  echo "TechTim Romestead Web UI Install Test with Basic Auth"
+  echo "TechTim Romestead Web UI Install with API Verify"
   echo "Started at: $(date)"
   echo "======================================"
 
@@ -33,13 +33,18 @@ VALID_INSTALL_CODE="RM-2026-GCP-AABB22112211"
   echo "Game code: $GAME_CODE"
   echo "Install code: $INSTALL_CODE"
 
-  if [ "$INSTALL_CODE" != "$VALID_INSTALL_CODE" ]; then
+  echo "Verifying install-code with TechTim API..."
+
+  VERIFY_RESULT=$(curl -fsSL "${VERIFY_API}?game=${GAME_CODE}&code=${INSTALL_CODE}" || true)
+
+  if [ "$VERIFY_RESULT" != "OK" ]; then
     echo "ERROR: Invalid install code."
+    echo "VERIFY_RESULT=$VERIFY_RESULT"
     echo "ERROR: Invalid install code." > "$INSTALL_DIR/install-test.txt"
     exit 1
   fi
 
-  echo "Install code verified."
+  echo "Install code verified by TechTim API."
 
   echo "Installing Docker..."
 
@@ -171,7 +176,7 @@ EOF
     <p>Romestead GCP 서버 관리 패널 테스트 화면입니다.</p>
 
     <div class="status">
-      관리자 로그인 보호 적용 완료 · Web UI 자동 설치 성공
+      TechTim API 설치 코드 검증 완료 · 관리자 로그인 보호 적용 완료
     </div>
 
     <div class="grid">
@@ -190,8 +195,9 @@ EOF
     </div>
 
     <div class="note">
-      이 화면이 보이면 GitHub startup script, 설치 코드 검증, Docker 설치,
-      Web UI 컨테이너 실행, 관리자 로그인 보호까지 정상적으로 완료된 것입니다.<br>
+      이 화면이 보이면 GitHub startup script, GCP metadata install-code,
+      TechTim API 검증, Docker 설치, Web UI 컨테이너 실행,
+      관리자 로그인 보호까지 정상적으로 완료된 것입니다.<br>
       관리자 비밀번호 파일 위치: <code>/opt/techtim/romestead/admin_password.txt</code>
     </div>
   </div>
@@ -219,6 +225,7 @@ EOF
     echo "Romestead Web UI startup script executed successfully."
     echo "game-code=$GAME_CODE"
     echo "install-code=$INSTALL_CODE"
+    echo "verify-api=$VERIFY_API"
     echo "verify-result=OK"
     echo "docker=installed"
     echo "webui=running"
