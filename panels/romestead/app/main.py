@@ -3,6 +3,10 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from datetime import datetime
 from pathlib import Path
+from fastapi import File, UploadFile
+from fastapi.responses import FileResponse
+import shutil
+import zipfile
 import hashlib
 import json
 import os
@@ -33,6 +37,10 @@ INSTALL_STATUS_FILE = DATA_DIR / "install-status.txt"
 AUTH_FILE = DATA_DIR / "auth.json"
 SESSIONS_FILE = DATA_DIR / "sessions.json"
 SESSION_COOKIE_NAME = "techtim_session"
+
+SAVED_WORLDS_DIR = DATA_DIR / "server" / "saved_worlds"
+SAVE_EXPORT_DIR = DATA_DIR / "uploads"
+
 
 
 class LoginRequest(BaseModel):
@@ -763,6 +771,16 @@ def dashboard(request: Request):
       background: #e5e7eb;
       color: #1f2937;
     }
+    .upload-button {
+      display: inline-block;
+      border: 0;
+      border-radius: 10px;
+      padding: 14px 20px;
+      font-weight: bold;
+      cursor: pointer;
+      background: #e5e7eb;
+      color: #1f2937;
+    }
     button.danger {
       background: #dc2626;
       color: white;
@@ -837,7 +855,11 @@ def dashboard(request: Request):
       <button class="secondary" onclick="stopServer()">서버 중지</button>
       <button class="secondary" onclick="restartServer()">서버 재시작</button>
       <button class="secondary" onclick="loadServerLog()">서버 로그 보기</button>
-      <button class="secondary">세이브 관리</button>
+      <button class="secondary" onclick="downloadSaves()">세이브 다운로드</button>
+      <label class="upload-button">
+          세이브 업로드
+      <input id="saveUploadInput" type="file" accept=".zip" onchange="uploadSaves()" hidden>
+      </label>
       <button class="secondary" onclick="loadLog()">설치 로그 새로고침</button>
       <button class="danger" onclick="logout()">로그아웃</button>
     </div>
@@ -982,6 +1004,46 @@ def dashboard(request: Request):
 
       } catch (err) {
         result.innerText = "서버 재시작 요청 실패: " + err;
+      }
+    }
+
+    function downloadSaves() {
+      window.location.href = "/api/saves/download";
+    }
+
+    async function uploadSaves() {
+      const result = document.getElementById("result");
+      const input = document.getElementById("saveUploadInput");
+
+      if (!input.files || input.files.length === 0) {
+        result.innerText = "업로드할 세이브 ZIP 파일을 선택해주세요.";
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append("file", input.files[0]);
+
+      result.innerText = "세이브 파일을 업로드하는 중입니다...";
+
+      try {
+        const response = await fetch("/api/saves/upload", {
+          method: "POST",
+          body: formData
+        });
+
+        const data = await response.json();
+
+        result.innerText =
+          "세이브 업로드 결과\n" +
+          "상태: " + data.status + "\n" +
+          "메시지: " + (data.message || "") + "\n" +
+          (data.filename ? "파일명: " + data.filename + "\n" : "") +
+          (data.target ? "저장 위치: " + data.target : "");
+
+      } catch (err) {
+        result.innerText = "세이브 업로드 실패: " + err;
+      } finally {
+        input.value = "";
       }
     }
 
@@ -1347,6 +1409,70 @@ def server_log(request: Request):
         return {
             "status": "error",
             "log": "",
+            "error": str(e),
+        }
+
+
+@app.get("/api/saves/download")
+def download_saves(request: Request):
+    require_auth(request)
+
+    try:
+        ensure_data_dirs()
+        SAVED_WORLDS_DIR.mkdir(parents=True, exist_ok=True)
+        SAVE_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        zip_path = SAVE_EXPORT_DIR / f"romestead-saves-{timestamp}.zip"
+
+        shutil.make_archive(
+            base_name=str(zip_path).replace(".zip", ""),
+            format="zip",
+            root_dir=str(SAVED_WORLDS_DIR),
+        )
+
+        return FileResponse(
+            path=str(zip_path),
+            filename=zip_path.name,
+            media_type="application/zip",
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"세이브 다운로드 중 오류가 발생했습니다: {e}",
+        )
+
+
+@app.post("/api/saves/upload")
+async def upload_saves(request: Request, file: UploadFile = File(...)):
+    require_auth(request)
+
+    try:
+        ensure_data_dirs()
+        SAVED_WORLDS_DIR.mkdir(parents=True, exist_ok=True)
+        SAVE_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+
+        upload_path = SAVE_EXPORT_DIR / file.filename
+
+        with upload_path.open("wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+
+        with zipfile.ZipFile(upload_path, "r") as zip_ref:
+            zip_ref.extractall(SAVED_WORLDS_DIR)
+
+        return {
+            "status": "ok",
+            "message": "세이브 파일 업로드가 완료되었습니다.",
+            "filename": file.filename,
+            "target": str(SAVED_WORLDS_DIR),
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": "세이브 업로드 중 오류가 발생했습니다.",
             "error": str(e),
         }
 
