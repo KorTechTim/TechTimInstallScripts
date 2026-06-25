@@ -100,7 +100,7 @@ services:
     environment:
       - GAME_CODE=${GAME_CODE}
       - INSTALL_CODE=${INSTALL_CODE}
-      - PANEL_VERSION=0.1.6
+      - PANEL_VERSION=0.1.7
       - DATA_DIR=/data
       - HOST_DATA_DIR=${INSTALL_DIR}/data
       - STEAMCMD_IMAGE=steamcmd/steamcmd:ubuntu
