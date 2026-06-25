@@ -1,24 +1,22 @@
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from datetime import datetime
 from pathlib import Path
-from fastapi import File, UploadFile
-from fastapi.responses import FileResponse
-import shutil
-import zipfile
 import hashlib
 import json
 import os
 import secrets
+import shutil
 import time
+import zipfile
 
 import docker
 
 app = FastAPI(title="TechTim Romestead Server Panel")
 
 GAME_CODE = os.getenv("GAME_CODE", "romestead")
-PANEL_VERSION = os.getenv("PANEL_VERSION", "0.1.7")
+PANEL_VERSION = os.getenv("PANEL_VERSION", "0.1.8")
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 HOST_DATA_DIR = Path(os.getenv("HOST_DATA_DIR", "/opt/techtim/romestead/data"))
@@ -34,13 +32,12 @@ INSTALL_REQUEST_FILE = DATA_DIR / "install-request.txt"
 INSTALL_LOG_FILE = DATA_DIR / "install.log"
 INSTALL_STATUS_FILE = DATA_DIR / "install-status.txt"
 
-AUTH_FILE = DATA_DIR / "auth.json"
-SESSIONS_FILE = DATA_DIR / "sessions.json"
-SESSION_COOKIE_NAME = "techtim_session"
-
 SAVED_WORLDS_DIR = DATA_DIR / "server" / "saved_worlds"
 SAVE_EXPORT_DIR = DATA_DIR / "uploads"
 
+AUTH_FILE = DATA_DIR / "auth.json"
+SESSIONS_FILE = DATA_DIR / "sessions.json"
+SESSION_COOKIE_NAME = "techtim_session"
 
 
 class LoginRequest(BaseModel):
@@ -58,6 +55,7 @@ def ensure_data_dirs() -> None:
     (DATA_DIR / "server").mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "backups").mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "uploads").mkdir(parents=True, exist_ok=True)
+    SAVED_WORLDS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def password_hash(password: str, salt: str) -> str:
@@ -346,70 +344,15 @@ def login_page(request: Request):
   <meta charset="utf-8">
   <title>TechTim Romestead Login</title>
   <style>
-    body {
-      margin: 0;
-      font-family: Arial, sans-serif;
-      background: #f4f6f8;
-      color: #1f2937;
-    }
-    .box {
-      max-width: 420px;
-      margin: 100px auto;
-      background: #fff;
-      border-radius: 16px;
-      padding: 34px;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.08);
-    }
-    h1 {
-      margin: 0 0 10px;
-      font-size: 28px;
-    }
-    p {
-      color: #6b7280;
-      line-height: 1.5;
-    }
-    label {
-      display: block;
-      margin-top: 18px;
-      font-size: 14px;
-      font-weight: bold;
-    }
-    input {
-      width: 100%;
-      box-sizing: border-box;
-      margin-top: 8px;
-      padding: 13px;
-      border: 1px solid #d1d5db;
-      border-radius: 10px;
-      font-size: 15px;
-    }
-    button {
-      width: 100%;
-      margin-top: 24px;
-      border: 0;
-      border-radius: 10px;
-      padding: 14px;
-      font-weight: bold;
-      cursor: pointer;
-      background: #2563eb;
-      color: white;
-      font-size: 15px;
-    }
-    .hint {
-      margin-top: 18px;
-      padding: 12px;
-      background: #f9fafb;
-      border: 1px solid #e5e7eb;
-      border-radius: 10px;
-      color: #374151;
-      font-size: 13px;
-    }
-    .error {
-      margin-top: 14px;
-      color: #dc2626;
-      white-space: pre-line;
-      font-size: 14px;
-    }
+    body { margin: 0; font-family: Arial, sans-serif; background: #f4f6f8; color: #1f2937; }
+    .box { max-width: 420px; margin: 100px auto; background: #fff; border-radius: 16px; padding: 34px; box-shadow: 0 10px 30px rgba(0,0,0,0.08); }
+    h1 { margin: 0 0 10px; font-size: 28px; }
+    p { color: #6b7280; line-height: 1.5; }
+    label { display: block; margin-top: 18px; font-size: 14px; font-weight: bold; }
+    input { width: 100%; box-sizing: border-box; margin-top: 8px; padding: 13px; border: 1px solid #d1d5db; border-radius: 10px; font-size: 15px; }
+    button { width: 100%; margin-top: 24px; border: 0; border-radius: 10px; padding: 14px; font-weight: bold; cursor: pointer; background: #2563eb; color: white; font-size: 15px; }
+    .hint { margin-top: 18px; padding: 12px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 10px; color: #374151; font-size: 13px; }
+    .error { margin-top: 14px; color: #dc2626; white-space: pre-line; font-size: 14px; }
   </style>
 </head>
 <body>
@@ -444,13 +387,8 @@ def login_page(request: Request):
       try {
         const response = await fetch("/api/auth/login", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            username,
-            password
-          })
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password })
         });
 
         const data = await response.json();
@@ -460,11 +398,7 @@ def login_page(request: Request):
           return;
         }
 
-        if (data.must_change_password) {
-          window.location.href = "/change-password";
-        } else {
-          window.location.href = "/";
-        }
+        window.location.href = data.must_change_password ? "/change-password" : "/";
       } catch (err) {
         errorBox.innerText = "로그인 요청 실패: " + err;
       }
@@ -487,61 +421,14 @@ def change_password_page(request: Request):
   <meta charset="utf-8">
   <title>Change Admin Password</title>
   <style>
-    body {
-      margin: 0;
-      font-family: Arial, sans-serif;
-      background: #f4f6f8;
-      color: #1f2937;
-    }
-    .box {
-      max-width: 460px;
-      margin: 90px auto;
-      background: #fff;
-      border-radius: 16px;
-      padding: 34px;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.08);
-    }
-    h1 {
-      margin: 0 0 10px;
-      font-size: 28px;
-    }
-    p {
-      color: #6b7280;
-      line-height: 1.5;
-    }
-    label {
-      display: block;
-      margin-top: 18px;
-      font-size: 14px;
-      font-weight: bold;
-    }
-    input {
-      width: 100%;
-      box-sizing: border-box;
-      margin-top: 8px;
-      padding: 13px;
-      border: 1px solid #d1d5db;
-      border-radius: 10px;
-      font-size: 15px;
-    }
-    button {
-      width: 100%;
-      margin-top: 24px;
-      border: 0;
-      border-radius: 10px;
-      padding: 14px;
-      font-weight: bold;
-      cursor: pointer;
-      background: #2563eb;
-      color: white;
-      font-size: 15px;
-    }
-    .error {
-      margin-top: 14px;
-      color: #dc2626;
-      white-space: pre-line;
-      font-size: 14px;
-    }
+    body { margin: 0; font-family: Arial, sans-serif; background: #f4f6f8; color: #1f2937; }
+    .box { max-width: 460px; margin: 90px auto; background: #fff; border-radius: 16px; padding: 34px; box-shadow: 0 10px 30px rgba(0,0,0,0.08); }
+    h1 { margin: 0 0 10px; font-size: 28px; }
+    p { color: #6b7280; line-height: 1.5; }
+    label { display: block; margin-top: 18px; font-size: 14px; font-weight: bold; }
+    input { width: 100%; box-sizing: border-box; margin-top: 8px; padding: 13px; border: 1px solid #d1d5db; border-radius: 10px; font-size: 15px; }
+    button { width: 100%; margin-top: 24px; border: 0; border-radius: 10px; padding: 14px; font-weight: bold; cursor: pointer; background: #2563eb; color: white; font-size: 15px; }
+    .error { margin-top: 14px; color: #dc2626; white-space: pre-line; font-size: 14px; }
   </style>
 </head>
 <body>
@@ -590,9 +477,7 @@ def change_password_page(request: Request):
       try {
         const response = await fetch("/api/auth/change-password", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             current_password: currentPassword,
             new_password: newPassword
@@ -695,133 +580,24 @@ def dashboard(request: Request):
   <meta charset="utf-8">
   <title>TechTim Romestead Server Panel</title>
   <style>
-    body {
-      margin: 0;
-      font-family: Arial, sans-serif;
-      background: #f4f6f8;
-      color: #1f2937;
-    }
-    .wrap {
-      max-width: 1080px;
-      margin: 50px auto;
-      background: #ffffff;
-      border-radius: 16px;
-      padding: 40px;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.08);
-    }
-    .badge {
-      display: inline-block;
-      padding: 6px 12px;
-      border-radius: 999px;
-      background: #e0f2fe;
-      color: #0369a1;
-      font-size: 14px;
-      font-weight: bold;
-    }
-    h1 {
-      margin-top: 20px;
-      font-size: 34px;
-    }
-    .status {
-      margin-top: 24px;
-      padding: 20px;
-      background: #ecfdf5;
-      border: 1px solid #bbf7d0;
-      border-radius: 12px;
-      color: #166534;
-      font-weight: bold;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 16px;
-      margin-top: 24px;
-    }
-    .card {
-      background: #f9fafb;
-      border: 1px solid #e5e7eb;
-      border-radius: 12px;
-      padding: 18px;
-    }
-    .label {
-      font-size: 13px;
-      color: #6b7280;
-      margin-bottom: 8px;
-    }
-    .value {
-      font-size: 20px;
-      font-weight: bold;
-    }
-    .actions {
-      margin-top: 30px;
-      display: flex;
-      gap: 12px;
-      flex-wrap: wrap;
-    }
-    button {
-      border: 0;
-      border-radius: 10px;
-      padding: 14px 20px;
-      font-weight: bold;
-      cursor: pointer;
-      background: #2563eb;
-      color: white;
-    }
-    button.secondary {
-      background: #e5e7eb;
-      color: #1f2937;
-    }
-    .upload-button {
-      display: inline-block;
-      border: 0;
-      border-radius: 10px;
-      padding: 14px 20px;
-      font-weight: bold;
-      cursor: pointer;
-      background: #e5e7eb;
-      color: #1f2937;
-    }
-    button.danger {
-      background: #dc2626;
-      color: white;
-    }
-    button:disabled {
-      opacity: 0.6;
-      cursor: not-allowed;
-    }
-    .result {
-      margin-top: 24px;
-      padding: 16px;
-      border-radius: 12px;
-      background: #f9fafb;
-      border: 1px solid #e5e7eb;
-      color: #374151;
-      min-height: 22px;
-      white-space: pre-line;
-    }
-    .log {
-      margin-top: 24px;
-      background: #111827;
-      color: #d1d5db;
-      border-radius: 12px;
-      padding: 18px;
-      min-height: 280px;
-      max-height: 460px;
-      overflow: auto;
-      font-family: Consolas, Monaco, monospace;
-      font-size: 13px;
-      white-space: pre-wrap;
-    }
-    .note {
-      margin-top: 28px;
-      color: #6b7280;
-      line-height: 1.6;
-    }
-    code {
-      background: #f3f4f6;
-      padding: 2px 6px;
-      border-radius: 6px;
-    }
+    body { margin: 0; font-family: Arial, sans-serif; background: #f4f6f8; color: #1f2937; }
+    .wrap { max-width: 1080px; margin: 50px auto; background: #ffffff; border-radius: 16px; padding: 40px; box-shadow: 0 10px 30px rgba(0,0,0,0.08); }
+    .badge { display: inline-block; padding: 6px 12px; border-radius: 999px; background: #e0f2fe; color: #0369a1; font-size: 14px; font-weight: bold; }
+    h1 { margin-top: 20px; font-size: 34px; }
+    .status { margin-top: 24px; padding: 20px; background: #ecfdf5; border: 1px solid #bbf7d0; border-radius: 12px; color: #166534; font-weight: bold; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 24px; }
+    .card { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 12px; padding: 18px; }
+    .label { font-size: 13px; color: #6b7280; margin-bottom: 8px; }
+    .value { font-size: 20px; font-weight: bold; }
+    .actions { margin-top: 30px; display: flex; gap: 12px; flex-wrap: wrap; }
+    button { border: 0; border-radius: 10px; padding: 14px 20px; font-weight: bold; cursor: pointer; background: #2563eb; color: white; }
+    button.secondary { background: #e5e7eb; color: #1f2937; }
+    button.danger { background: #dc2626; color: white; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .result { margin-top: 24px; padding: 16px; border-radius: 12px; background: #f9fafb; border: 1px solid #e5e7eb; color: #374151; min-height: 22px; white-space: pre-line; }
+    .log { margin-top: 24px; background: #111827; color: #d1d5db; border-radius: 12px; padding: 18px; min-height: 280px; max-height: 460px; overflow: auto; font-family: Consolas, Monaco, monospace; font-size: 13px; white-space: pre-wrap; }
+    .note { margin-top: 28px; color: #6b7280; line-height: 1.6; }
+    code { background: #f3f4f6; padding: 2px 6px; border-radius: 6px; }
   </style>
 </head>
 <body>
@@ -831,7 +607,7 @@ def dashboard(request: Request):
     <p>Romestead GCP 서버 관리 패널 테스트 버전입니다.</p>
 
     <div class="status">
-      SteamCMD anonymous 설치 · config.json 생성 · 서버 시작/중지/재시작 테스트 가능
+      SteamCMD anonymous 설치 · 서버 시작/중지/재시작 · 세이브 업로드/다운로드 가능
     </div>
 
     <div class="grid">
@@ -856,10 +632,8 @@ def dashboard(request: Request):
       <button class="secondary" onclick="restartServer()">서버 재시작</button>
       <button class="secondary" onclick="loadServerLog()">서버 로그 보기</button>
       <button class="secondary" onclick="downloadSaves()">세이브 다운로드</button>
-      <label class="upload-button">
-          세이브 업로드
-      <input id="saveUploadInput" type="file" accept=".zip" onchange="uploadSaves()" hidden>
-      </label>
+      <button class="secondary" onclick="triggerSaveUpload()">세이브 업로드</button>
+      <input id="saveUploadInput" type="file" accept=".zip" onchange="uploadSaves()" style="display:none">
       <button class="secondary" onclick="loadLog()">설치 로그 새로고침</button>
       <button class="danger" onclick="logout()">로그아웃</button>
     </div>
@@ -872,7 +646,8 @@ def dashboard(request: Request):
 
     <div class="note">
       설치 완료 후 서버 파일은 <code>/data/server</code> 경로에 저장됩니다.<br>
-      서버 시작 버튼은 <code>config.json</code>을 생성한 뒤 <code>dotnet Server.dll</code> 컨테이너를 실행합니다.
+      서버 시작 버튼은 <code>config.json</code>을 생성한 뒤 <code>dotnet Server.dll</code> 컨테이너를 실행합니다.<br>
+      세이브 다운로드/업로드는 <code>/data/server/saved_worlds</code> 경로를 기준으로 처리합니다.
     </div>
   </div>
 
@@ -1008,7 +783,14 @@ def dashboard(request: Request):
     }
 
     function downloadSaves() {
+      const result = document.getElementById("result");
+      result.innerText = "세이브 파일 다운로드를 준비합니다...";
       window.location.href = "/api/saves/download";
+    }
+
+    function triggerSaveUpload() {
+      const input = document.getElementById("saveUploadInput");
+      input.click();
     }
 
     async function uploadSaves() {
@@ -1020,8 +802,9 @@ def dashboard(request: Request):
         return;
       }
 
+      const selectedFile = input.files[0];
       const formData = new FormData();
-      formData.append("file", input.files[0]);
+      formData.append("file", selectedFile);
 
       result.innerText = "세이브 파일을 업로드하는 중입니다...";
 
@@ -1034,10 +817,10 @@ def dashboard(request: Request):
         const data = await response.json();
 
         result.innerText =
-          "세이브 업로드 결과\n" +
-          "상태: " + data.status + "\n" +
-          "메시지: " + (data.message || "") + "\n" +
-          (data.filename ? "파일명: " + data.filename + "\n" : "") +
+          "세이브 업로드 결과\\n" +
+          "상태: " + data.status + "\\n" +
+          "메시지: " + (data.message || "") + "\\n" +
+          "파일명: " + (data.filename || selectedFile.name) + "\\n" +
           (data.target ? "저장 위치: " + data.target : "");
 
       } catch (err) {
@@ -1424,9 +1207,10 @@ def download_saves(request: Request):
 
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         zip_path = SAVE_EXPORT_DIR / f"romestead-saves-{timestamp}.zip"
+        zip_base = zip_path.with_suffix("")
 
         shutil.make_archive(
-            base_name=str(zip_path).replace(".zip", ""),
+            base_name=str(zip_base),
             format="zip",
             root_dir=str(SAVED_WORLDS_DIR),
         )
@@ -1453,7 +1237,8 @@ async def upload_saves(request: Request, file: UploadFile = File(...)):
         SAVED_WORLDS_DIR.mkdir(parents=True, exist_ok=True)
         SAVE_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
-        upload_path = SAVE_EXPORT_DIR / file.filename
+        filename = file.filename or f"uploaded-saves-{int(time.time())}.zip"
+        upload_path = SAVE_EXPORT_DIR / filename
 
         with upload_path.open("wb") as buffer:
             content = await file.read()
@@ -1465,7 +1250,7 @@ async def upload_saves(request: Request, file: UploadFile = File(...)):
         return {
             "status": "ok",
             "message": "세이브 파일 업로드가 완료되었습니다.",
-            "filename": file.filename,
+            "filename": filename,
             "target": str(SAVED_WORLDS_DIR),
         }
 
