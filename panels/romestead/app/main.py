@@ -14,7 +14,7 @@ import docker
 app = FastAPI(title="TechTim Romestead Server Panel")
 
 GAME_CODE = os.getenv("GAME_CODE", "romestead")
-PANEL_VERSION = os.getenv("PANEL_VERSION", "0.1.6")
+PANEL_VERSION = os.getenv("PANEL_VERSION", "0.1.7")
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 HOST_DATA_DIR = Path(os.getenv("HOST_DATA_DIR", "/opt/techtim/romestead/data"))
@@ -68,6 +68,7 @@ def init_auth_if_needed() -> None:
         return
 
     salt = secrets.token_hex(16)
+
     auth_data = {
         "username": "admin",
         "password_hash": password_hash("admin", salt),
@@ -143,6 +144,7 @@ def delete_session(token: str | None) -> None:
         return
 
     sessions = load_sessions()
+
     if token in sessions:
         del sessions[token]
         save_sessions(sessions)
@@ -180,6 +182,7 @@ def must_change_password() -> bool:
 def write_log(message: str) -> None:
     ensure_data_dirs()
     now = datetime.now().isoformat(timespec="seconds")
+
     with INSTALL_LOG_FILE.open("a", encoding="utf-8") as f:
         f.write(f"[{now}] {message}\n")
 
@@ -192,6 +195,7 @@ def set_status(status: str) -> None:
 def get_status() -> str:
     if not INSTALL_STATUS_FILE.exists():
         return "not_started"
+
     return INSTALL_STATUS_FILE.read_text(encoding="utf-8").strip()
 
 
@@ -273,6 +277,7 @@ def install_romestead_job() -> None:
 
         for line in container.logs(stream=True, stdout=True, stderr=True, follow=True):
             text = line.decode("utf-8", errors="replace").rstrip()
+
             if text:
                 write_log(f"[steamcmd] {text}")
 
@@ -291,6 +296,7 @@ def install_romestead_job() -> None:
             return
 
         installed_files = list(server_dir.glob("*"))
+
         if not installed_files:
             write_log("ERROR: 설치 명령은 종료되었지만 /data/server 폴더가 비어 있습니다.")
             set_status("failed")
@@ -322,6 +328,7 @@ def login_page(request: Request):
     if get_current_user(request):
         if must_change_password():
             return RedirectResponse(url="/change-password", status_code=302)
+
         return RedirectResponse(url="/", status_code=302)
 
     return """
@@ -806,7 +813,7 @@ def dashboard(request: Request):
     <p>Romestead GCP 서버 관리 패널 테스트 버전입니다.</p>
 
     <div class="status">
-      SteamCMD anonymous 설치 · config.json 생성 · 서버 시작 테스트 가능
+      SteamCMD anonymous 설치 · config.json 생성 · 서버 시작/중지/재시작 테스트 가능
     </div>
 
     <div class="grid">
@@ -827,6 +834,8 @@ def dashboard(request: Request):
     <div class="actions">
       <button id="installBtn" onclick="requestInstall()">엔진 설치</button>
       <button class="secondary" onclick="startServer()">서버 시작</button>
+      <button class="secondary" onclick="stopServer()">서버 중지</button>
+      <button class="secondary" onclick="restartServer()">서버 재시작</button>
       <button class="secondary" onclick="loadServerLog()">서버 로그 보기</button>
       <button class="secondary">세이브 관리</button>
       <button class="secondary" onclick="loadLog()">설치 로그 새로고침</button>
@@ -924,6 +933,58 @@ def dashboard(request: Request):
       }
     }
 
+    async function stopServer() {
+      const result = document.getElementById("result");
+
+      result.innerText = "Romestead 서버를 중지하는 중입니다...";
+
+      try {
+        const response = await fetch("/api/server/stop", {
+          method: "POST"
+        });
+
+        const data = await response.json();
+
+        result.innerText =
+          "서버 중지 요청 결과\\n" +
+          "상태: " + data.status + "\\n" +
+          "메시지: " + (data.message || "") + "\\n" +
+          (data.container ? "컨테이너: " + data.container : "");
+
+        currentLogMode = "server";
+        await loadServerLog();
+
+      } catch (err) {
+        result.innerText = "서버 중지 요청 실패: " + err;
+      }
+    }
+
+    async function restartServer() {
+      const result = document.getElementById("result");
+
+      result.innerText = "Romestead 서버를 재시작하는 중입니다...";
+
+      try {
+        const response = await fetch("/api/server/restart", {
+          method: "POST"
+        });
+
+        const data = await response.json();
+
+        result.innerText =
+          "서버 재시작 요청 결과\\n" +
+          "상태: " + data.status + "\\n" +
+          "메시지: " + (data.message || "") + "\\n" +
+          (data.container ? "컨테이너: " + data.container : "");
+
+        currentLogMode = "server";
+        await loadServerLog();
+
+      } catch (err) {
+        result.innerText = "서버 재시작 요청 실패: " + err;
+      }
+    }
+
     async function loadServerLog() {
       currentLogMode = "server";
 
@@ -1018,6 +1079,7 @@ def request_install(request: Request, background_tasks: BackgroundTasks):
 @app.get("/api/install/status")
 def install_status(request: Request):
     require_auth(request)
+
     return {
         "status": get_status(),
     }
@@ -1083,6 +1145,7 @@ def start_server(request: Request):
             }
 
         server_dll = server_dir / "Server.dll"
+
         if not server_dll.exists():
             return {
                 "status": "error",
@@ -1099,11 +1162,14 @@ def start_server(request: Request):
 
         for container in existing:
             if container.name == ROMESTEAD_SERVER_CONTAINER:
+                container.reload()
+
                 if container.status == "running":
                     return {
                         "status": "running",
                         "message": "Romestead 서버가 이미 실행 중입니다.",
                     }
+
                 container.remove(force=True)
 
         client.images.pull(DOTNET_IMAGE)
@@ -1142,6 +1208,88 @@ def start_server(request: Request):
         }
 
 
+@app.post("/api/server/stop")
+def stop_server(request: Request):
+    require_auth(request)
+
+    try:
+        client = docker.from_env()
+
+        try:
+            container = client.containers.get(ROMESTEAD_SERVER_CONTAINER)
+        except docker.errors.NotFound:
+            return {
+                "status": "not_created",
+                "message": "Romestead 서버 컨테이너가 아직 생성되지 않았습니다.",
+            }
+
+        container.reload()
+
+        if container.status != "running":
+            return {
+                "status": container.status,
+                "message": "Romestead 서버가 실행 중이 아닙니다.",
+                "container": container.name,
+            }
+
+        container.stop(timeout=15)
+
+        return {
+            "status": "stopped",
+            "message": "Romestead 서버를 중지했습니다.",
+            "container": container.name,
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": "Romestead 서버 중지 중 오류가 발생했습니다.",
+            "error": str(e),
+        }
+
+
+@app.post("/api/server/restart")
+def restart_server(request: Request):
+    require_auth(request)
+
+    try:
+        client = docker.from_env()
+
+        try:
+            container = client.containers.get(ROMESTEAD_SERVER_CONTAINER)
+        except docker.errors.NotFound:
+            return {
+                "status": "not_created",
+                "message": "Romestead 서버 컨테이너가 없습니다. 먼저 서버 시작을 눌러주세요.",
+            }
+
+        container.reload()
+
+        if container.status == "running":
+            container.restart(timeout=15)
+
+            return {
+                "status": "restarted",
+                "message": "Romestead 서버를 재시작했습니다.",
+                "container": container.name,
+            }
+
+        container.start()
+
+        return {
+            "status": "started",
+            "message": "중지되어 있던 Romestead 서버를 다시 시작했습니다.",
+            "container": container.name,
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": "Romestead 서버 재시작 중 오류가 발생했습니다.",
+            "error": str(e),
+        }
+
+
 @app.get("/api/server/status")
 def server_status(request: Request):
     require_auth(request)
@@ -1156,6 +1304,8 @@ def server_status(request: Request):
 
         for container in containers:
             if container.name == ROMESTEAD_SERVER_CONTAINER:
+                container.reload()
+
                 return {
                     "status": container.status,
                     "container": container.name,
