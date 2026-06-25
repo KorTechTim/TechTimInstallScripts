@@ -16,7 +16,7 @@ PANEL_IMAGE="ghcr.io/kortechtim/romestead-panel:latest"
   echo "======================================"
 
   apt-get update -y
-  apt-get install -y curl ca-certificates gnupg openssl apache2-utils
+  apt-get install -y curl ca-certificates gnupg openssl
 
   mkdir -p "$INSTALL_DIR"
   mkdir -p "$INSTALL_DIR/data"
@@ -74,19 +74,10 @@ PANEL_IMAGE="ghcr.io/kortechtim/romestead-panel:latest"
 
   cd "$INSTALL_DIR"
 
-  ADMIN_PASSWORD=$(openssl rand -base64 12)
-  echo "$ADMIN_PASSWORD" > "$INSTALL_DIR/admin_password.txt"
-  chmod 600 "$INSTALL_DIR/admin_password.txt"
-
-  htpasswd -bc "$INSTALL_DIR/nginx/.htpasswd" admin "$ADMIN_PASSWORD"
-
   cat > "$INSTALL_DIR/nginx/default.conf" <<'EOF'
 server {
     listen 80;
     server_name _;
-
-    auth_basic "TechTim Romestead Server Panel";
-    auth_basic_user_file /etc/nginx/.htpasswd;
 
     location / {
         proxy_pass http://romestead-panel:8080;
@@ -109,7 +100,7 @@ services:
     environment:
       - GAME_CODE=${GAME_CODE}
       - INSTALL_CODE=${INSTALL_CODE}
-      - PANEL_VERSION=0.1.5
+      - PANEL_VERSION=0.1.6
       - DATA_DIR=/data
       - HOST_DATA_DIR=${INSTALL_DIR}/data
       - STEAMCMD_IMAGE=steamcmd/steamcmd:ubuntu
@@ -133,7 +124,6 @@ services:
       - romestead-panel
     volumes:
       - ${INSTALL_DIR}/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
-      - ${INSTALL_DIR}/nginx/.htpasswd:/etc/nginx/.htpasswd:ro
 EOF
 
   echo "Pulling and starting Romestead Panel image..."
@@ -149,17 +139,18 @@ EOF
     echo "panel-image=$PANEL_IMAGE"
     echo "docker=installed"
     echo "webui=running"
-    echo "basic-auth=enabled"
-    echo "admin-username=admin"
-    echo "admin-password-file=$INSTALL_DIR/admin_password.txt"
+    echo "auth-mode=fastapi-login"
+    echo "default-username=admin"
+    echo "default-password=admin"
+    echo "first-login-password-change=required"
   } > "$INSTALL_DIR/install-status.txt"
 
   echo "======================================"
   echo "TechTim Romestead Panel Installed"
   echo "URL: http://VM_EXTERNAL_IP:8080"
-  echo "Admin Username: admin"
-  echo "Admin Password: $ADMIN_PASSWORD"
-  echo "Password file: $INSTALL_DIR/admin_password.txt"
+  echo "Default Username: admin"
+  echo "Default Password: admin"
+  echo "First login requires password change."
   echo "Status file: $INSTALL_DIR/install-status.txt"
   echo "======================================"
 
