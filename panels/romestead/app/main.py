@@ -1,9 +1,12 @@
-from fastapi import BackgroundTasks, FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse, RedirectResponse
+from pydantic import BaseModel
 from datetime import datetime
 from pathlib import Path
+import hashlib
 import json
 import os
+import secrets
 import time
 
 import docker
@@ -11,7 +14,7 @@ import docker
 app = FastAPI(title="TechTim Romestead Server Panel")
 
 GAME_CODE = os.getenv("GAME_CODE", "romestead")
-PANEL_VERSION = os.getenv("PANEL_VERSION", "0.1.5")
+PANEL_VERSION = os.getenv("PANEL_VERSION", "0.1.6")
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 HOST_DATA_DIR = Path(os.getenv("HOST_DATA_DIR", "/opt/techtim/romestead/data"))
@@ -27,12 +30,151 @@ INSTALL_REQUEST_FILE = DATA_DIR / "install-request.txt"
 INSTALL_LOG_FILE = DATA_DIR / "install.log"
 INSTALL_STATUS_FILE = DATA_DIR / "install-status.txt"
 
+AUTH_FILE = DATA_DIR / "auth.json"
+SESSIONS_FILE = DATA_DIR / "sessions.json"
+SESSION_COOKIE_NAME = "techtim_session"
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
 
 def ensure_data_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "server").mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "backups").mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "uploads").mkdir(parents=True, exist_ok=True)
+
+
+def password_hash(password: str, salt: str) -> str:
+    return hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        120_000,
+    ).hex()
+
+
+def init_auth_if_needed() -> None:
+    ensure_data_dirs()
+
+    if AUTH_FILE.exists():
+        return
+
+    salt = secrets.token_hex(16)
+    auth_data = {
+        "username": "admin",
+        "password_hash": password_hash("admin", salt),
+        "salt": salt,
+        "must_change_password": True,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+    AUTH_FILE.write_text(
+        json.dumps(auth_data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    if not SESSIONS_FILE.exists():
+        SESSIONS_FILE.write_text("{}", encoding="utf-8")
+
+
+def load_auth() -> dict:
+    init_auth_if_needed()
+    return json.loads(AUTH_FILE.read_text(encoding="utf-8"))
+
+
+def save_auth(auth_data: dict) -> None:
+    auth_data["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    AUTH_FILE.write_text(
+        json.dumps(auth_data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def verify_password(password: str, auth_data: dict) -> bool:
+    expected = auth_data.get("password_hash", "")
+    salt = auth_data.get("salt", "")
+    actual = password_hash(password, salt)
+    return secrets.compare_digest(actual, expected)
+
+
+def load_sessions() -> dict:
+    ensure_data_dirs()
+
+    if not SESSIONS_FILE.exists():
+        SESSIONS_FILE.write_text("{}", encoding="utf-8")
+
+    try:
+        return json.loads(SESSIONS_FILE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def save_sessions(sessions: dict) -> None:
+    SESSIONS_FILE.write_text(
+        json.dumps(sessions, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def create_session(username: str) -> str:
+    sessions = load_sessions()
+    token = secrets.token_urlsafe(32)
+
+    sessions[token] = {
+        "username": username,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+    save_sessions(sessions)
+    return token
+
+
+def delete_session(token: str | None) -> None:
+    if not token:
+        return
+
+    sessions = load_sessions()
+    if token in sessions:
+        del sessions[token]
+        save_sessions(sessions)
+
+
+def get_current_user(request: Request) -> str | None:
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+
+    if not token:
+        return None
+
+    sessions = load_sessions()
+    session = sessions.get(token)
+
+    if not session:
+        return None
+
+    return session.get("username")
+
+
+def require_auth(request: Request) -> str:
+    user = get_current_user(request)
+
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    return user
+
+
+def must_change_password() -> bool:
+    auth_data = load_auth()
+    return bool(auth_data.get("must_change_password", True))
 
 
 def write_log(message: str) -> None:
@@ -173,8 +315,364 @@ def install_romestead_job() -> None:
         set_status("failed")
 
 
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request):
+    init_auth_if_needed()
+
+    if get_current_user(request):
+        if must_change_password():
+            return RedirectResponse(url="/change-password", status_code=302)
+        return RedirectResponse(url="/", status_code=302)
+
+    return """
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>TechTim Romestead Login</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #f4f6f8;
+      color: #1f2937;
+    }
+    .box {
+      max-width: 420px;
+      margin: 100px auto;
+      background: #fff;
+      border-radius: 16px;
+      padding: 34px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: 28px;
+    }
+    p {
+      color: #6b7280;
+      line-height: 1.5;
+    }
+    label {
+      display: block;
+      margin-top: 18px;
+      font-size: 14px;
+      font-weight: bold;
+    }
+    input {
+      width: 100%;
+      box-sizing: border-box;
+      margin-top: 8px;
+      padding: 13px;
+      border: 1px solid #d1d5db;
+      border-radius: 10px;
+      font-size: 15px;
+    }
+    button {
+      width: 100%;
+      margin-top: 24px;
+      border: 0;
+      border-radius: 10px;
+      padding: 14px;
+      font-weight: bold;
+      cursor: pointer;
+      background: #2563eb;
+      color: white;
+      font-size: 15px;
+    }
+    .hint {
+      margin-top: 18px;
+      padding: 12px;
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      color: #374151;
+      font-size: 13px;
+    }
+    .error {
+      margin-top: 14px;
+      color: #dc2626;
+      white-space: pre-line;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>TechTim Romestead Panel</h1>
+    <p>관리자 계정으로 로그인하세요.</p>
+
+    <label>아이디</label>
+    <input id="username" type="text" value="admin" autocomplete="username">
+
+    <label>비밀번호</label>
+    <input id="password" type="password" placeholder="비밀번호" autocomplete="current-password">
+
+    <button onclick="login()">로그인</button>
+
+    <div class="hint">
+      최초 기본 계정은 <b>admin / admin</b> 입니다.<br>
+      첫 로그인 후 반드시 비밀번호를 변경해야 합니다.
+    </div>
+
+    <div id="error" class="error"></div>
+  </div>
+
+  <script>
+    async function login() {
+      const errorBox = document.getElementById("error");
+      errorBox.innerText = "";
+
+      const username = document.getElementById("username").value.trim();
+      const password = document.getElementById("password").value;
+
+      try {
+        const response = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            username,
+            password
+          })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          errorBox.innerText = data.detail || "로그인 실패";
+          return;
+        }
+
+        if (data.must_change_password) {
+          window.location.href = "/change-password";
+        } else {
+          window.location.href = "/";
+        }
+      } catch (err) {
+        errorBox.innerText = "로그인 요청 실패: " + err;
+      }
+    }
+  </script>
+</body>
+</html>
+"""
+
+
+@app.get("/change-password", response_class=HTMLResponse)
+def change_password_page(request: Request):
+    if not get_current_user(request):
+        return RedirectResponse(url="/login", status_code=302)
+
+    return """
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>Change Admin Password</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #f4f6f8;
+      color: #1f2937;
+    }
+    .box {
+      max-width: 460px;
+      margin: 90px auto;
+      background: #fff;
+      border-radius: 16px;
+      padding: 34px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: 28px;
+    }
+    p {
+      color: #6b7280;
+      line-height: 1.5;
+    }
+    label {
+      display: block;
+      margin-top: 18px;
+      font-size: 14px;
+      font-weight: bold;
+    }
+    input {
+      width: 100%;
+      box-sizing: border-box;
+      margin-top: 8px;
+      padding: 13px;
+      border: 1px solid #d1d5db;
+      border-radius: 10px;
+      font-size: 15px;
+    }
+    button {
+      width: 100%;
+      margin-top: 24px;
+      border: 0;
+      border-radius: 10px;
+      padding: 14px;
+      font-weight: bold;
+      cursor: pointer;
+      background: #2563eb;
+      color: white;
+      font-size: 15px;
+    }
+    .error {
+      margin-top: 14px;
+      color: #dc2626;
+      white-space: pre-line;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>관리자 비밀번호 변경</h1>
+    <p>최초 로그인 후에는 기본 비밀번호를 반드시 변경해야 합니다.</p>
+
+    <label>현재 비밀번호</label>
+    <input id="currentPassword" type="password" autocomplete="current-password">
+
+    <label>새 비밀번호</label>
+    <input id="newPassword" type="password" autocomplete="new-password">
+
+    <label>새 비밀번호 확인</label>
+    <input id="confirmPassword" type="password" autocomplete="new-password">
+
+    <button onclick="changePassword()">비밀번호 변경</button>
+
+    <div id="error" class="error"></div>
+  </div>
+
+  <script>
+    async function changePassword() {
+      const errorBox = document.getElementById("error");
+      errorBox.innerText = "";
+
+      const currentPassword = document.getElementById("currentPassword").value;
+      const newPassword = document.getElementById("newPassword").value;
+      const confirmPassword = document.getElementById("confirmPassword").value;
+
+      if (!currentPassword || !newPassword || !confirmPassword) {
+        errorBox.innerText = "모든 항목을 입력해주세요.";
+        return;
+      }
+
+      if (newPassword !== confirmPassword) {
+        errorBox.innerText = "새 비밀번호와 확인 값이 일치하지 않습니다.";
+        return;
+      }
+
+      if (newPassword.length < 4) {
+        errorBox.innerText = "새 비밀번호는 최소 4자 이상으로 입력해주세요.";
+        return;
+      }
+
+      try {
+        const response = await fetch("/api/auth/change-password", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            current_password: currentPassword,
+            new_password: newPassword
+          })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          errorBox.innerText = data.detail || "비밀번호 변경 실패";
+          return;
+        }
+
+        window.location.href = "/";
+      } catch (err) {
+        errorBox.innerText = "비밀번호 변경 요청 실패: " + err;
+      }
+    }
+  </script>
+</body>
+</html>
+"""
+
+
+@app.post("/api/auth/login")
+def api_login(payload: LoginRequest, response: Response):
+    auth_data = load_auth()
+
+    if payload.username != auth_data.get("username"):
+        raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 올바르지 않습니다.")
+
+    if not verify_password(payload.password, auth_data):
+        raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 올바르지 않습니다.")
+
+    token = create_session(payload.username)
+
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=60 * 60 * 24 * 30,
+    )
+
+    return {
+        "status": "ok",
+        "must_change_password": bool(auth_data.get("must_change_password", True)),
+    }
+
+
+@app.post("/api/auth/change-password")
+def api_change_password(payload: ChangePasswordRequest, request: Request):
+    require_auth(request)
+
+    auth_data = load_auth()
+
+    if not verify_password(payload.current_password, auth_data):
+        raise HTTPException(status_code=400, detail="현재 비밀번호가 올바르지 않습니다.")
+
+    if len(payload.new_password) < 4:
+        raise HTTPException(status_code=400, detail="새 비밀번호는 최소 4자 이상이어야 합니다.")
+
+    salt = secrets.token_hex(16)
+    auth_data["salt"] = salt
+    auth_data["password_hash"] = password_hash(payload.new_password, salt)
+    auth_data["must_change_password"] = False
+
+    save_auth(auth_data)
+
+    return {
+        "status": "ok",
+        "message": "비밀번호가 변경되었습니다.",
+    }
+
+
+@app.post("/api/auth/logout")
+def api_logout(request: Request, response: Response):
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    delete_session(token)
+    response.delete_cookie(SESSION_COOKIE_NAME)
+
+    return {
+        "status": "ok",
+        "message": "로그아웃되었습니다.",
+    }
+
+
 @app.get("/", response_class=HTMLResponse)
-def dashboard():
+def dashboard(request: Request):
+    if not get_current_user(request):
+        return RedirectResponse(url="/login", status_code=302)
+
+    if must_change_password():
+        return RedirectResponse(url="/change-password", status_code=302)
+
     html = """
 <!doctype html>
 <html lang="ko">
@@ -258,6 +756,10 @@ def dashboard():
       background: #e5e7eb;
       color: #1f2937;
     }
+    button.danger {
+      background: #dc2626;
+      color: white;
+    }
     button:disabled {
       opacity: 0.6;
       cursor: not-allowed;
@@ -328,6 +830,7 @@ def dashboard():
       <button class="secondary" onclick="loadServerLog()">서버 로그 보기</button>
       <button class="secondary">세이브 관리</button>
       <button class="secondary" onclick="loadLog()">설치 로그 새로고침</button>
+      <button class="danger" onclick="logout()">로그아웃</button>
     </div>
 
     <div id="result" class="result">
@@ -468,6 +971,18 @@ def dashboard():
       }
     }
 
+    async function logout() {
+      try {
+        await fetch("/api/auth/logout", {
+          method: "POST"
+        });
+      } catch (err) {
+        // ignore
+      }
+
+      window.location.href = "/login";
+    }
+
     setInterval(loadStatus, 2000);
     setInterval(refreshCurrentLog, 2000);
 
@@ -481,7 +996,9 @@ def dashboard():
 
 
 @app.post("/api/install")
-def request_install(background_tasks: BackgroundTasks):
+def request_install(request: Request, background_tasks: BackgroundTasks):
+    require_auth(request)
+
     current_status = get_status()
 
     if current_status == "running":
@@ -499,14 +1016,17 @@ def request_install(background_tasks: BackgroundTasks):
 
 
 @app.get("/api/install/status")
-def install_status():
+def install_status(request: Request):
+    require_auth(request)
     return {
         "status": get_status(),
     }
 
 
 @app.get("/api/install/log")
-def install_log():
+def install_log(request: Request):
+    require_auth(request)
+
     if not INSTALL_LOG_FILE.exists():
         return {
             "status": "empty",
@@ -520,7 +1040,9 @@ def install_log():
 
 
 @app.get("/api/docker/status")
-def docker_status():
+def docker_status(request: Request):
+    require_auth(request)
+
     try:
         client = docker.from_env()
         containers = client.containers.list(all=True)
@@ -547,7 +1069,9 @@ def docker_status():
 
 
 @app.post("/api/server/start")
-def start_server():
+def start_server(request: Request):
+    require_auth(request)
+
     try:
         server_dir = DATA_DIR / "server"
         host_server_dir = HOST_DATA_DIR / "server"
@@ -619,7 +1143,9 @@ def start_server():
 
 
 @app.get("/api/server/status")
-def server_status():
+def server_status(request: Request):
+    require_auth(request)
+
     try:
         client = docker.from_env()
 
@@ -649,7 +1175,9 @@ def server_status():
 
 
 @app.get("/api/server/log")
-def server_log():
+def server_log(request: Request):
+    require_auth(request)
+
     try:
         client = docker.from_env()
         container = client.containers.get(ROMESTEAD_SERVER_CONTAINER)
