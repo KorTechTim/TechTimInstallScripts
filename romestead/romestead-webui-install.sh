@@ -75,9 +75,23 @@ PANEL_IMAGE="ghcr.io/kortechtim/romestead-panel:latest"
   cd "$INSTALL_DIR"
 
   cat > "$INSTALL_DIR/nginx/default.conf" <<'EOF'
-server {
-    listen 80;
-    server_name _;
+  server {
+      listen 80;
+      server_name _;
+  
+      client_max_body_size 4096M;
+  
+      location / {
+          proxy_pass http://romestead-panel:8080;
+          proxy_http_version 1.1;
+  
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+      }
+  }
+  EOF
 
     location / {
         proxy_pass http://romestead-panel:8080;
