@@ -343,10 +343,28 @@ def dashboard():
   </div>
 
   <script>
+    let currentLogMode = "install";
+
+    function getLogBox() {
+      return document.getElementById("installLog");
+    }
+
+    function scrollLogToBottom() {
+      const logBox = getLogBox();
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function setLogText(text) {
+      const logBox = getLogBox();
+      logBox.innerText = text || "로그가 없습니다.";
+      scrollLogToBottom();
+    }
+
     async function requestInstall() {
       const btn = document.getElementById("installBtn");
       const result = document.getElementById("result");
 
+      currentLogMode = "install";
       btn.disabled = true;
       result.innerText = "Romestead 엔진 설치 작업을 시작하는 중입니다...";
 
@@ -395,6 +413,7 @@ def dashboard():
           (data.port ? "포트: " + data.port + "\\n" : "") +
           (data.container ? "컨테이너: " + data.container : "");
 
+        currentLogMode = "server";
         await loadServerLog();
 
       } catch (err) {
@@ -403,16 +422,15 @@ def dashboard():
     }
 
     async function loadServerLog() {
+      currentLogMode = "server";
+
       try {
         const response = await fetch("/api/server/log");
         const data = await response.json();
 
-        document.getElementById("installLog").innerText =
-          data.log || data.error || "서버 로그가 없습니다.";
-
+        setLogText(data.log || data.error || "서버 로그가 없습니다.");
       } catch (err) {
-        document.getElementById("installLog").innerText =
-          "서버 로그 조회 실패: " + err;
+        setLogText("서버 로그 조회 실패: " + err);
       }
     }
 
@@ -427,17 +445,31 @@ def dashboard():
     }
 
     async function loadLog() {
+      currentLogMode = "install";
+      await loadInstallLogOnly();
+    }
+
+    async function loadInstallLogOnly() {
       try {
         const response = await fetch("/api/install/log");
         const data = await response.json();
-        document.getElementById("installLog").innerText = data.log || "로그가 없습니다.";
+
+        setLogText(data.log || "로그가 없습니다.");
       } catch (err) {
-        document.getElementById("installLog").innerText = "로그 조회 실패: " + err;
+        setLogText("로그 조회 실패: " + err);
+      }
+    }
+
+    async function refreshCurrentLog() {
+      if (currentLogMode === "server") {
+        await loadServerLog();
+      } else {
+        await loadInstallLogOnly();
       }
     }
 
     setInterval(loadStatus, 2000);
-    setInterval(loadLog, 2000);
+    setInterval(refreshCurrentLog, 2000);
 
     loadStatus();
     loadLog();
