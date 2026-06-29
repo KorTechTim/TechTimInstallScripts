@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 LOG_FILE="/var/log/techtim-romestead-install.log"
 INSTALL_DIR="/opt/techtim/romestead"
@@ -8,90 +8,95 @@ METADATA_URL="http://metadata.google.internal/computeMetadata/v1/instance/attrib
 GAME_CODE="romestead"
 VERIFY_API="https://techtim.kr/api/install/verify"
 PANEL_IMAGE="ghcr.io/kortechtim/romestead-panel:latest"
+PANEL_VERSION="0.2.0"
 
-{
-  echo "======================================"
-  echo "TechTim Romestead Panel Install"
-  echo "Started at: $(date)"
-  echo "======================================"
+exec > >(tee -a "$LOG_FILE") 2>&1
 
-  apt-get update -y
-  apt-get install -y curl ca-certificates gnupg openssl
-
+write_status() {
   mkdir -p "$INSTALL_DIR"
-  mkdir -p "$INSTALL_DIR/data"
-  mkdir -p "$INSTALL_DIR/backups"
-  mkdir -p "$INSTALL_DIR/uploads"
-  mkdir -p "$INSTALL_DIR/nginx"
+  {
+    for line in "$@"; do
+      echo "$line"
+    done
+  } > "$INSTALL_DIR/install-status.txt"
+}
 
-  echo "Reading install-code from GCP metadata..."
+mask_code() {
+  local code="$1"
+  local len=${#code}
 
-  INSTALL_CODE=$(curl -s -H "Metadata-Flavor: Google" "$METADATA_URL" || true)
-
-  if [ -z "$INSTALL_CODE" ]; then
-    echo "ERROR: install-code metadata is missing."
-    echo "ERROR: install-code metadata is missing." > "$INSTALL_DIR/install-status.txt"
-    exit 1
+  if [ "$len" -le 8 ]; then
+    echo "********"
+    return
   fi
 
-  echo "install-code metadata found."
-  echo "Game code: $GAME_CODE"
-  echo "Install code: $INSTALL_CODE"
+  echo "${code:0:4}...${code: -4}"
+}
 
-  echo "Verifying install-code with TechTim API..."
+echo "======================================"
+echo "TechTim Romestead Panel Install"
+echo "Started at: $(date)"
+echo "======================================"
 
-  VERIFY_RESULT=$(curl -fsSL "${VERIFY_API}?game=${GAME_CODE}&code=${INSTALL_CODE}" || true)
+apt-get update -y
+apt-get install -y curl ca-certificates gnupg
 
-  if [ "$VERIFY_RESULT" != "OK" ]; then
-    echo "ERROR: Invalid install code."
-    echo "VERIFY_RESULT=$VERIFY_RESULT"
-    echo "ERROR: Invalid install code." > "$INSTALL_DIR/install-status.txt"
-    exit 1
-  fi
+mkdir -p "$INSTALL_DIR/data" "$INSTALL_DIR/backups" "$INSTALL_DIR/uploads" "$INSTALL_DIR/nginx"
 
-  echo "Install code verified by TechTim API."
+echo "Reading install-code from GCP metadata..."
+INSTALL_CODE=$(curl -fsS -H "Metadata-Flavor: Google" "$METADATA_URL" || true)
 
-  echo "Installing Docker..."
+if [ -z "$INSTALL_CODE" ]; then
+  echo "ERROR: install-code metadata is missing."
+  write_status \
+    "verify-result=missing-install-code" \
+    "webui=not-started"
+  exit 1
+fi
 
-  install -m 0755 -d /etc/apt/keyrings
+echo "install-code metadata found: $(mask_code "$INSTALL_CODE")"
+echo "Game code: $GAME_CODE"
+echo "Verifying install-code with TechTim API..."
 
-  if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-      | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-    chmod a+r /etc/apt/keyrings/docker.gpg
-  fi
+VERIFY_RESULT=$(curl -fsSL "${VERIFY_API}?game=${GAME_CODE}&code=${INSTALL_CODE}" || true)
 
-  echo \
-    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-    https://download.docker.com/linux/ubuntu \
-    $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
-    > /etc/apt/sources.list.d/docker.list
+if [ "$VERIFY_RESULT" != "OK" ]; then
+  echo "ERROR: Invalid install code."
+  echo "VERIFY_RESULT=$VERIFY_RESULT"
+  write_status \
+    "verify-result=${VERIFY_RESULT:-DENY}" \
+    "webui=not-started"
+  exit 1
+fi
 
-  apt-get update -y
-  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+echo "Install code verified by TechTim API."
+echo "Installing Docker..."
 
-  echo "Docker installed."
+install -m 0755 -d /etc/apt/keyrings
 
-  cd "$INSTALL_DIR"
+if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+    | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  chmod a+r /etc/apt/keyrings/docker.gpg
+fi
 
-  cat > "$INSTALL_DIR/nginx/default.conf" <<'EOF'
-  server {
-      listen 80;
-      server_name _;
-  
-      client_max_body_size 4096M;
-  
-      location / {
-          proxy_pass http://romestead-panel:8080;
-          proxy_http_version 1.1;
-  
-          proxy_set_header Host $host;
-          proxy_set_header X-Real-IP $remote_addr;
-          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          proxy_set_header X-Forwarded-Proto $scheme;
-      }
-  }
-  EOF
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  > /etc/apt/sources.list.d/docker.list
+
+apt-get update -y
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+systemctl enable --now docker
+
+echo "Docker installed."
+cd "$INSTALL_DIR"
+
+cat > "$INSTALL_DIR/nginx/default.conf" <<'NGINX_CONF'
+server {
+    listen 80;
+    server_name _;
+
+    client_max_body_size 4096M;
 
     location / {
         proxy_pass http://romestead-panel:8080;
@@ -103,9 +108,9 @@ PANEL_IMAGE="ghcr.io/kortechtim/romestead-panel:latest"
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
-EOF
+NGINX_CONF
 
-  cat > docker-compose.yml <<EOF
+cat > docker-compose.yml <<COMPOSE
 services:
   romestead-panel:
     image: ${PANEL_IMAGE}
@@ -114,7 +119,7 @@ services:
     environment:
       - GAME_CODE=${GAME_CODE}
       - INSTALL_CODE=${INSTALL_CODE}
-      - PANEL_VERSION=0.1.7
+      - PANEL_VERSION=${PANEL_VERSION}
       - DATA_DIR=/data
       - HOST_DATA_DIR=${INSTALL_DIR}/data
       - STEAMCMD_IMAGE=steamcmd/steamcmd:ubuntu
@@ -138,35 +143,28 @@ services:
       - romestead-panel
     volumes:
       - ${INSTALL_DIR}/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
-EOF
+COMPOSE
 
-  echo "Pulling and starting Romestead Panel image..."
-  docker compose pull
-  docker compose up -d --remove-orphans
+echo "Pulling and starting Romestead Panel image..."
+docker compose pull
+docker compose up -d --remove-orphans
 
-  {
-    echo "Romestead Web UI startup script executed successfully."
-    echo "game-code=$GAME_CODE"
-    echo "install-code=$INSTALL_CODE"
-    echo "verify-api=$VERIFY_API"
-    echo "verify-result=OK"
-    echo "panel-image=$PANEL_IMAGE"
-    echo "docker=installed"
-    echo "webui=running"
-    echo "auth-mode=fastapi-login"
-    echo "default-username=admin"
-    echo "default-password=admin"
-    echo "first-login-password-change=required"
-  } > "$INSTALL_DIR/install-status.txt"
+write_status \
+  "verify-result=OK" \
+  "panel-image=$PANEL_IMAGE" \
+  "docker=installed" \
+  "webui=running" \
+  "auth-mode=fastapi-login" \
+  "default-username=admin" \
+  "default-password=admin" \
+  "first-login-password-change=required"
 
-  echo "======================================"
-  echo "TechTim Romestead Panel Installed"
-  echo "URL: http://VM_EXTERNAL_IP:8080"
-  echo "Default Username: admin"
-  echo "Default Password: admin"
-  echo "First login requires password change."
-  echo "Status file: $INSTALL_DIR/install-status.txt"
-  echo "======================================"
-
-  echo "Completed at: $(date)"
-} | tee -a "$LOG_FILE"
+echo "======================================"
+echo "TechTim Romestead Panel Installed"
+echo "URL: http://VM_EXTERNAL_IP:8080"
+echo "Default Username: admin"
+echo "Default Password: admin"
+echo "First login requires password change."
+echo "Status file: $INSTALL_DIR/install-status.txt"
+echo "======================================"
+echo "Completed at: $(date)"

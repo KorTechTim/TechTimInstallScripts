@@ -16,7 +16,7 @@ import docker
 app = FastAPI(title="TechTim Romestead Server Panel")
 
 GAME_CODE = os.getenv("GAME_CODE", "romestead")
-PANEL_VERSION = os.getenv("PANEL_VERSION", "0.1.8")
+PANEL_VERSION = os.getenv("PANEL_VERSION", "0.2.0")
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 HOST_DATA_DIR = Path(os.getenv("HOST_DATA_DIR", "/opt/techtim/romestead/data"))
@@ -48,6 +48,16 @@ class LoginRequest(BaseModel):
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str
+
+
+class ConfigRequest(BaseModel):
+    AutoStartWorldName: str = "world"
+    AutoCreateAndLoadWorld: bool = True
+    AutoCreateWorldSize: int = 1
+    Password: str = ""
+    Port: int = SERVER_PORT
+    MaxPlayers: int = 10
+    EnableCheats: bool = False
 
 
 def ensure_data_dirs() -> None:
@@ -205,13 +215,12 @@ def get_status() -> str:
     return INSTALL_STATUS_FILE.read_text(encoding="utf-8").strip()
 
 
-def create_default_config() -> Path:
-    server_dir = DATA_DIR / "server"
-    server_dir.mkdir(parents=True, exist_ok=True)
+def get_config_path() -> Path:
+    return DATA_DIR / "server" / "config.json"
 
-    config_path = server_dir / "config.json"
 
-    default_config = {
+def default_config() -> dict:
+    return {
         "AutoStartWorldName": "world",
         "AutoCreateAndLoadWorld": True,
         "AutoCreateWorldSize": 1,
@@ -221,12 +230,70 @@ def create_default_config() -> Path:
         "EnableCheats": False,
     }
 
+
+def normalize_config(config: dict) -> dict:
+    merged = default_config()
+    merged.update(config)
+
+    merged["AutoStartWorldName"] = str(merged.get("AutoStartWorldName") or "world").strip() or "world"
+    merged["AutoCreateAndLoadWorld"] = bool(merged.get("AutoCreateAndLoadWorld"))
+    merged["AutoCreateWorldSize"] = max(1, min(5, int(merged.get("AutoCreateWorldSize") or 1)))
+    merged["Password"] = str(merged.get("Password") or "")
+    merged["Port"] = max(1, min(65535, int(merged.get("Port") or SERVER_PORT)))
+    merged["MaxPlayers"] = max(1, min(100, int(merged.get("MaxPlayers") or 10)))
+    merged["EnableCheats"] = bool(merged.get("EnableCheats"))
+
+    return merged
+
+
+def read_config() -> dict:
+    config_path = get_config_path()
+
+    if not config_path.exists():
+        return default_config()
+
+    try:
+        return normalize_config(json.loads(config_path.read_text(encoding="utf-8")))
+    except (json.JSONDecodeError, OSError, ValueError):
+        return default_config()
+
+
+def write_config(config: dict) -> Path:
+    server_dir = DATA_DIR / "server"
+    server_dir.mkdir(parents=True, exist_ok=True)
+
+    config_path = get_config_path()
+    normalized = normalize_config(config)
+
     config_path.write_text(
-        json.dumps(default_config, indent=2, ensure_ascii=False),
+        json.dumps(normalized, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
 
     return config_path
+
+
+def create_default_config() -> Path:
+    config_path = get_config_path()
+
+    if config_path.exists():
+        return config_path
+
+    return write_config(default_config())
+
+
+def safe_extract_zip(zip_path: Path, target_dir: Path) -> None:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_root = target_dir.resolve()
+
+    with zipfile.ZipFile(zip_path, "r") as zip_ref:
+        for member in zip_ref.namelist():
+            member_path = (target_dir / member).resolve()
+
+            if member_path != target_root and not str(member_path).startswith(str(target_root) + os.sep):
+                raise ValueError("ZIP 파일에 허용되지 않는 경로가 포함되어 있습니다.")
+
+        zip_ref.extractall(target_dir)
 
 
 def install_romestead_job() -> None:
@@ -301,10 +368,10 @@ def install_romestead_job() -> None:
             set_status("failed")
             return
 
-        installed_files = list(server_dir.glob("*"))
+        server_dll = server_dir / "Server.dll"
 
-        if not installed_files:
-            write_log("ERROR: 설치 명령은 종료되었지만 /data/server 폴더가 비어 있습니다.")
+        if not server_dll.exists():
+            write_log("ERROR: 설치 명령은 종료되었지만 Server.dll 파일을 찾을 수 없습니다.")
             set_status("failed")
             return
 
@@ -319,7 +386,7 @@ def install_romestead_job() -> None:
         )
 
         write_log("Romestead Dedicated Server 파일 다운로드가 완료되었습니다.")
-        write_log("다음 단계에서 config.json 생성 및 서버 실행 기능을 연결합니다.")
+        write_log("이제 Web GUI에서 config.json을 저장하고 서버를 시작할 수 있습니다.")
         set_status("completed")
 
     except Exception as e:
@@ -581,15 +648,22 @@ def dashboard(request: Request):
   <title>TechTim Romestead Server Panel</title>
   <style>
     body { margin: 0; font-family: Arial, sans-serif; background: #f4f6f8; color: #1f2937; }
-    .wrap { max-width: 1080px; margin: 50px auto; background: #ffffff; border-radius: 16px; padding: 40px; box-shadow: 0 10px 30px rgba(0,0,0,0.08); }
+    .wrap { max-width: 1180px; margin: 40px auto; background: #ffffff; border-radius: 16px; padding: 40px; box-shadow: 0 10px 30px rgba(0,0,0,0.08); }
     .badge { display: inline-block; padding: 6px 12px; border-radius: 999px; background: #e0f2fe; color: #0369a1; font-size: 14px; font-weight: bold; }
     h1 { margin-top: 20px; font-size: 34px; }
     .status { margin-top: 24px; padding: 20px; background: #ecfdf5; border: 1px solid #bbf7d0; border-radius: 12px; color: #166534; font-weight: bold; }
-    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 24px; }
+    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 24px; }
     .card { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 12px; padding: 18px; }
     .label { font-size: 13px; color: #6b7280; margin-bottom: 8px; }
     .value { font-size: 20px; font-weight: bold; }
     .actions { margin-top: 30px; display: flex; gap: 12px; flex-wrap: wrap; }
+    .config { margin-top: 24px; padding: 20px; border: 1px solid #e5e7eb; border-radius: 12px; background: #ffffff; }
+    .config h2 { margin: 0 0 16px; font-size: 22px; }
+    .config-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+    label { display: block; font-size: 13px; font-weight: bold; color: #374151; }
+    input, select { width: 100%; box-sizing: border-box; margin-top: 8px; padding: 11px; border: 1px solid #d1d5db; border-radius: 10px; font-size: 14px; }
+    .checkline { display: flex; align-items: center; gap: 10px; margin-top: 28px; }
+    .checkline input { width: auto; margin: 0; }
     button { border: 0; border-radius: 10px; padding: 14px 20px; font-weight: bold; cursor: pointer; background: #2563eb; color: white; }
     button.secondary { background: #e5e7eb; color: #1f2937; }
     button.danger { background: #dc2626; color: white; }
@@ -598,6 +672,11 @@ def dashboard(request: Request):
     .log { margin-top: 24px; background: #111827; color: #d1d5db; border-radius: 12px; padding: 18px; min-height: 280px; max-height: 460px; overflow: auto; font-family: Consolas, Monaco, monospace; font-size: 13px; white-space: pre-wrap; }
     .note { margin-top: 28px; color: #6b7280; line-height: 1.6; }
     code { background: #f3f4f6; padding: 2px 6px; border-radius: 6px; }
+    @media (max-width: 900px) {
+      .wrap { margin: 0; border-radius: 0; padding: 20px; }
+      .grid, .config-grid { grid-template-columns: 1fr; }
+      button { width: 100%; }
+    }
   </style>
 </head>
 <body>
@@ -620,6 +699,10 @@ def dashboard(request: Request):
         <div id="installStatus" class="value">확인 중</div>
       </div>
       <div class="card">
+        <div class="label">서버 상태</div>
+        <div id="serverStatus" class="value">확인 중</div>
+      </div>
+      <div class="card">
         <div class="label">패널 버전</div>
         <div class="value">__PANEL_VERSION__</div>
       </div>
@@ -631,11 +714,43 @@ def dashboard(request: Request):
       <button class="secondary" onclick="stopServer()">서버 중지</button>
       <button class="secondary" onclick="restartServer()">서버 재시작</button>
       <button class="secondary" onclick="loadServerLog()">서버 로그 보기</button>
+      <button class="secondary" onclick="loadLog()">설치 로그 보기</button>
       <button class="secondary" onclick="downloadSaves()">세이브 다운로드</button>
       <button class="secondary" onclick="triggerSaveUpload()">세이브 업로드</button>
       <input id="saveUploadInput" type="file" accept=".zip" onchange="uploadSaves()" style="display:none">
-      <button class="secondary" onclick="loadLog()">설치 로그 새로고침</button>
       <button class="danger" onclick="logout()">로그아웃</button>
+    </div>
+
+    <div class="config">
+      <h2>서버 설정</h2>
+      <div class="config-grid">
+        <label>월드 이름
+          <input id="cfgWorldName" type="text">
+        </label>
+        <label>월드 크기
+          <input id="cfgWorldSize" type="number" min="1" max="5" step="1">
+        </label>
+        <label>서버 비밀번호
+          <input id="cfgPassword" type="text">
+        </label>
+        <label>서버 포트
+          <input id="cfgPort" type="number" min="1" max="65535" step="1">
+        </label>
+        <label>최대 인원
+          <input id="cfgMaxPlayers" type="number" min="1" max="100" step="1">
+        </label>
+        <label class="checkline">
+          <input id="cfgAutoCreate" type="checkbox">
+          자동 월드 생성
+        </label>
+        <label class="checkline">
+          <input id="cfgCheats" type="checkbox">
+          치트 허용
+        </label>
+        <div>
+          <button onclick="saveConfig()">설정 저장</button>
+        </div>
+      </div>
     </div>
 
     <div id="result" class="result">
@@ -646,7 +761,7 @@ def dashboard(request: Request):
 
     <div class="note">
       설치 완료 후 서버 파일은 <code>/data/server</code> 경로에 저장됩니다.<br>
-      서버 시작 버튼은 <code>config.json</code>을 생성한 뒤 <code>dotnet Server.dll</code> 컨테이너를 실행합니다.<br>
+      서버 시작 버튼은 <code>config.json</code>이 없을 때만 기본값을 만들고, 기존 설정은 덮어쓰지 않습니다.<br>
       세이브 다운로드/업로드는 <code>/data/server/saved_worlds</code> 경로를 기준으로 처리합니다.
     </div>
   </div>
@@ -723,6 +838,7 @@ def dashboard(request: Request):
           (data.container ? "컨테이너: " + data.container : "");
 
         currentLogMode = "server";
+        await loadServerStatus();
         await loadServerLog();
 
       } catch (err) {
@@ -749,6 +865,7 @@ def dashboard(request: Request):
           (data.container ? "컨테이너: " + data.container : "");
 
         currentLogMode = "server";
+        await loadServerStatus();
         await loadServerLog();
 
       } catch (err) {
@@ -775,6 +892,7 @@ def dashboard(request: Request):
           (data.container ? "컨테이너: " + data.container : "");
 
         currentLogMode = "server";
+        await loadServerStatus();
         await loadServerLog();
 
       } catch (err) {
@@ -830,6 +948,63 @@ def dashboard(request: Request):
       }
     }
 
+    function fillConfig(config) {
+      document.getElementById("cfgWorldName").value = config.AutoStartWorldName || "world";
+      document.getElementById("cfgWorldSize").value = config.AutoCreateWorldSize || 1;
+      document.getElementById("cfgPassword").value = config.Password || "";
+      document.getElementById("cfgPort").value = config.Port || 8050;
+      document.getElementById("cfgMaxPlayers").value = config.MaxPlayers || 10;
+      document.getElementById("cfgAutoCreate").checked = Boolean(config.AutoCreateAndLoadWorld);
+      document.getElementById("cfgCheats").checked = Boolean(config.EnableCheats);
+    }
+
+    function readConfigForm() {
+      return {
+        AutoStartWorldName: document.getElementById("cfgWorldName").value.trim() || "world",
+        AutoCreateAndLoadWorld: document.getElementById("cfgAutoCreate").checked,
+        AutoCreateWorldSize: Number(document.getElementById("cfgWorldSize").value || 1),
+        Password: document.getElementById("cfgPassword").value,
+        Port: Number(document.getElementById("cfgPort").value || 8050),
+        MaxPlayers: Number(document.getElementById("cfgMaxPlayers").value || 10),
+        EnableCheats: document.getElementById("cfgCheats").checked
+      };
+    }
+
+    async function loadConfig() {
+      try {
+        const response = await fetch("/api/config");
+        const data = await response.json();
+        fillConfig(data.config || {});
+      } catch (err) {
+        document.getElementById("result").innerText = "설정 불러오기 실패: " + err;
+      }
+    }
+
+    async function saveConfig() {
+      const result = document.getElementById("result");
+      result.innerText = "서버 설정을 저장하는 중입니다...";
+
+      try {
+        const response = await fetch("/api/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(readConfigForm())
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          result.innerText = "설정 저장 실패: " + (data.detail || data.error || "알 수 없는 오류");
+          return;
+        }
+
+        fillConfig(data.config || {});
+        result.innerText = "설정 저장 완료\\n저장 위치: " + data.path;
+      } catch (err) {
+        result.innerText = "설정 저장 실패: " + err;
+      }
+    }
+
     async function loadServerLog() {
       currentLogMode = "server";
 
@@ -840,6 +1015,16 @@ def dashboard(request: Request):
         setLogText(data.log || data.error || "서버 로그가 없습니다.");
       } catch (err) {
         setLogText("서버 로그 조회 실패: " + err);
+      }
+    }
+
+    async function loadServerStatus() {
+      try {
+        const response = await fetch("/api/server/status");
+        const data = await response.json();
+        document.getElementById("serverStatus").innerText = data.status || "error";
+      } catch (err) {
+        document.getElementById("serverStatus").innerText = "error";
       }
     }
 
@@ -890,9 +1075,12 @@ def dashboard(request: Request):
     }
 
     setInterval(loadStatus, 2000);
+    setInterval(loadServerStatus, 2000);
     setInterval(refreshCurrentLog, 2000);
 
     loadStatus();
+    loadServerStatus();
+    loadConfig();
     loadLog();
   </script>
 </body>
@@ -975,6 +1163,40 @@ def docker_status(request: Request):
         }
 
 
+@app.get("/api/config")
+def get_config(request: Request):
+    require_auth(request)
+
+    return {
+        "status": "ok",
+        "path": str(get_config_path()),
+        "exists": get_config_path().exists(),
+        "config": read_config(),
+    }
+
+
+@app.post("/api/config")
+def save_config(payload: ConfigRequest, request: Request):
+    require_auth(request)
+
+    try:
+        payload_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+        config = normalize_config(payload_data)
+        config_path = write_config(config)
+
+        return {
+            "status": "ok",
+            "message": "config.json 저장 완료",
+            "path": str(config_path),
+            "config": config,
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"config.json 저장 중 오류가 발생했습니다: {e}",
+        )
+
+
 @app.post("/api/server/start")
 def start_server(request: Request):
     require_auth(request)
@@ -998,6 +1220,8 @@ def start_server(request: Request):
             }
 
         config_path = create_default_config()
+        server_config = read_config()
+        effective_server_port = int(server_config.get("Port", SERVER_PORT))
         client = docker.from_env()
 
         existing = client.containers.list(
@@ -1033,7 +1257,7 @@ def start_server(request: Request):
                 }
             },
             ports={
-                f"{SERVER_PORT}/udp": SERVER_PORT,
+                f"{effective_server_port}/udp": effective_server_port,
             },
         )
 
@@ -1042,7 +1266,7 @@ def start_server(request: Request):
             "message": "Romestead 서버 컨테이너를 시작했습니다.",
             "container": container.name,
             "config": str(config_path),
-            "port": f"{SERVER_PORT}/udp",
+            "port": f"{effective_server_port}/udp",
         }
 
     except Exception as e:
@@ -1237,15 +1461,21 @@ async def upload_saves(request: Request, file: UploadFile = File(...)):
         SAVED_WORLDS_DIR.mkdir(parents=True, exist_ok=True)
         SAVE_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
-        filename = file.filename or f"uploaded-saves-{int(time.time())}.zip"
+        filename = Path(file.filename or f"uploaded-saves-{int(time.time())}.zip").name
         upload_path = SAVE_EXPORT_DIR / filename
 
         with upload_path.open("wb") as buffer:
             content = await file.read()
             buffer.write(content)
 
-        with zipfile.ZipFile(upload_path, "r") as zip_ref:
-            zip_ref.extractall(SAVED_WORLDS_DIR)
+        if not zipfile.is_zipfile(upload_path):
+            return {
+                "status": "error",
+                "message": "ZIP 파일만 업로드할 수 있습니다.",
+                "filename": filename,
+            }
+
+        safe_extract_zip(upload_path, SAVED_WORLDS_DIR)
 
         return {
             "status": "ok",
