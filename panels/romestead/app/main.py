@@ -331,39 +331,69 @@ def install_romestead_job() -> None:
             "+quit",
         ]
 
-        container_name = f"romestead-steamcmd-install-{int(time.time())}"
+        max_attempts = 3
+        exit_code = -1
 
-        container = client.containers.run(
-            STEAMCMD_IMAGE,
-            command=steamcmd_command,
-            name=container_name,
-            detach=True,
-            remove=False,
-            volumes={
-                str(host_server_dir): {
-                    "bind": "/server",
-                    "mode": "rw",
-                }
-            },
-        )
+        for attempt in range(1, max_attempts + 1):
+            container = None
+            missing_configuration = False
+            container_name = f"romestead-steamcmd-install-{int(time.time())}-{attempt}"
 
-        for line in container.logs(stream=True, stdout=True, stderr=True, follow=True):
-            text = line.decode("utf-8", errors="replace").rstrip()
+            write_log(f"SteamCMD 설치 시도 {attempt}/{max_attempts}")
 
-            if text:
-                write_log(f"[steamcmd] {text}")
+            try:
+                container = client.containers.run(
+                    STEAMCMD_IMAGE,
+                    command=steamcmd_command,
+                    name=container_name,
+                    detach=True,
+                    remove=False,
+                    volumes={
+                        str(host_server_dir): {
+                            "bind": "/server",
+                            "mode": "rw",
+                        }
+                    },
+                )
 
-        result = container.wait()
-        exit_code = result.get("StatusCode", -1)
+                for line in container.logs(stream=True, stdout=True, stderr=True, follow=True):
+                    text = line.decode("utf-8", errors="replace").rstrip()
 
-        try:
-            container.remove(force=True)
-        except Exception as remove_error:
-            write_log(f"SteamCMD 설치 컨테이너 삭제 중 경고: {remove_error}")
+                    if "Missing configuration" in text:
+                        missing_configuration = True
+
+                    if text:
+                        write_log(f"[steamcmd] {text}")
+
+                result = container.wait()
+                exit_code = result.get("StatusCode", -1)
+
+            except Exception as attempt_error:
+                exit_code = -1
+                write_log(f"SteamCMD 설치 시도 중 오류 발생: {attempt_error}")
+
+            finally:
+                if container is not None:
+                    try:
+                        container.remove(force=True)
+                    except Exception as remove_error:
+                        write_log(f"SteamCMD 설치 컨테이너 삭제 중 경고: {remove_error}")
+
+            if exit_code == 0:
+                write_log(f"SteamCMD 설치 시도 {attempt}/{max_attempts} 성공")
+                break
+
+            write_log(f"WARNING: SteamCMD 설치 시도 {attempt}/{max_attempts} 실패. exit_code={exit_code}")
+
+            if missing_configuration:
+                write_log("Steam 서버에서 설치 정보를 일시적으로 받지 못했습니다. 잠시 후 자동 재시도합니다.")
+
+            if attempt < max_attempts:
+                time.sleep(20)
 
         if exit_code != 0:
-            write_log(f"ERROR: SteamCMD 설치 컨테이너가 비정상 종료되었습니다. exit_code={exit_code}")
-            write_log("App ID, anonymous 설치 지원 여부, 네트워크 상태를 확인해주세요.")
+            write_log(f"ERROR: SteamCMD 설치가 {max_attempts}회 모두 실패했습니다. 마지막 exit_code={exit_code}")
+            write_log("App ID, anonymous 설치 지원 여부, Steam 서버 상태, 네트워크 상태를 확인해주세요.")
             set_status("failed")
             return
 
@@ -646,7 +676,11 @@ def dashboard(request: Request):
   <style>
     body { margin: 0; font-family: Arial, sans-serif; background: #f4f6f8; color: #1f2937; }
     .wrap { max-width: 1180px; margin: 40px auto; background: #ffffff; border-radius: 16px; padding: 40px; box-shadow: 0 10px 30px rgba(0,0,0,0.08); }
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
     h1 { margin: 0; font-size: 34px; }
+    .top-links { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .top-link { display: inline-flex; align-items: center; gap: 8px; border: 1px solid #d1d5db; border-radius: 999px; padding: 8px 11px; color: #4b5563; background: #f9fafb; text-decoration: none; font-size: 13px; font-weight: bold; }
+    .top-link-mark { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; background: #e5e7eb; color: #374151; font-size: 11px; line-height: 1; }
     .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 24px; }
     .card { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 12px; padding: 18px; }
     .label { font-size: 13px; color: #6b7280; margin-bottom: 8px; }
@@ -656,6 +690,11 @@ def dashboard(request: Request):
     .config h2 { margin: 0 0 16px; font-size: 22px; }
     .config-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
     label { display: block; font-size: 13px; font-weight: bold; color: #374151; }
+    .field-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .help { position: relative; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 18px; height: 18px; border-radius: 50%; border: 1px solid #9ca3af; color: #4b5563; background: #f9fafb; font-size: 12px; line-height: 1; cursor: help; }
+    .help::after { content: attr(data-tip); position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 20; width: 220px; padding: 10px 12px; border-radius: 8px; background: #111827; color: #f9fafb; font-size: 12px; font-weight: normal; line-height: 1.45; box-shadow: 0 10px 24px rgba(0,0,0,0.18); opacity: 0; pointer-events: none; transform: translateY(4px); transition: opacity 0.15s ease, transform 0.15s ease; }
+    .help::before { content: ""; position: absolute; right: 7px; bottom: calc(100% + 2px); z-index: 21; border-width: 6px 6px 0 6px; border-style: solid; border-color: #111827 transparent transparent transparent; opacity: 0; pointer-events: none; transition: opacity 0.15s ease; }
+    .help:hover::after, .help:focus::after, .help:hover::before, .help:focus::before { opacity: 1; transform: translateY(0); }
     input, select { width: 100%; box-sizing: border-box; margin-top: 8px; padding: 11px; border: 1px solid #d1d5db; border-radius: 10px; font-size: 14px; }
     .checkline { display: flex; align-items: center; gap: 10px; margin-top: 28px; }
     .checkline input { width: auto; margin: 0; }
@@ -665,19 +704,32 @@ def dashboard(request: Request):
     button:disabled { opacity: 0.6; cursor: not-allowed; }
     .result { margin-top: 24px; padding: 16px; border-radius: 12px; background: #f9fafb; border: 1px solid #e5e7eb; color: #374151; min-height: 22px; white-space: pre-line; }
     .log { margin-top: 24px; background: #111827; color: #d1d5db; border-radius: 12px; padding: 18px; min-height: 320px; max-height: 500px; overflow: auto; font-family: Consolas, Monaco, monospace; font-size: 13px; white-space: pre-wrap; }
-    .links { margin-top: 28px; display: flex; gap: 12px; flex-wrap: wrap; }
-    .link-button { display: inline-flex; align-items: center; justify-content: center; border-radius: 10px; padding: 14px 20px; font-weight: bold; color: white; text-decoration: none; background: #5865f2; }
-    .link-button.youtube { background: #dc2626; }
     @media (max-width: 900px) {
       .wrap { margin: 0; border-radius: 0; padding: 20px; }
+      .topbar { align-items: flex-start; flex-direction: column; }
+      .top-links { justify-content: flex-start; }
       .grid, .config-grid { grid-template-columns: 1fr; }
-      button, .link-button { width: 100%; }
+      button { width: 100%; }
+      .help::after { right: auto; left: 50%; transform: translate(-50%, 4px); max-width: min(220px, calc(100vw - 48px)); }
+      .help:hover::after, .help:focus::after { transform: translate(-50%, 0); }
     }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>TechTim Romestead Server Panel</h1>
+    <div class="topbar">
+      <h1>TechTim Romestead Server Panel</h1>
+      <div class="top-links">
+        <a class="top-link" href="https://discord.gg/Awy6Uh38KW" target="_blank" rel="noopener noreferrer" title="디스코드 접속">
+          <span class="top-link-mark">D</span>
+          디스코드
+        </a>
+        <a class="top-link" href="https://www.youtube.com/@kortechtim" target="_blank" rel="noopener noreferrer" title="유튜브채널 접속">
+          <span class="top-link-mark">YT</span>
+          유튜브
+        </a>
+      </div>
+    </div>
 
     <div class="grid">
       <div class="card">
@@ -703,28 +755,33 @@ def dashboard(request: Request):
     <div class="config">
       <h2>서버 설정</h2>
       <div class="config-grid">
-        <label>월드 이름
+        <label>
+          <span class="field-title">월드 이름 <span class="help" tabindex="0" data-tip="서버가 자동으로 만들거나 불러올 월드 이름입니다. 친구들이 접속할 동일한 세계를 구분하는 이름으로 사용됩니다.">?</span></span>
           <input id="cfgWorldName" type="text">
         </label>
-        <label>월드 크기
+        <label>
+          <span class="field-title">월드 크기 <span class="help" tabindex="0" data-tip="새 월드를 만들 때 적용되는 크기입니다. 값이 클수록 탐험 공간이 넓어질 수 있습니다.">?</span></span>
           <input id="cfgWorldSize" type="number" min="1" max="5" step="1">
         </label>
-        <label>서버 비밀번호
+        <label>
+          <span class="field-title">서버 비밀번호 <span class="help" tabindex="0" data-tip="비워두면 누구나 접속할 수 있습니다. 친구끼리만 이용하려면 비밀번호를 입력하세요.">?</span></span>
           <input id="cfgPassword" type="text">
         </label>
-        <label>서버 포트
+        <label>
+          <span class="field-title">서버 포트 <span class="help" tabindex="0" data-tip="게임 서버가 사용하는 UDP 포트입니다. 기본값 8050을 권장합니다.">?</span></span>
           <input id="cfgPort" type="number" min="1" max="65535" step="1">
         </label>
-        <label>최대 인원
+        <label>
+          <span class="field-title">최대 인원 <span class="help" tabindex="0" data-tip="동시에 접속할 수 있는 최대 플레이어 수입니다. 서버 사양에 맞춰 조절하세요.">?</span></span>
           <input id="cfgMaxPlayers" type="number" min="1" max="100" step="1">
         </label>
         <label class="checkline">
           <input id="cfgAutoCreate" type="checkbox">
-          자동 월드 생성
+          <span class="field-title">자동 월드 생성 <span class="help" tabindex="0" data-tip="서버 시작 시 월드가 없으면 자동으로 만들고 불러옵니다. 처음 구축할 때는 켜두는 것을 권장합니다.">?</span></span>
         </label>
         <label class="checkline">
           <input id="cfgCheats" type="checkbox">
-          치트 허용
+          <span class="field-title">치트 허용 <span class="help" tabindex="0" data-tip="관리자/치트 기능 사용 여부입니다. 일반 플레이 서버라면 꺼두는 것을 권장합니다.">?</span></span>
         </label>
         <div>
           <button onclick="saveConfig()">설정 저장</button>
@@ -747,10 +804,6 @@ def dashboard(request: Request):
 
     <div id="result" class="result" hidden></div>
 
-    <div class="links">
-      <a class="link-button" href="https://discord.gg/Awy6Uh38KW" target="_blank" rel="noopener noreferrer">디스코드 접속</a>
-      <a class="link-button youtube" href="https://www.youtube.com/@kortechtim" target="_blank" rel="noopener noreferrer">유튜브채널 접속</a>
-    </div>
   </div>
 
   <script>
