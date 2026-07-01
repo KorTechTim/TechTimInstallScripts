@@ -46,7 +46,6 @@ class LoginRequest(BaseModel):
 
 
 class ChangePasswordRequest(BaseModel):
-    current_password: str
     new_password: str
 
 
@@ -481,6 +480,9 @@ def change_password_page(request: Request):
     if not get_current_user(request):
         return RedirectResponse(url="/login", status_code=302)
 
+    if not must_change_password():
+        return RedirectResponse(url="/", status_code=302)
+
     return """
 <!doctype html>
 <html lang="ko">
@@ -501,10 +503,7 @@ def change_password_page(request: Request):
 <body>
   <div class="box">
     <h1>관리자 비밀번호 변경</h1>
-    <p>최초 로그인 후에는 기본 비밀번호를 반드시 변경해야 합니다.</p>
-
-    <label>현재 비밀번호</label>
-    <input id="currentPassword" type="password" autocomplete="current-password">
+    <p>처음 사용할 새 관리자 비밀번호를 입력해주세요.</p>
 
     <label>새 비밀번호</label>
     <input id="newPassword" type="password" autocomplete="new-password">
@@ -522,11 +521,10 @@ def change_password_page(request: Request):
       const errorBox = document.getElementById("error");
       errorBox.innerText = "";
 
-      const currentPassword = document.getElementById("currentPassword").value;
       const newPassword = document.getElementById("newPassword").value;
       const confirmPassword = document.getElementById("confirmPassword").value;
 
-      if (!currentPassword || !newPassword || !confirmPassword) {
+      if (!newPassword || !confirmPassword) {
         errorBox.innerText = "모든 항목을 입력해주세요.";
         return;
       }
@@ -546,7 +544,6 @@ def change_password_page(request: Request):
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            current_password: currentPassword,
             new_password: newPassword
           })
         });
@@ -601,8 +598,8 @@ def api_change_password(payload: ChangePasswordRequest, request: Request):
 
     auth_data = load_auth()
 
-    if not verify_password(payload.current_password, auth_data):
-        raise HTTPException(status_code=400, detail="현재 비밀번호가 올바르지 않습니다.")
+    if not auth_data.get("must_change_password", True):
+        raise HTTPException(status_code=400, detail="이미 비밀번호가 변경되었습니다.")
 
     if len(payload.new_password) < 4:
         raise HTTPException(status_code=400, detail="새 비밀번호는 최소 4자 이상이어야 합니다.")
@@ -649,14 +646,12 @@ def dashboard(request: Request):
   <style>
     body { margin: 0; font-family: Arial, sans-serif; background: #f4f6f8; color: #1f2937; }
     .wrap { max-width: 1180px; margin: 40px auto; background: #ffffff; border-radius: 16px; padding: 40px; box-shadow: 0 10px 30px rgba(0,0,0,0.08); }
-    .badge { display: inline-block; padding: 6px 12px; border-radius: 999px; background: #e0f2fe; color: #0369a1; font-size: 14px; font-weight: bold; }
-    h1 { margin-top: 20px; font-size: 34px; }
-    .status { margin-top: 24px; padding: 20px; background: #ecfdf5; border: 1px solid #bbf7d0; border-radius: 12px; color: #166534; font-weight: bold; }
+    h1 { margin: 0; font-size: 34px; }
     .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 24px; }
     .card { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 12px; padding: 18px; }
     .label { font-size: 13px; color: #6b7280; margin-bottom: 8px; }
     .value { font-size: 20px; font-weight: bold; }
-    .actions { margin-top: 30px; display: flex; gap: 12px; flex-wrap: wrap; }
+    .actions { margin-top: 24px; display: flex; gap: 12px; flex-wrap: wrap; }
     .config { margin-top: 24px; padding: 20px; border: 1px solid #e5e7eb; border-radius: 12px; background: #ffffff; }
     .config h2 { margin: 0 0 16px; font-size: 22px; }
     .config-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
@@ -669,25 +664,20 @@ def dashboard(request: Request):
     button.danger { background: #dc2626; color: white; }
     button:disabled { opacity: 0.6; cursor: not-allowed; }
     .result { margin-top: 24px; padding: 16px; border-radius: 12px; background: #f9fafb; border: 1px solid #e5e7eb; color: #374151; min-height: 22px; white-space: pre-line; }
-    .log { margin-top: 24px; background: #111827; color: #d1d5db; border-radius: 12px; padding: 18px; min-height: 280px; max-height: 460px; overflow: auto; font-family: Consolas, Monaco, monospace; font-size: 13px; white-space: pre-wrap; }
-    .note { margin-top: 28px; color: #6b7280; line-height: 1.6; }
-    code { background: #f3f4f6; padding: 2px 6px; border-radius: 6px; }
+    .log { margin-top: 24px; background: #111827; color: #d1d5db; border-radius: 12px; padding: 18px; min-height: 320px; max-height: 500px; overflow: auto; font-family: Consolas, Monaco, monospace; font-size: 13px; white-space: pre-wrap; }
+    .links { margin-top: 28px; display: flex; gap: 12px; flex-wrap: wrap; }
+    .link-button { display: inline-flex; align-items: center; justify-content: center; border-radius: 10px; padding: 14px 20px; font-weight: bold; color: white; text-decoration: none; background: #5865f2; }
+    .link-button.youtube { background: #dc2626; }
     @media (max-width: 900px) {
       .wrap { margin: 0; border-radius: 0; padding: 20px; }
       .grid, .config-grid { grid-template-columns: 1fr; }
-      button { width: 100%; }
+      button, .link-button { width: 100%; }
     }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <span class="badge">Web GUI :8080</span>
     <h1>TechTim Romestead Server Panel</h1>
-    <p>Romestead GCP 서버 관리 패널 테스트 버전입니다.</p>
-
-    <div class="status">
-      SteamCMD anonymous 설치 · 서버 시작/중지/재시작 · 세이브 업로드/다운로드 가능
-    </div>
 
     <div class="grid">
       <div class="card">
@@ -708,18 +698,7 @@ def dashboard(request: Request):
       </div>
     </div>
 
-    <div class="actions">
-      <button id="installBtn" onclick="requestInstall()">엔진 설치</button>
-      <button class="secondary" onclick="startServer()">서버 시작</button>
-      <button class="secondary" onclick="stopServer()">서버 중지</button>
-      <button class="secondary" onclick="restartServer()">서버 재시작</button>
-      <button class="secondary" onclick="loadServerLog()">서버 로그 보기</button>
-      <button class="secondary" onclick="loadLog()">설치 로그 보기</button>
-      <button class="secondary" onclick="downloadSaves()">세이브 다운로드</button>
-      <button class="secondary" onclick="triggerSaveUpload()">세이브 업로드</button>
-      <input id="saveUploadInput" type="file" accept=".zip" onchange="uploadSaves()" style="display:none">
-      <button class="danger" onclick="logout()">로그아웃</button>
-    </div>
+    <div id="installLog" class="log">설치 로그가 여기에 표시됩니다.</div>
 
     <div class="config">
       <h2>서버 설정</h2>
@@ -753,16 +732,24 @@ def dashboard(request: Request):
       </div>
     </div>
 
-    <div id="result" class="result">
-      아직 실행된 작업이 없습니다.
+    <div class="actions">
+      <button id="installBtn" onclick="requestInstall()">엔진 설치</button>
+      <button class="secondary" onclick="startServer()">서버 시작</button>
+      <button class="secondary" onclick="stopServer()">서버 중지</button>
+      <button class="secondary" onclick="restartServer()">서버 재시작</button>
+      <button class="secondary" onclick="loadServerLog()">서버 로그 보기</button>
+      <button class="secondary" onclick="loadLog()">설치 로그 보기</button>
+      <button class="secondary" onclick="downloadSaves()">세이브 다운로드</button>
+      <button class="secondary" onclick="triggerSaveUpload()">세이브 업로드</button>
+      <input id="saveUploadInput" type="file" accept=".zip" onchange="uploadSaves()" style="display:none">
+      <button class="danger" onclick="logout()">로그아웃</button>
     </div>
 
-    <div id="installLog" class="log">설치 로그가 여기에 표시됩니다.</div>
+    <div id="result" class="result" hidden></div>
 
-    <div class="note">
-      설치 완료 후 서버 파일은 <code>/data/server</code> 경로에 저장됩니다.<br>
-      서버 시작 버튼은 <code>config.json</code>이 없을 때만 기본값을 만들고, 기존 설정은 덮어쓰지 않습니다.<br>
-      세이브 다운로드/업로드는 <code>/data/server/saved_worlds</code> 경로를 기준으로 처리합니다.
+    <div class="links">
+      <a class="link-button" href="https://discord.gg/Awy6Uh38KW" target="_blank" rel="noopener noreferrer">디스코드 접속</a>
+      <a class="link-button youtube" href="https://www.youtube.com/@kortechtim" target="_blank" rel="noopener noreferrer">유튜브채널 접속</a>
     </div>
   </div>
 
@@ -804,10 +791,7 @@ def dashboard(request: Request):
           return;
         }
 
-        result.innerText =
-          "설치 작업 시작됨\\n" +
-          "상태: " + data.status + "\\n" +
-          "메시지: " + data.message;
+        result.innerText = "";
 
         await loadStatus();
         await loadLog();
@@ -1105,7 +1089,7 @@ def request_install(request: Request, background_tasks: BackgroundTasks):
 
     return {
         "status": "started",
-        "message": "Romestead Dedicated Server 설치 작업이 백그라운드에서 시작되었습니다.",
+        "message": "설치 시작",
     }
 
 
