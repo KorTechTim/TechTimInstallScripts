@@ -848,10 +848,11 @@ def dashboard(request: Request):
     button.secondary { background: #e5e7eb; color: #1f2937; }
     button.danger { background: #dc2626; color: white; }
     button:disabled { opacity: 0.6; cursor: not-allowed; }
-    .config-save-wrap { position: relative; display: inline-flex; align-items: flex-start; }
-    .save-bubble { position: absolute; right: -8px; bottom: calc(100% + 10px); z-index: 30; min-width: 148px; padding: 10px 12px; border-radius: 10px; background: #111827; color: #ffffff; font-size: 13px; font-weight: bold; line-height: 1.35; box-shadow: 0 12px 26px rgba(17,24,39,0.26); opacity: 0; pointer-events: none; transform: translateY(6px); transition: opacity 0.18s ease, transform 0.18s ease; }
-    .save-bubble::after { content: ""; position: absolute; right: 18px; top: 100%; border-width: 7px 7px 0 7px; border-style: solid; border-color: #111827 transparent transparent transparent; }
-    .save-bubble.show { opacity: 1; transform: translateY(0); }
+    .config-save-wrap { position: relative; display: inline-flex; align-items: center; width: fit-content; }
+    .config-save-wrap button { position: relative; z-index: 1; }
+    .save-bubble { position: absolute; left: 50%; bottom: calc(100% + 10px); z-index: 30; min-width: 148px; width: max-content; max-width: min(220px, calc(100vw - 48px)); padding: 10px 12px; border-radius: 10px; background: #111827; color: #ffffff; font-size: 13px; font-weight: bold; line-height: 1.35; text-align: center; white-space: nowrap; box-shadow: 0 12px 26px rgba(17,24,39,0.26); opacity: 0; pointer-events: none; transform: translate(-50%, 6px); transition: opacity 0.18s ease, transform 0.18s ease; }
+    .save-bubble::after { content: ""; position: absolute; left: 50%; top: 100%; border-width: 7px 7px 0 7px; border-style: solid; border-color: #111827 transparent transparent transparent; transform: translateX(-50%); }
+    .save-bubble.show { opacity: 1; transform: translate(-50%, 0); }
     .result { margin-top: 24px; padding: 16px; border-radius: 12px; background: rgba(249, 250, 251, 0.9); border: 1px solid rgba(229, 231, 235, 0.88); color: #374151; min-height: 22px; white-space: pre-line; }
     .log { margin-top: 24px; background: #111827; color: #d1d5db; border-radius: 12px; padding: 18px; min-height: 320px; max-height: 500px; overflow: auto; font-family: Consolas, Monaco, monospace; font-size: 13px; white-space: pre-wrap; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04); }
     @media (max-width: 900px) {
@@ -860,6 +861,8 @@ def dashboard(request: Request):
       .top-links { justify-content: flex-start; }
       .grid, .config-grid { grid-template-columns: 1fr; }
       button { width: 100%; }
+      .config-save-wrap { width: 100%; }
+      .save-bubble { max-width: calc(100% - 24px); white-space: normal; }
       .help::after { right: auto; left: 50%; transform: translate(-50%, 4px); max-width: min(220px, calc(100vw - 48px)); }
       .help:hover::after, .help:focus::after { transform: translate(-50%, 0); }
     }
