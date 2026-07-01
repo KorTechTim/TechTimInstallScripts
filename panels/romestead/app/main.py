@@ -16,7 +16,7 @@ import docker
 app = FastAPI(title="TechTim Romestead Server Panel")
 
 GAME_CODE = os.getenv("GAME_CODE", "romestead")
-PANEL_VERSION = os.getenv("PANEL_VERSION", "0.2.0")
+PANEL_VERSION = os.getenv("PANEL_VERSION", "1.0.0")
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 HOST_DATA_DIR = Path(os.getenv("HOST_DATA_DIR", "/opt/techtim/romestead/data"))
@@ -279,6 +279,11 @@ def create_default_config() -> Path:
         return config_path
 
     return write_config(default_config())
+
+
+def server_container_keeps_stdin_open(container) -> bool:
+    config = container.attrs.get("Config", {})
+    return bool(config.get("OpenStdin"))
 
 
 def safe_extract_zip(zip_path: Path, target_dir: Path) -> None:
@@ -679,8 +684,9 @@ def dashboard(request: Request):
     .topbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
     h1 { margin: 0; font-size: 34px; }
     .top-links { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-    .top-link { display: inline-flex; align-items: center; gap: 8px; border: 1px solid #d1d5db; border-radius: 999px; padding: 8px 11px; color: #4b5563; background: #f9fafb; text-decoration: none; font-size: 13px; font-weight: bold; }
-    .top-link-mark { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; background: #e5e7eb; color: #374151; font-size: 11px; line-height: 1; }
+    .top-link { display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 38px; border: 1px solid #d1d5db; border-radius: 999px; color: #4b5563; background: #f9fafb; text-decoration: none; }
+    .top-link:hover { background: #f3f4f6; border-color: #9ca3af; }
+    .top-link img { display: block; width: 20px; height: 20px; opacity: 0.86; }
     .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 24px; }
     .card { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 12px; padding: 18px; }
     .label { font-size: 13px; color: #6b7280; margin-bottom: 8px; }
@@ -720,13 +726,11 @@ def dashboard(request: Request):
     <div class="topbar">
       <h1>TechTim Romestead Server Panel</h1>
       <div class="top-links">
-        <a class="top-link" href="https://discord.gg/Awy6Uh38KW" target="_blank" rel="noopener noreferrer" title="디스코드 접속">
-          <span class="top-link-mark">D</span>
-          디스코드
+        <a class="top-link" href="https://discord.gg/Awy6Uh38KW" target="_blank" rel="noopener noreferrer" title="디스코드 접속" aria-label="디스코드 접속">
+          <img src="https://cdn.simpleicons.org/discord/5865F2" alt="">
         </a>
-        <a class="top-link" href="https://www.youtube.com/@kortechtim" target="_blank" rel="noopener noreferrer" title="유튜브채널 접속">
-          <span class="top-link-mark">YT</span>
-          유튜브
+        <a class="top-link" href="https://www.youtube.com/@kortechtim" target="_blank" rel="noopener noreferrer" title="유튜브채널 접속" aria-label="유튜브채널 접속">
+          <img src="https://cdn.simpleicons.org/youtube/FF0000" alt="">
         </a>
       </div>
     </div>
@@ -1059,9 +1063,12 @@ def dashboard(request: Request):
       try {
         const response = await fetch("/api/server/status");
         const data = await response.json();
-        document.getElementById("serverStatus").innerText = data.status || "error";
+        const status = data.status || "error";
+        document.getElementById("serverStatus").innerText = status;
+        return status;
       } catch (err) {
         document.getElementById("serverStatus").innerText = "error";
+        return "error";
       }
     }
 
@@ -1111,14 +1118,26 @@ def dashboard(request: Request):
       window.location.href = "/login";
     }
 
+    async function initializeDashboard() {
+      await loadStatus();
+      const serverStatus = await loadServerStatus();
+      const shouldShowServerLog = (serverStatus || "").toLowerCase() === "running";
+
+      currentLogMode = shouldShowServerLog ? "server" : "install";
+      await loadConfig();
+
+      if (shouldShowServerLog) {
+        await loadServerLog();
+      } else {
+        await loadLog();
+      }
+    }
+
     setInterval(loadStatus, 2000);
     setInterval(loadServerStatus, 2000);
     setInterval(refreshCurrentLog, 2000);
 
-    loadStatus();
-    loadServerStatus();
-    loadConfig();
-    loadLog();
+    initializeDashboard();
   </script>
 </body>
 </html>
@@ -1270,7 +1289,7 @@ def start_server(request: Request):
             if container.name == ROMESTEAD_SERVER_CONTAINER:
                 container.reload()
 
-                if container.status == "running":
+                if container.status == "running" and server_container_keeps_stdin_open(container):
                     return {
                         "status": "running",
                         "message": "Romestead 서버가 이미 실행 중입니다.",
@@ -1286,6 +1305,7 @@ def start_server(request: Request):
             name=ROMESTEAD_SERVER_CONTAINER,
             working_dir="/server",
             detach=True,
+            stdin_open=True,
             restart_policy={"Name": "unless-stopped"},
             volumes={
                 str(host_server_dir): {
@@ -1370,6 +1390,10 @@ def restart_server(request: Request):
             }
 
         container.reload()
+
+        if not server_container_keeps_stdin_open(container):
+            container.remove(force=True)
+            return start_server(request)
 
         if container.status == "running":
             container.restart(timeout=15)

@@ -8,7 +8,7 @@ METADATA_URL="http://metadata.google.internal/computeMetadata/v1/instance/attrib
 GAME_CODE="romestead"
 VERIFY_API="https://techtim.kr/api/install/verify"
 PANEL_IMAGE="ghcr.io/kortechtim/romestead-panel:latest"
-PANEL_VERSION="0.2.0"
+PANEL_VERSION="1.0.0"
 
 exec > >(tee -a "$LOG_FILE") 2>&1
 

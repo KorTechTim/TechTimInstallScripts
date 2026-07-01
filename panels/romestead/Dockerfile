@@ -8,7 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 
 ENV GAME_CODE=romestead
-ENV PANEL_VERSION=0.2.0
+ENV PANEL_VERSION=1.0.0
 
 EXPOSE 8080
 
