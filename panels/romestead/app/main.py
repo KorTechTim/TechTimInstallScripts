@@ -1,5 +1,6 @@
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +15,10 @@ import zipfile
 import docker
 
 app = FastAPI(title="TechTim Romestead Server Panel")
+
+APP_DIR = Path(__file__).resolve().parent
+STATIC_DIR = APP_DIR / "static"
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 GAME_CODE = os.getenv("GAME_CODE", "romestead")
 PANEL_VERSION = os.getenv("PANEL_VERSION", "1.0.0")
@@ -286,6 +291,18 @@ def server_container_keeps_stdin_open(container) -> bool:
     return bool(config.get("OpenStdin"))
 
 
+def is_server_container_running() -> bool:
+    try:
+        client = docker.from_env()
+        container = client.containers.get(ROMESTEAD_SERVER_CONTAINER)
+        container.reload()
+        return container.status == "running"
+    except docker.errors.NotFound:
+        return False
+    except Exception:
+        return False
+
+
 def safe_extract_zip(zip_path: Path, target_dir: Path) -> None:
     target_dir.mkdir(parents=True, exist_ok=True)
     target_root = target_dir.resolve()
@@ -445,8 +462,8 @@ def login_page(request: Request):
   <meta charset="utf-8">
   <title>TechTim Romestead Login</title>
   <style>
-    body { margin: 0; font-family: Arial, sans-serif; background: #f4f6f8; color: #1f2937; }
-    .box { max-width: 420px; margin: 100px auto; background: #fff; border-radius: 16px; padding: 34px; box-shadow: 0 10px 30px rgba(0,0,0,0.08); }
+    body { min-height: 100vh; margin: 0; font-family: Arial, sans-serif; background: linear-gradient(135deg, rgba(12, 23, 20, 0.72), rgba(32, 28, 22, 0.56)), url("/static/romestead-panel-bg.png") center / cover fixed no-repeat; color: #1f2937; }
+    .box { max-width: 420px; margin: 100px auto; background: rgba(255, 255, 255, 0.92); border: 1px solid rgba(255,255,255,0.56); border-radius: 16px; padding: 34px; box-shadow: 0 24px 70px rgba(0,0,0,0.34); backdrop-filter: blur(12px); }
     h1 { margin: 0 0 10px; font-size: 28px; }
     p { color: #6b7280; line-height: 1.5; }
     label { display: block; margin-top: 18px; font-size: 14px; font-weight: bold; }
@@ -461,13 +478,15 @@ def login_page(request: Request):
     <h1>TechTim Romestead Panel</h1>
     <p>관리자 계정으로 로그인하세요.</p>
 
-    <label>아이디</label>
-    <input id="username" type="text" value="admin" autocomplete="username">
+    <form id="loginForm">
+      <label>아이디</label>
+      <input id="username" type="text" value="admin" autocomplete="username">
 
-    <label>비밀번호</label>
-    <input id="password" type="password" placeholder="비밀번호" autocomplete="current-password">
+      <label>비밀번호</label>
+      <input id="password" type="password" placeholder="비밀번호" autocomplete="current-password">
 
-    <button onclick="login()">로그인</button>
+      <button type="submit">로그인</button>
+    </form>
 
     <div class="hint">
       최초 기본 계정은 <b>admin / admin</b> 입니다.<br>
@@ -478,6 +497,11 @@ def login_page(request: Request):
   </div>
 
   <script>
+    document.getElementById("loginForm").addEventListener("submit", function (event) {
+      event.preventDefault();
+      login();
+    });
+
     async function login() {
       const errorBox = document.getElementById("error");
       errorBox.innerText = "";
@@ -525,8 +549,8 @@ def change_password_page(request: Request):
   <meta charset="utf-8">
   <title>Change Admin Password</title>
   <style>
-    body { margin: 0; font-family: Arial, sans-serif; background: #f4f6f8; color: #1f2937; }
-    .box { max-width: 460px; margin: 90px auto; background: #fff; border-radius: 16px; padding: 34px; box-shadow: 0 10px 30px rgba(0,0,0,0.08); }
+    body { min-height: 100vh; margin: 0; font-family: Arial, sans-serif; background: linear-gradient(135deg, rgba(12, 23, 20, 0.72), rgba(32, 28, 22, 0.56)), url("/static/romestead-panel-bg.png") center / cover fixed no-repeat; color: #1f2937; }
+    .box { max-width: 460px; margin: 90px auto; background: rgba(255, 255, 255, 0.92); border: 1px solid rgba(255,255,255,0.56); border-radius: 16px; padding: 34px; box-shadow: 0 24px 70px rgba(0,0,0,0.34); backdrop-filter: blur(12px); }
     h1 { margin: 0 0 10px; font-size: 28px; }
     p { color: #6b7280; line-height: 1.5; }
     label { display: block; margin-top: 18px; font-size: 14px; font-weight: bold; }
@@ -540,18 +564,25 @@ def change_password_page(request: Request):
     <h1>관리자 비밀번호 변경</h1>
     <p>처음 사용할 새 관리자 비밀번호를 입력해주세요.</p>
 
-    <label>새 비밀번호</label>
-    <input id="newPassword" type="password" autocomplete="new-password">
+    <form id="changePasswordForm">
+      <label>새 비밀번호</label>
+      <input id="newPassword" type="password" autocomplete="new-password">
 
-    <label>새 비밀번호 확인</label>
-    <input id="confirmPassword" type="password" autocomplete="new-password">
+      <label>새 비밀번호 확인</label>
+      <input id="confirmPassword" type="password" autocomplete="new-password">
 
-    <button onclick="changePassword()">비밀번호 변경</button>
+      <button type="submit">비밀번호 변경</button>
+    </form>
 
     <div id="error" class="error"></div>
   </div>
 
   <script>
+    document.getElementById("changePasswordForm").addEventListener("submit", function (event) {
+      event.preventDefault();
+      changePassword();
+    });
+
     async function changePassword() {
       const errorBox = document.getElementById("error");
       errorBox.innerText = "";
@@ -679,8 +710,8 @@ def dashboard(request: Request):
   <meta charset="utf-8">
   <title>TechTim Romestead Server Panel</title>
   <style>
-    body { margin: 0; font-family: Arial, sans-serif; background: #f4f6f8; color: #1f2937; }
-    .wrap { max-width: 1180px; margin: 40px auto; background: #ffffff; border-radius: 16px; padding: 40px; box-shadow: 0 10px 30px rgba(0,0,0,0.08); }
+    body { min-height: 100vh; margin: 0; font-family: Arial, sans-serif; background: linear-gradient(135deg, rgba(12, 23, 20, 0.7), rgba(32, 28, 22, 0.5)), url("/static/romestead-panel-bg.png") center / cover fixed no-repeat; color: #1f2937; }
+    .wrap { max-width: 1180px; margin: 40px auto; background: rgba(255, 255, 255, 0.9); border: 1px solid rgba(255,255,255,0.58); border-radius: 16px; padding: 40px; box-shadow: 0 24px 80px rgba(0,0,0,0.35); backdrop-filter: blur(12px); }
     .topbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
     h1 { margin: 0; font-size: 34px; }
     .top-links { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
@@ -688,11 +719,15 @@ def dashboard(request: Request):
     .top-link:hover { background: #f3f4f6; border-color: #9ca3af; }
     .top-link img { display: block; width: 20px; height: 20px; opacity: 0.86; }
     .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 24px; }
-    .card { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 12px; padding: 18px; }
+    .card { background: rgba(249, 250, 251, 0.88); border: 1px solid rgba(229, 231, 235, 0.88); border-radius: 12px; padding: 18px; }
     .label { font-size: 13px; color: #6b7280; margin-bottom: 8px; }
     .value { font-size: 20px; font-weight: bold; }
-    .actions { margin-top: 24px; display: flex; gap: 12px; flex-wrap: wrap; }
-    .config { margin-top: 24px; padding: 20px; border: 1px solid #e5e7eb; border-radius: 12px; background: #ffffff; }
+    .actions { margin-top: 24px; display: grid; grid-template-columns: repeat(auto-fit, minmax(136px, 1fr)); gap: 12px; align-items: stretch; }
+    .actions button { width: 100%; min-height: 48px; }
+    .config { margin-top: 24px; padding: 20px; border: 1px solid rgba(229, 231, 235, 0.88); border-radius: 12px; background: rgba(255, 255, 255, 0.9); transition: background 0.2s ease, opacity 0.2s ease; }
+    .config-body { transition: filter 0.2s ease, opacity 0.2s ease; }
+    .config.locked { background: rgba(255, 255, 255, 0.66); }
+    .config.locked .config-body { filter: blur(1.4px); opacity: 0.58; pointer-events: none; user-select: none; }
     .config h2 { margin: 0 0 16px; font-size: 22px; }
     .config-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
     label { display: block; font-size: 13px; font-weight: bold; color: #374151; }
@@ -708,8 +743,8 @@ def dashboard(request: Request):
     button.secondary { background: #e5e7eb; color: #1f2937; }
     button.danger { background: #dc2626; color: white; }
     button:disabled { opacity: 0.6; cursor: not-allowed; }
-    .result { margin-top: 24px; padding: 16px; border-radius: 12px; background: #f9fafb; border: 1px solid #e5e7eb; color: #374151; min-height: 22px; white-space: pre-line; }
-    .log { margin-top: 24px; background: #111827; color: #d1d5db; border-radius: 12px; padding: 18px; min-height: 320px; max-height: 500px; overflow: auto; font-family: Consolas, Monaco, monospace; font-size: 13px; white-space: pre-wrap; }
+    .result { margin-top: 24px; padding: 16px; border-radius: 12px; background: rgba(249, 250, 251, 0.9); border: 1px solid rgba(229, 231, 235, 0.88); color: #374151; min-height: 22px; white-space: pre-line; }
+    .log { margin-top: 24px; background: rgba(17, 24, 39, 0.94); color: #d1d5db; border-radius: 12px; padding: 18px; min-height: 320px; max-height: 500px; overflow: auto; font-family: Consolas, Monaco, monospace; font-size: 13px; white-space: pre-wrap; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04); }
     @media (max-width: 900px) {
       .wrap { margin: 0; border-radius: 0; padding: 20px; }
       .topbar { align-items: flex-start; flex-direction: column; }
@@ -756,39 +791,41 @@ def dashboard(request: Request):
 
     <div id="installLog" class="log">설치 로그가 여기에 표시됩니다.</div>
 
-    <div class="config">
-      <h2>서버 설정</h2>
-      <div class="config-grid">
-        <label>
-          <span class="field-title">월드 이름 <span class="help" tabindex="0" data-tip="서버가 자동으로 만들거나 불러올 월드 이름입니다. 친구들이 접속할 동일한 세계를 구분하는 이름으로 사용됩니다.">?</span></span>
-          <input id="cfgWorldName" type="text">
-        </label>
-        <label>
-          <span class="field-title">월드 크기 <span class="help" tabindex="0" data-tip="새 월드를 만들 때 적용되는 크기입니다. 값이 클수록 탐험 공간이 넓어질 수 있습니다.">?</span></span>
-          <input id="cfgWorldSize" type="number" min="1" max="5" step="1">
-        </label>
-        <label>
-          <span class="field-title">서버 비밀번호 <span class="help" tabindex="0" data-tip="비워두면 누구나 접속할 수 있습니다. 친구끼리만 이용하려면 비밀번호를 입력하세요.">?</span></span>
-          <input id="cfgPassword" type="text">
-        </label>
-        <label>
-          <span class="field-title">서버 포트 <span class="help" tabindex="0" data-tip="게임 서버가 사용하는 UDP 포트입니다. 기본값 8050을 권장합니다.">?</span></span>
-          <input id="cfgPort" type="number" min="1" max="65535" step="1">
-        </label>
-        <label>
-          <span class="field-title">최대 인원 <span class="help" tabindex="0" data-tip="동시에 접속할 수 있는 최대 플레이어 수입니다. 서버 사양에 맞춰 조절하세요.">?</span></span>
-          <input id="cfgMaxPlayers" type="number" min="1" max="100" step="1">
-        </label>
-        <label class="checkline">
-          <input id="cfgAutoCreate" type="checkbox">
-          <span class="field-title">자동 월드 생성 <span class="help" tabindex="0" data-tip="서버 시작 시 월드가 없으면 자동으로 만들고 불러옵니다. 처음 구축할 때는 켜두는 것을 권장합니다.">?</span></span>
-        </label>
-        <label class="checkline">
-          <input id="cfgCheats" type="checkbox">
-          <span class="field-title">치트 허용 <span class="help" tabindex="0" data-tip="관리자/치트 기능 사용 여부입니다. 일반 플레이 서버라면 꺼두는 것을 권장합니다.">?</span></span>
-        </label>
-        <div>
-          <button onclick="saveConfig()">설정 저장</button>
+    <div id="configSection" class="config">
+      <div class="config-body">
+        <h2>서버 설정</h2>
+        <div class="config-grid">
+          <label>
+            <span class="field-title">월드 이름 <span class="help" tabindex="0" data-tip="서버가 자동으로 만들거나 불러올 월드 이름입니다. 친구들이 접속할 동일한 세계를 구분하는 이름으로 사용됩니다.">?</span></span>
+            <input id="cfgWorldName" type="text">
+          </label>
+          <label>
+            <span class="field-title">월드 크기 <span class="help" tabindex="0" data-tip="새 월드를 만들 때 적용되는 크기입니다. 값이 클수록 탐험 공간이 넓어질 수 있습니다.">?</span></span>
+            <input id="cfgWorldSize" type="number" min="1" max="5" step="1">
+          </label>
+          <label>
+            <span class="field-title">서버 비밀번호 <span class="help" tabindex="0" data-tip="비워두면 누구나 접속할 수 있습니다. 친구끼리만 이용하려면 비밀번호를 입력하세요.">?</span></span>
+            <input id="cfgPassword" type="text">
+          </label>
+          <label>
+            <span class="field-title">서버 포트 <span class="help" tabindex="0" data-tip="게임 서버가 사용하는 UDP 포트입니다. 기본값 8050을 권장합니다.">?</span></span>
+            <input id="cfgPort" type="number" min="1" max="65535" step="1">
+          </label>
+          <label>
+            <span class="field-title">최대 인원 <span class="help" tabindex="0" data-tip="동시에 접속할 수 있는 최대 플레이어 수입니다. 서버 사양에 맞춰 조절하세요.">?</span></span>
+            <input id="cfgMaxPlayers" type="number" min="1" max="100" step="1">
+          </label>
+          <label class="checkline">
+            <input id="cfgAutoCreate" type="checkbox">
+            <span class="field-title">자동 월드 생성 <span class="help" tabindex="0" data-tip="서버 시작 시 월드가 없으면 자동으로 만들고 불러옵니다. 처음 구축할 때는 켜두는 것을 권장합니다.">?</span></span>
+          </label>
+          <label class="checkline">
+            <input id="cfgCheats" type="checkbox">
+            <span class="field-title">치트 허용 <span class="help" tabindex="0" data-tip="관리자/치트 기능 사용 여부입니다. 일반 플레이 서버라면 꺼두는 것을 권장합니다.">?</span></span>
+          </label>
+          <div>
+            <button id="configSaveBtn" onclick="saveConfig()">설정 저장</button>
+          </div>
         </div>
       </div>
     </div>
@@ -828,6 +865,33 @@ def dashboard(request: Request):
       scrollLogToBottom();
     }
 
+    function isRunningStatus(status) {
+      return (status || "").toLowerCase() === "running";
+    }
+
+    function setConfigLocked(locked) {
+      const section = document.getElementById("configSection");
+      if (section) {
+        section.classList.toggle("locked", locked);
+      }
+
+      [
+        "cfgWorldName",
+        "cfgWorldSize",
+        "cfgPassword",
+        "cfgPort",
+        "cfgMaxPlayers",
+        "cfgAutoCreate",
+        "cfgCheats",
+        "configSaveBtn"
+      ].forEach(function (id) {
+        const element = document.getElementById(id);
+        if (element) {
+          element.disabled = locked;
+        }
+      });
+    }
+
     async function requestInstall() {
       const btn = document.getElementById("installBtn");
       const result = document.getElementById("result");
@@ -861,6 +925,14 @@ def dashboard(request: Request):
 
     async function startServer() {
       const result = document.getElementById("result");
+      const currentStatus = await loadServerStatus();
+
+      if (isRunningStatus(currentStatus)) {
+        alert("이미 서버가 동작중입니다.");
+        currentLogMode = "server";
+        await loadServerLog();
+        return;
+      }
 
       result.innerText = "Romestead 서버를 시작하는 중입니다...";
 
@@ -870,6 +942,10 @@ def dashboard(request: Request):
         });
 
         const data = await response.json();
+
+        if (isRunningStatus(data.status)) {
+          alert("이미 서버가 동작중입니다.");
+        }
 
         result.innerText =
           "서버 시작 요청 결과\\n" +
@@ -1023,6 +1099,11 @@ def dashboard(request: Request):
 
     async function saveConfig() {
       const result = document.getElementById("result");
+
+      if (document.getElementById("configSection").classList.contains("locked")) {
+        return;
+      }
+
       result.innerText = "서버 설정을 저장하는 중입니다...";
 
       try {
@@ -1065,9 +1146,11 @@ def dashboard(request: Request):
         const data = await response.json();
         const status = data.status || "error";
         document.getElementById("serverStatus").innerText = status;
+        setConfigLocked(isRunningStatus(status));
         return status;
       } catch (err) {
         document.getElementById("serverStatus").innerText = "error";
+        setConfigLocked(false);
         return "error";
       }
     }
@@ -1234,6 +1317,12 @@ def get_config(request: Request):
 @app.post("/api/config")
 def save_config(payload: ConfigRequest, request: Request):
     require_auth(request)
+
+    if is_server_container_running():
+        raise HTTPException(
+            status_code=409,
+            detail="서버 실행 중에는 설정을 변경할 수 없습니다. 서버를 중지한 뒤 다시 시도해주세요.",
+        )
 
     try:
         payload_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
