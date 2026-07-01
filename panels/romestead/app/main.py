@@ -59,6 +59,7 @@ class ConfigRequest(BaseModel):
     AutoStartWorldName: str = "world"
     AutoCreateAndLoadWorld: bool = True
     AutoCreateWorldSize: int = 1
+    AutoCreateWorldSeed: int | None = None
     Password: str = ""
     Port: int = SERVER_PORT
     MaxPlayers: int = 10
@@ -246,6 +247,7 @@ def default_config() -> dict:
         "AutoStartWorldName": "world",
         "AutoCreateAndLoadWorld": True,
         "AutoCreateWorldSize": 1,
+        "AutoCreateWorldSeed": None,
         "Password": "",
         "Port": SERVER_PORT,
         "MaxPlayers": 10,
@@ -260,6 +262,8 @@ def normalize_config(config: dict) -> dict:
     merged["AutoStartWorldName"] = str(merged.get("AutoStartWorldName") or "world").strip() or "world"
     merged["AutoCreateAndLoadWorld"] = bool(merged.get("AutoCreateAndLoadWorld"))
     merged["AutoCreateWorldSize"] = max(1, min(5, int(merged.get("AutoCreateWorldSize") or 1)))
+    seed_value = merged.get("AutoCreateWorldSeed")
+    merged["AutoCreateWorldSeed"] = None if seed_value in ("", None) else int(seed_value)
     merged["Password"] = str(merged.get("Password") or "")
     merged["Port"] = max(1, min(65535, int(merged.get("Port") or SERVER_PORT)))
     merged["MaxPlayers"] = max(1, min(100, int(merged.get("MaxPlayers") or 10)))
@@ -322,24 +326,52 @@ def list_saved_world_names() -> list[str]:
     return sorted(worlds, key=str.casefold)
 
 
+def list_world_options(config: dict | None = None) -> list[str]:
+    worlds = set(list_saved_world_names())
+    source_config = config or read_config()
+    configured_world = str(source_config.get("AutoStartWorldName") or "").strip()
+
+    if configured_world and bool(source_config.get("AutoCreateAndLoadWorld")):
+        worlds.add(configured_world)
+
+    return sorted(worlds, key=str.casefold)
+
+
+def validate_world_name(world_name: str) -> str | None:
+    if not world_name:
+        return "월드 이름이 비어 있습니다. 서버 설정에서 월드 이름을 입력해주세요."
+
+    if world_name in {".", ".."} or "/" in world_name or "\\" in world_name:
+        return "월드 이름에는 /, \\, . 또는 .. 경로 문자를 사용할 수 없습니다."
+
+    if len(world_name) > 64:
+        return "월드 이름은 64자 이하로 입력해주세요."
+
+    return None
+
+
 def validate_world_start_config(config: dict) -> str | None:
     world_name = str(config.get("AutoStartWorldName") or "").strip()
     auto_create = bool(config.get("AutoCreateAndLoadWorld"))
     saved_worlds = list_saved_world_names()
+    name_error = validate_world_name(world_name)
 
-    if not world_name:
-        return "월드 이름이 비어 있습니다. 서버 설정에서 월드 이름을 입력해주세요."
+    if name_error:
+        return name_error
 
-    if saved_worlds and world_name not in saved_worlds:
+    if world_name in saved_worlds:
+        return None
+
+    if auto_create:
+        return None
+
+    if saved_worlds:
         return (
             f"'{world_name}' 월드를 찾을 수 없습니다. "
-            f"기존 저장 월드 중 하나를 선택해주세요: {', '.join(saved_worlds)}"
+            f"기존 저장 월드 중 하나를 선택하거나 자동 월드 생성을 켜주세요: {', '.join(saved_worlds)}"
         )
 
-    if not saved_worlds and not auto_create:
-        return "저장된 월드가 없고 자동 월드 생성이 꺼져 있습니다. 자동 월드 생성을 켠 뒤 다시 시작해주세요."
-
-    return None
+    return "저장된 월드가 없고 자동 월드 생성이 꺼져 있습니다. 자동 월드 생성을 켠 뒤 다시 시작해주세요."
 
 
 def server_container_keeps_stdin_open(container) -> bool:
@@ -954,13 +986,17 @@ def dashboard(request: Request):
         <h2>서버 설정</h2>
         <div class="config-grid">
           <label>
-            <span class="field-title">월드 이름 <span class="help" tabindex="0" data-tip="서버가 자동으로 만들거나 불러올 월드 이름입니다. 친구들이 접속할 동일한 세계를 구분하는 이름으로 사용됩니다.">?</span></span>
+            <span class="field-title">월드 이름 <span class="help" tabindex="0" data-tip="기존 월드는 목록에서 선택하고, 새 월드는 이름을 직접 입력한 뒤 자동 월드 생성을 켜면 서버 시작 시 생성됩니다.">?</span></span>
             <input id="cfgWorldName" type="text" list="worldNameList">
             <datalist id="worldNameList"></datalist>
           </label>
           <label>
             <span class="field-title">월드 크기 <span class="help" tabindex="0" data-tip="새 월드를 만들 때 적용되는 크기입니다. 값이 클수록 탐험 공간이 넓어질 수 있습니다.">?</span></span>
             <input id="cfgWorldSize" type="number" min="1" max="5" step="1">
+          </label>
+          <label>
+            <span class="field-title">월드 시드 <span class="help" tabindex="0" data-tip="새 월드를 만들 때 사용할 생성 시드입니다. 비워두면 Romestead가 자동으로 정합니다.">?</span></span>
+            <input id="cfgWorldSeed" type="number" step="1">
           </label>
           <label>
             <span class="field-title">서버 비밀번호 <span class="help" tabindex="0" data-tip="비워두면 누구나 접속할 수 있습니다. 친구끼리만 이용하려면 비밀번호를 입력하세요.">?</span></span>
@@ -1080,6 +1116,7 @@ def dashboard(request: Request):
       [
         "cfgWorldName",
         "cfgWorldSize",
+        "cfgWorldSeed",
         "cfgPassword",
         "cfgPort",
         "cfgMaxPlayers",
@@ -1279,6 +1316,7 @@ def dashboard(request: Request):
     function fillConfig(config) {
       document.getElementById("cfgWorldName").value = config.AutoStartWorldName || "world";
       document.getElementById("cfgWorldSize").value = config.AutoCreateWorldSize || 1;
+      document.getElementById("cfgWorldSeed").value = config.AutoCreateWorldSeed ?? "";
       document.getElementById("cfgPassword").value = config.Password || "";
       document.getElementById("cfgPort").value = config.Port || 8050;
       document.getElementById("cfgMaxPlayers").value = config.MaxPlayers || 10;
@@ -1295,6 +1333,27 @@ def dashboard(request: Request):
         option.value = world;
         list.appendChild(option);
       });
+    }
+
+    function addWorldOption(worldName) {
+      const list = document.getElementById("worldNameList");
+      const normalized = (worldName || "").trim();
+
+      if (!normalized) {
+        return;
+      }
+
+      const exists = Array.from(list.options).some(function (option) {
+        return option.value === normalized;
+      });
+
+      if (exists) {
+        return;
+      }
+
+      const option = document.createElement("option");
+      option.value = normalized;
+      list.appendChild(option);
     }
 
     let configSaveBubbleTimer = null;
@@ -1315,10 +1374,13 @@ def dashboard(request: Request):
     }
 
     function readConfigForm() {
+      const seedValue = document.getElementById("cfgWorldSeed").value.trim();
+
       return {
         AutoStartWorldName: document.getElementById("cfgWorldName").value.trim() || "world",
         AutoCreateAndLoadWorld: document.getElementById("cfgAutoCreate").checked,
         AutoCreateWorldSize: Number(document.getElementById("cfgWorldSize").value || 1),
+        AutoCreateWorldSeed: seedValue === "" ? null : Number(seedValue),
         Password: document.getElementById("cfgPassword").value,
         Port: Number(document.getElementById("cfgPort").value || 8050),
         MaxPlayers: Number(document.getElementById("cfgMaxPlayers").value || 10),
@@ -1371,7 +1433,10 @@ def dashboard(request: Request):
         }
 
         fillConfig(data.config || {});
+        fillWorldList(data.worlds || []);
         showConfigSaveBubble();
+        addWorldOption(data.config && data.config.AutoStartWorldName);
+        await loadServerStatus();
         result.innerText = "설정 저장 완료\\n저장 위치: " + data.path;
       } catch (err) {
         result.innerText = "설정 저장 실패: " + err;
@@ -1572,11 +1637,14 @@ def get_config(request: Request):
 @app.get("/api/worlds")
 def get_worlds(request: Request):
     require_auth(request)
+    config = read_config()
 
     return {
         "status": "ok",
         "path": str(SAVED_WORLDS_DIR),
-        "worlds": list_saved_world_names(),
+        "worlds": list_world_options(config),
+        "saved_worlds": list_saved_world_names(),
+        "selected_world": config.get("AutoStartWorldName"),
     }
 
 
@@ -1605,6 +1673,7 @@ def save_config(payload: ConfigRequest, request: Request):
             "message": "config.json 저장 완료",
             "path": str(config_path),
             "config": config,
+            "worlds": list_world_options(config),
         }
     except HTTPException:
         raise
@@ -1651,7 +1720,7 @@ def start_server(request: Request):
                 "status": "config_error",
                 "message": validation_error,
                 "config": str(config_path),
-                "worlds": list_saved_world_names(),
+                "worlds": list_world_options(server_config),
             }
 
         effective_server_port = int(server_config.get("Port", SERVER_PORT))
