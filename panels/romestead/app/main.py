@@ -36,6 +36,7 @@ SERVER_PORT = int(os.getenv("SERVER_PORT", "8050"))
 INSTALL_REQUEST_FILE = DATA_DIR / "install-request.txt"
 INSTALL_LOG_FILE = DATA_DIR / "install.log"
 INSTALL_STATUS_FILE = DATA_DIR / "install-status.txt"
+SERVER_CONTROL_LOG_FILE = DATA_DIR / "server-control.log"
 
 SAVED_WORLDS_DIR = DATA_DIR / "server" / "saved_worlds"
 SAVE_EXPORT_DIR = DATA_DIR / "uploads"
@@ -207,6 +208,14 @@ def write_log(message: str) -> None:
         f.write(f"[{now}] {message}\n")
 
 
+def write_server_control_log(message: str) -> None:
+    ensure_data_dirs()
+    now = datetime.now().isoformat(timespec="seconds")
+
+    with SERVER_CONTROL_LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(f"[{now}] {message}\n")
+
+
 def set_status(status: str) -> None:
     ensure_data_dirs()
     INSTALL_STATUS_FILE.write_text(status, encoding="utf-8")
@@ -286,6 +295,44 @@ def create_default_config() -> Path:
     return write_config(default_config())
 
 
+def list_saved_world_names() -> list[str]:
+    if not SAVED_WORLDS_DIR.exists():
+        return []
+
+    worlds = set()
+
+    for path in SAVED_WORLDS_DIR.iterdir():
+        if path.name.startswith("."):
+            continue
+
+        if path.is_dir():
+            worlds.add(path.name)
+        elif path.is_file():
+            worlds.add(path.stem or path.name)
+
+    return sorted(worlds, key=str.casefold)
+
+
+def validate_world_start_config(config: dict) -> str | None:
+    world_name = str(config.get("AutoStartWorldName") or "").strip()
+    auto_create = bool(config.get("AutoCreateAndLoadWorld"))
+    saved_worlds = list_saved_world_names()
+
+    if not world_name:
+        return "월드 이름이 비어 있습니다. 서버 설정에서 월드 이름을 입력해주세요."
+
+    if saved_worlds and world_name not in saved_worlds:
+        return (
+            f"'{world_name}' 월드를 찾을 수 없습니다. "
+            f"기존 저장 월드 중 하나를 선택해주세요: {', '.join(saved_worlds)}"
+        )
+
+    if not saved_worlds and not auto_create:
+        return "저장된 월드가 없고 자동 월드 생성이 꺼져 있습니다. 자동 월드 생성을 켠 뒤 다시 시작해주세요."
+
+    return None
+
+
 def server_container_keeps_stdin_open(container) -> bool:
     config = container.attrs.get("Config", {})
     return bool(config.get("OpenStdin"))
@@ -301,6 +348,41 @@ def is_server_container_running() -> bool:
         return False
     except Exception:
         return False
+
+
+def read_server_control_log() -> str:
+    if not SERVER_CONTROL_LOG_FILE.exists():
+        return ""
+
+    try:
+        return SERVER_CONTROL_LOG_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def read_container_log(container, tail: int = 200) -> str:
+    return container.logs(
+        stdout=True,
+        stderr=True,
+        tail=tail,
+    ).decode("utf-8", errors="replace")
+
+
+def combined_server_log(container=None) -> str:
+    logs = ""
+
+    if container is not None:
+        try:
+            logs = read_container_log(container)
+        except Exception as e:
+            logs = f"서버 로그 조회 실패: {e}"
+
+    control_log = read_server_control_log()
+
+    if control_log:
+        return (logs.rstrip() + "\n\n[패널 제어 로그]\n" + control_log).strip()
+
+    return logs
 
 
 def safe_extract_zip(zip_path: Path, target_dir: Path) -> None:
@@ -722,7 +804,16 @@ def dashboard(request: Request):
     .top-logout { color: #374151; }
     .top-logout:hover { color: #111827; }
     .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 24px; }
-    .card { background: rgba(249, 250, 251, 0.88); border: 1px solid rgba(229, 231, 235, 0.88); border-radius: 12px; padding: 18px; }
+    .card { display: flex; align-items: center; gap: 14px; min-height: 72px; background: rgba(249, 250, 251, 0.88); border: 1px solid rgba(229, 231, 235, 0.88); border-radius: 12px; padding: 16px; }
+    .card-icon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 46px; width: 46px; height: 46px; border-radius: 10px; overflow: hidden; color: #ffffff; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.18), 0 8px 18px rgba(17, 24, 39, 0.12); }
+    .card-icon svg { display: block; width: 26px; height: 26px; }
+    .card-icon img { display: block; width: 100%; height: 100%; }
+    .card-icon.romestead-mark { background: #2f160d; }
+    .card-icon.romestead-mark img { width: 170%; height: 100%; object-fit: cover; object-position: 16% 50%; }
+    .card-icon.install-ok { background: #16a34a; }
+    .card-icon.server-live { background: linear-gradient(135deg, #0f766e, #155e75); }
+    .card-icon.version-mark { background: linear-gradient(135deg, #374151, #111827); }
+    .card-text { min-width: 0; }
     .label { font-size: 13px; color: #6b7280; margin-bottom: 8px; }
     .value { font-size: 20px; font-weight: bold; }
     .actions { margin-top: 24px; display: grid; grid-template-columns: repeat(auto-fit, minmax(136px, 1fr)); gap: 12px; align-items: stretch; }
@@ -788,20 +879,57 @@ def dashboard(request: Request):
 
     <div class="grid">
       <div class="card">
-        <div class="label">게임</div>
-        <div class="value">Romestead</div>
+        <div class="card-icon romestead-mark" aria-hidden="true">
+          <img src="/static/romestead-logo.png" alt="">
+        </div>
+        <div class="card-text">
+          <div class="label">게임</div>
+          <div class="value">Romestead</div>
+        </div>
       </div>
       <div class="card">
-        <div class="label">설치 상태</div>
-        <div id="installStatus" class="value">확인 중</div>
+        <div class="card-icon install-ok" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m5 12.5 4.2 4.2L19 7" />
+          </svg>
+        </div>
+        <div class="card-text">
+          <div class="label">설치 상태</div>
+          <div id="installStatus" class="value">확인 중</div>
+        </div>
       </div>
       <div class="card">
-        <div class="label">서버 상태</div>
-        <div id="serverStatus" class="value">확인 중</div>
+        <div class="card-icon server-live" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="4" y="4" width="16" height="5.5" rx="1.4" />
+            <rect x="4" y="14.5" width="16" height="5.5" rx="1.4" />
+            <path d="M7 6.8h.01" />
+            <path d="M7 17.3h.01" />
+            <path d="M11 9.5v5" />
+            <path d="M14.5 12h5" />
+            <path d="m17.8 9.8 2.2 2.2-2.2 2.2" />
+          </svg>
+        </div>
+        <div class="card-text">
+          <div class="label">서버 상태</div>
+          <div id="serverStatus" class="value">확인 중</div>
+        </div>
       </div>
       <div class="card">
-        <div class="label">패널 버전</div>
-        <div class="value">__PANEL_VERSION__</div>
+        <div class="card-icon version-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M7 7h10" />
+            <path d="M7 12h6" />
+            <path d="M7 17h4" />
+            <path d="M17 14v6" />
+            <path d="m14.8 17.8 2.2 2.2 2.2-2.2" />
+            <rect x="4" y="3" width="16" height="18" rx="2" />
+          </svg>
+        </div>
+        <div class="card-text">
+          <div class="label">패널 버전</div>
+          <div class="value">__PANEL_VERSION__</div>
+        </div>
       </div>
     </div>
 
@@ -813,7 +941,8 @@ def dashboard(request: Request):
         <div class="config-grid">
           <label>
             <span class="field-title">월드 이름 <span class="help" tabindex="0" data-tip="서버가 자동으로 만들거나 불러올 월드 이름입니다. 친구들이 접속할 동일한 세계를 구분하는 이름으로 사용됩니다.">?</span></span>
-            <input id="cfgWorldName" type="text">
+            <input id="cfgWorldName" type="text" list="worldNameList">
+            <datalist id="worldNameList"></datalist>
           </label>
           <label>
             <span class="field-title">월드 크기 <span class="help" tabindex="0" data-tip="새 월드를 만들 때 적용되는 크기입니다. 값이 클수록 탐험 공간이 넓어질 수 있습니다.">?</span></span>
@@ -966,8 +1095,15 @@ def dashboard(request: Request):
           "서버 시작 요청 결과\\n" +
           "상태: " + data.status + "\\n" +
           "메시지: " + (data.message || "") + "\\n" +
+          (data.worlds && data.worlds.length ? "기존 월드: " + data.worlds.join(", ") + "\\n" : "") +
           (data.port ? "포트: " + data.port + "\\n" : "") +
           (data.container ? "컨테이너: " + data.container : "");
+
+        if (data.status === "config_error") {
+          currentLogMode = "server";
+          setLogText("[패널] 서버 시작이 차단되었습니다.\\n" + (data.message || ""));
+          return;
+        }
 
         currentLogMode = "server";
         await loadServerStatus();
@@ -998,7 +1134,7 @@ def dashboard(request: Request):
 
         currentLogMode = "server";
         await loadServerStatus();
-        await loadServerLog();
+        setLogText(data.log || ("[패널] " + (data.message || "Romestead 서버가 종료되었습니다.")));
 
       } catch (err) {
         result.innerText = "서버 중지 요청 실패: " + err;
@@ -1090,6 +1226,17 @@ def dashboard(request: Request):
       document.getElementById("cfgCheats").checked = Boolean(config.EnableCheats);
     }
 
+    function fillWorldList(worlds) {
+      const list = document.getElementById("worldNameList");
+      list.innerHTML = "";
+
+      (worlds || []).forEach(function (world) {
+        const option = document.createElement("option");
+        option.value = world;
+        list.appendChild(option);
+      });
+    }
+
     function readConfigForm() {
       return {
         AutoStartWorldName: document.getElementById("cfgWorldName").value.trim() || "world",
@@ -1107,8 +1254,19 @@ def dashboard(request: Request):
         const response = await fetch("/api/config");
         const data = await response.json();
         fillConfig(data.config || {});
+        await loadWorlds();
       } catch (err) {
         document.getElementById("result").innerText = "설정 불러오기 실패: " + err;
+      }
+    }
+
+    async function loadWorlds() {
+      try {
+        const response = await fetch("/api/worlds");
+        const data = await response.json();
+        fillWorldList(data.worlds || []);
+      } catch (err) {
+        fillWorldList([]);
       }
     }
 
@@ -1329,6 +1487,17 @@ def get_config(request: Request):
     }
 
 
+@app.get("/api/worlds")
+def get_worlds(request: Request):
+    require_auth(request)
+
+    return {
+        "status": "ok",
+        "path": str(SAVED_WORLDS_DIR),
+        "worlds": list_saved_world_names(),
+    }
+
+
 @app.post("/api/config")
 def save_config(payload: ConfigRequest, request: Request):
     require_auth(request)
@@ -1342,6 +1511,11 @@ def save_config(payload: ConfigRequest, request: Request):
     try:
         payload_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
         config = normalize_config(payload_data)
+        validation_error = validate_world_start_config(config)
+
+        if validation_error:
+            raise HTTPException(status_code=400, detail=validation_error)
+
         config_path = write_config(config)
 
         return {
@@ -1350,6 +1524,8 @@ def save_config(payload: ConfigRequest, request: Request):
             "path": str(config_path),
             "config": config,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -1381,6 +1557,18 @@ def start_server(request: Request):
 
         config_path = create_default_config()
         server_config = read_config()
+        validation_error = validate_world_start_config(server_config)
+
+        if validation_error:
+            write_server_control_log(f"서버 시작이 차단되었습니다. {validation_error}")
+
+            return {
+                "status": "config_error",
+                "message": validation_error,
+                "config": str(config_path),
+                "worlds": list_saved_world_names(),
+            }
+
         effective_server_port = int(server_config.get("Port", SERVER_PORT))
         client = docker.from_env()
 
@@ -1454,20 +1642,61 @@ def stop_server(request: Request):
             }
 
         container.reload()
+        write_server_control_log("Romestead 서버 중지 요청을 받았습니다.")
 
-        if container.status != "running":
+        try:
+            container.update(restart_policy={"Name": "no"})
+            write_server_control_log("Docker 재시작 정책을 해제했습니다.")
+        except Exception as e:
+            write_server_control_log(f"Docker 재시작 정책 해제 중 경고: {e}")
+
+        container.reload()
+
+        if container.status not in {"running", "restarting", "paused"}:
+            write_server_control_log("Romestead 서버가 이미 종료된 상태입니다.")
             return {
-                "status": container.status,
-                "message": "Romestead 서버가 실행 중이 아닙니다.",
+                "status": "stopped",
+                "message": "Romestead 서버가 이미 종료되어 있습니다.",
                 "container": container.name,
+                "log": combined_server_log(container),
             }
 
-        container.stop(timeout=15)
+        try:
+            container.stop(timeout=30)
+        except Exception as e:
+            write_server_control_log(f"정상 중지 실패, 강제 종료를 시도합니다: {e}")
+            container.remove(force=True)
+            write_server_control_log("Romestead 서버가 강제로 종료되었습니다.")
+
+            return {
+                "status": "stopped",
+                "message": "Romestead 서버가 종료되었습니다.",
+                "container": ROMESTEAD_SERVER_CONTAINER,
+                "log": combined_server_log(),
+            }
+
+        time.sleep(2)
+        container.reload()
+
+        if container.status in {"running", "restarting"}:
+            write_server_control_log("중지 후 서버가 다시 실행되어 강제 제거를 진행했습니다.")
+            container.remove(force=True)
+            write_server_control_log("Romestead 서버가 종료되었습니다.")
+
+            return {
+                "status": "stopped",
+                "message": "Romestead 서버가 종료되었습니다.",
+                "container": ROMESTEAD_SERVER_CONTAINER,
+                "log": combined_server_log(),
+            }
+
+        write_server_control_log("Romestead 서버가 종료되었습니다.")
 
         return {
             "status": "stopped",
-            "message": "Romestead 서버를 중지했습니다.",
+            "message": "Romestead 서버가 종료되었습니다.",
             "container": container.name,
+            "log": combined_server_log(container),
         }
 
     except Exception as e:
@@ -1508,13 +1737,8 @@ def restart_server(request: Request):
                 "container": container.name,
             }
 
-        container.start()
-
-        return {
-            "status": "started",
-            "message": "중지되어 있던 Romestead 서버를 다시 시작했습니다.",
-            "container": container.name,
-        }
+        container.remove(force=True)
+        return start_server(request)
 
     except Exception as e:
         return {
@@ -1564,23 +1788,25 @@ def server_log(request: Request):
 
     try:
         client = docker.from_env()
-        container = client.containers.get(ROMESTEAD_SERVER_CONTAINER)
-
-        logs = container.logs(
-            stdout=True,
-            stderr=True,
-            tail=200,
-        ).decode("utf-8", errors="replace")
+        try:
+            container = client.containers.get(ROMESTEAD_SERVER_CONTAINER)
+        except docker.errors.NotFound:
+            return {
+                "status": "not_created",
+                "log": combined_server_log(),
+            }
 
         return {
             "status": "ok",
-            "log": logs,
+            "log": combined_server_log(container),
         }
 
     except Exception as e:
+        control_log = combined_server_log()
+
         return {
             "status": "error",
-            "log": "",
+            "log": control_log,
             "error": str(e),
         }
 
