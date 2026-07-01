@@ -216,6 +216,15 @@ def write_server_control_log(message: str) -> None:
         f.write(f"[{now}] {message}\n")
 
 
+def clear_server_control_log() -> None:
+    ensure_data_dirs()
+
+    try:
+        SERVER_CONTROL_LOG_FILE.write_text("", encoding="utf-8")
+    except OSError:
+        pass
+
+
 def set_status(status: str) -> None:
     ensure_data_dirs()
     INSTALL_STATUS_FILE.write_text(status, encoding="utf-8")
@@ -368,7 +377,7 @@ def read_container_log(container, tail: int = 200) -> str:
     ).decode("utf-8", errors="replace")
 
 
-def combined_server_log(container=None) -> str:
+def combined_server_log(container=None, include_control_log: bool = True) -> str:
     logs = ""
 
     if container is not None:
@@ -379,7 +388,7 @@ def combined_server_log(container=None) -> str:
 
     control_log = read_server_control_log()
 
-    if control_log:
+    if include_control_log and control_log:
         return (logs.rstrip() + "\n\n[패널 제어 로그]\n" + control_log).strip()
 
     return logs
@@ -810,7 +819,9 @@ def dashboard(request: Request):
     .card-icon img { display: block; width: 100%; height: 100%; }
     .card-icon.romestead-mark { background: #2f160d; }
     .card-icon.romestead-mark img { width: 170%; height: 100%; object-fit: cover; object-position: 16% 50%; }
-    .card-icon.install-ok { background: #16a34a; }
+    .card-icon.status-ok { background: #16a34a; }
+    .card-icon.status-bad { background: #dc2626; }
+    .card-icon.status-pending { background: linear-gradient(135deg, #d97706, #92400e); }
     .card-icon.server-live { background: linear-gradient(135deg, #0f766e, #155e75); }
     .card-icon.version-mark { background: linear-gradient(135deg, #374151, #111827); }
     .card-text { min-width: 0; }
@@ -837,6 +848,10 @@ def dashboard(request: Request):
     button.secondary { background: #e5e7eb; color: #1f2937; }
     button.danger { background: #dc2626; color: white; }
     button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .config-save-wrap { position: relative; display: inline-flex; align-items: flex-start; }
+    .save-bubble { position: absolute; right: -8px; bottom: calc(100% + 10px); z-index: 30; min-width: 148px; padding: 10px 12px; border-radius: 10px; background: #111827; color: #ffffff; font-size: 13px; font-weight: bold; line-height: 1.35; box-shadow: 0 12px 26px rgba(17,24,39,0.26); opacity: 0; pointer-events: none; transform: translateY(6px); transition: opacity 0.18s ease, transform 0.18s ease; }
+    .save-bubble::after { content: ""; position: absolute; right: 18px; top: 100%; border-width: 7px 7px 0 7px; border-style: solid; border-color: #111827 transparent transparent transparent; }
+    .save-bubble.show { opacity: 1; transform: translateY(0); }
     .result { margin-top: 24px; padding: 16px; border-radius: 12px; background: rgba(249, 250, 251, 0.9); border: 1px solid rgba(229, 231, 235, 0.88); color: #374151; min-height: 22px; white-space: pre-line; }
     .log { margin-top: 24px; background: #111827; color: #d1d5db; border-radius: 12px; padding: 18px; min-height: 320px; max-height: 500px; overflow: auto; font-family: Consolas, Monaco, monospace; font-size: 13px; white-space: pre-wrap; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04); }
     @media (max-width: 900px) {
@@ -888,9 +903,10 @@ def dashboard(request: Request):
         </div>
       </div>
       <div class="card">
-        <div class="card-icon install-ok" aria-hidden="true">
+        <div id="installStatusIcon" class="card-icon status-pending" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
-            <path d="m5 12.5 4.2 4.2L19 7" />
+            <path d="M12 6v6l4 2" />
+            <circle cx="12" cy="12" r="8" />
           </svg>
         </div>
         <div class="card-text">
@@ -899,15 +915,10 @@ def dashboard(request: Request):
         </div>
       </div>
       <div class="card">
-        <div class="card-icon server-live" aria-hidden="true">
+        <div id="serverStatusIcon" class="card-icon status-pending" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="4" y="4" width="16" height="5.5" rx="1.4" />
-            <rect x="4" y="14.5" width="16" height="5.5" rx="1.4" />
-            <path d="M7 6.8h.01" />
-            <path d="M7 17.3h.01" />
-            <path d="M11 9.5v5" />
-            <path d="M14.5 12h5" />
-            <path d="m17.8 9.8 2.2 2.2-2.2 2.2" />
+            <path d="M12 6v6l4 2" />
+            <circle cx="12" cy="12" r="8" />
           </svg>
         </div>
         <div class="card-text">
@@ -968,8 +979,9 @@ def dashboard(request: Request):
             <input id="cfgCheats" type="checkbox">
             <span class="field-title">치트 허용 <span class="help" tabindex="0" data-tip="관리자/치트 기능 사용 여부입니다. 일반 플레이 서버라면 꺼두는 것을 권장합니다.">?</span></span>
           </label>
-          <div>
+          <div class="config-save-wrap">
             <button id="configSaveBtn" onclick="saveConfig()">설정 저장</button>
+            <div id="configSaveBubble" class="save-bubble" role="status" aria-live="polite">설정이 저장되었습니다.</div>
           </div>
         </div>
       </div>
@@ -1007,6 +1019,49 @@ def dashboard(request: Request):
       const logBox = getLogBox();
       logBox.innerText = text || "로그가 없습니다.";
       scrollLogToBottom();
+    }
+
+    const statusIcons = {
+      check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.2 4.2L19 7" /></svg>',
+      x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7 17 17" /><path d="m17 7-10 10" /></svg>',
+      pending: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6v6l4 2" /><circle cx="12" cy="12" r="8" /></svg>',
+      server: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="5.5" rx="1.4" /><rect x="4" y="14.5" width="16" height="5.5" rx="1.4" /><path d="M7 6.8h.01" /><path d="M7 17.3h.01" /><path d="M11 9.5v5" /><path d="M14.5 12h5" /><path d="m17.8 9.8 2.2 2.2-2.2 2.2" /></svg>'
+    };
+
+    function setStatusIcon(iconId, variant, iconName) {
+      const icon = document.getElementById(iconId);
+
+      if (!icon) {
+        return;
+      }
+
+      icon.classList.remove("status-ok", "status-bad", "status-pending", "server-live");
+      icon.classList.add(variant);
+      icon.innerHTML = statusIcons[iconName] || statusIcons.pending;
+    }
+
+    function updateInstallStatusIcon(status) {
+      const normalized = (status || "").toLowerCase();
+
+      if (normalized === "completed") {
+        setStatusIcon("installStatusIcon", "status-ok", "check");
+      } else if (["not_started", "failed", "error"].includes(normalized)) {
+        setStatusIcon("installStatusIcon", "status-bad", "x");
+      } else {
+        setStatusIcon("installStatusIcon", "status-pending", "pending");
+      }
+    }
+
+    function updateServerStatusIcon(status) {
+      const normalized = (status || "").toLowerCase();
+
+      if (normalized === "running") {
+        setStatusIcon("serverStatusIcon", "server-live", "server");
+      } else if (["not_created", "stopped", "exited", "dead", "error", "config_error"].includes(normalized)) {
+        setStatusIcon("serverStatusIcon", "status-bad", "x");
+      } else {
+        setStatusIcon("serverStatusIcon", "status-pending", "pending");
+      }
     }
 
     function isRunningStatus(status) {
@@ -1079,6 +1134,8 @@ def dashboard(request: Request):
       }
 
       result.innerText = "Romestead 서버를 시작하는 중입니다...";
+      currentLogMode = "server";
+      setLogText("[패널] Romestead 서버를 시작하는 중입니다...");
 
       try {
         const response = await fetch("/api/server/start", {
@@ -1237,6 +1294,23 @@ def dashboard(request: Request):
       });
     }
 
+    let configSaveBubbleTimer = null;
+
+    function showConfigSaveBubble() {
+      const bubble = document.getElementById("configSaveBubble");
+
+      if (!bubble) {
+        return;
+      }
+
+      window.clearTimeout(configSaveBubbleTimer);
+      bubble.classList.add("show");
+
+      configSaveBubbleTimer = window.setTimeout(function () {
+        bubble.classList.remove("show");
+      }, 2200);
+    }
+
     function readConfigForm() {
       return {
         AutoStartWorldName: document.getElementById("cfgWorldName").value.trim() || "world",
@@ -1294,6 +1368,7 @@ def dashboard(request: Request):
         }
 
         fillConfig(data.config || {});
+        showConfigSaveBubble();
         result.innerText = "설정 저장 완료\\n저장 위치: " + data.path;
       } catch (err) {
         result.innerText = "설정 저장 실패: " + err;
@@ -1319,10 +1394,12 @@ def dashboard(request: Request):
         const data = await response.json();
         const status = data.status || "error";
         document.getElementById("serverStatus").innerText = status;
+        updateServerStatusIcon(status);
         setConfigLocked(isRunningStatus(status));
         return status;
       } catch (err) {
         document.getElementById("serverStatus").innerText = "error";
+        updateServerStatusIcon("error");
         setConfigLocked(false);
         return "error";
       }
@@ -1333,8 +1410,10 @@ def dashboard(request: Request):
         const response = await fetch("/api/install/status");
         const data = await response.json();
         document.getElementById("installStatus").innerText = data.status;
+        updateInstallStatusIcon(data.status);
       } catch (err) {
         document.getElementById("installStatus").innerText = "error";
+        updateInstallStatusIcon("error");
       }
     }
 
@@ -1557,6 +1636,9 @@ def start_server(request: Request):
 
         config_path = create_default_config()
         server_config = read_config()
+        clear_server_control_log()
+        write_server_control_log("Romestead 서버 시작 요청을 받았습니다.")
+
         validation_error = validate_world_start_config(server_config)
 
         if validation_error:
@@ -1796,9 +1878,12 @@ def server_log(request: Request):
                 "log": combined_server_log(),
             }
 
+        container.reload()
+        include_control_log = container.status not in {"running", "restarting"}
+
         return {
             "status": "ok",
-            "log": combined_server_log(container),
+            "log": combined_server_log(container, include_control_log=include_control_log),
         }
 
     except Exception as e:
