@@ -711,13 +711,16 @@ def dashboard(request: Request):
   <title>TechTim Romestead Server Panel</title>
   <style>
     body { min-height: 100vh; margin: 0; font-family: Arial, sans-serif; background: linear-gradient(135deg, rgba(12, 23, 20, 0.7), rgba(32, 28, 22, 0.5)), url("/static/romestead-panel-bg.png") center / cover fixed no-repeat; color: #1f2937; }
-    .wrap { max-width: 1180px; margin: 40px auto; background: rgba(255, 255, 255, 0.9); border: 1px solid rgba(255,255,255,0.58); border-radius: 16px; padding: 40px; box-shadow: 0 24px 80px rgba(0,0,0,0.35); backdrop-filter: blur(12px); }
+    .wrap { max-width: 1180px; margin: 40px auto; background: rgba(255, 255, 255, 0.65); border: 1px solid rgba(255,255,255,0.58); border-radius: 16px; padding: 40px; box-shadow: 0 24px 80px rgba(0,0,0,0.35); backdrop-filter: blur(12px); }
     .topbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
     h1 { margin: 0; font-size: 34px; }
     .top-links { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-    .top-link { display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 38px; border: 1px solid #d1d5db; border-radius: 999px; color: #4b5563; background: #f9fafb; text-decoration: none; }
+    .top-link { display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 38px; padding: 0; border: 1px solid #d1d5db; border-radius: 999px; color: #4b5563; background: #f9fafb; text-decoration: none; appearance: none; line-height: 1; }
     .top-link:hover { background: #f3f4f6; border-color: #9ca3af; }
     .top-link img { display: block; width: 20px; height: 20px; opacity: 0.86; }
+    .top-link svg { display: block; width: 21px; height: 21px; }
+    .top-logout { color: #374151; }
+    .top-logout:hover { color: #111827; }
     .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 24px; }
     .card { background: rgba(249, 250, 251, 0.88); border: 1px solid rgba(229, 231, 235, 0.88); border-radius: 12px; padding: 18px; }
     .label { font-size: 13px; color: #6b7280; margin-bottom: 8px; }
@@ -744,7 +747,7 @@ def dashboard(request: Request):
     button.danger { background: #dc2626; color: white; }
     button:disabled { opacity: 0.6; cursor: not-allowed; }
     .result { margin-top: 24px; padding: 16px; border-radius: 12px; background: rgba(249, 250, 251, 0.9); border: 1px solid rgba(229, 231, 235, 0.88); color: #374151; min-height: 22px; white-space: pre-line; }
-    .log { margin-top: 24px; background: rgba(17, 24, 39, 0.94); color: #d1d5db; border-radius: 12px; padding: 18px; min-height: 320px; max-height: 500px; overflow: auto; font-family: Consolas, Monaco, monospace; font-size: 13px; white-space: pre-wrap; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04); }
+    .log { margin-top: 24px; background: #111827; color: #d1d5db; border-radius: 12px; padding: 18px; min-height: 320px; max-height: 500px; overflow: auto; font-family: Consolas, Monaco, monospace; font-size: 13px; white-space: pre-wrap; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04); }
     @media (max-width: 900px) {
       .wrap { margin: 0; border-radius: 0; padding: 20px; }
       .topbar { align-items: flex-start; flex-direction: column; }
@@ -767,6 +770,19 @@ def dashboard(request: Request):
         <a class="top-link" href="https://www.youtube.com/@kortechtim" target="_blank" rel="noopener noreferrer" title="유튜브채널 접속" aria-label="유튜브채널 접속">
           <img src="https://cdn.simpleicons.org/youtube/FF0000" alt="">
         </a>
+        <button class="top-link top-logout" type="button" onclick="logout()" title="로그아웃" aria-label="로그아웃">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M5 21V5a2 2 0 0 1 2-2h7" />
+            <path d="M8 21h6" />
+            <circle cx="11" cy="7.2" r="1.5" />
+            <path d="M10.5 9.4 9 12.2l2.4 1.4" />
+            <path d="M11.7 11.4 14 12.8" />
+            <path d="M9.1 12.6 7.7 15.5" />
+            <path d="M11.5 13.8 10.8 17" />
+            <path d="M16 12h5" />
+            <path d="m19 9 3 3-3 3" />
+          </svg>
+        </button>
       </div>
     </div>
 
@@ -840,7 +856,6 @@ def dashboard(request: Request):
       <button class="secondary" onclick="downloadSaves()">세이브 다운로드</button>
       <button class="secondary" onclick="triggerSaveUpload()">세이브 업로드</button>
       <input id="saveUploadInput" type="file" accept=".zip" onchange="uploadSaves()" style="display:none">
-      <button class="danger" onclick="logout()">로그아웃</button>
     </div>
 
     <div id="result" class="result" hidden></div>
