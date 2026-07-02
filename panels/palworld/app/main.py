@@ -7,6 +7,7 @@ from pathlib import Path
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import time
@@ -14,31 +15,34 @@ import zipfile
 
 import docker
 
-app = FastAPI(title="TechTim Romestead Server Panel")
+app = FastAPI(title="TechTim Palworld Server Panel")
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-GAME_CODE = os.getenv("GAME_CODE", "romestead")
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+GAME_CODE = os.getenv("GAME_CODE", "palworld")
 PANEL_VERSION = os.getenv("PANEL_VERSION", "1.0.0")
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
-HOST_DATA_DIR = Path(os.getenv("HOST_DATA_DIR", "/opt/techtim/romestead/data"))
+HOST_DATA_DIR = Path(os.getenv("HOST_DATA_DIR", "/opt/techtim/palworld/data"))
 
 STEAMCMD_IMAGE = os.getenv("STEAMCMD_IMAGE", "steamcmd/steamcmd:ubuntu")
-ROMESTEAD_APP_ID = os.getenv("ROMESTEAD_APP_ID", "4763510")
+PALWORLD_APP_ID = os.getenv("PALWORLD_APP_ID", "2394010")
 
-ROMESTEAD_SERVER_CONTAINER = os.getenv("ROMESTEAD_SERVER_CONTAINER", "romestead-server")
-DOTNET_IMAGE = os.getenv("DOTNET_IMAGE", "mcr.microsoft.com/dotnet/runtime:8.0")
-SERVER_PORT = int(os.getenv("SERVER_PORT", "8050"))
+PALWORLD_SERVER_CONTAINER = os.getenv("PALWORLD_SERVER_CONTAINER", "palworld-server")
+PALWORLD_RUNTIME_IMAGE = os.getenv("PALWORLD_RUNTIME_IMAGE", STEAMCMD_IMAGE)
+SERVER_PORT = int(os.getenv("SERVER_PORT", "8211"))
+RCON_PORT = int(os.getenv("RCON_PORT", "25575"))
 
 INSTALL_REQUEST_FILE = DATA_DIR / "install-request.txt"
 INSTALL_LOG_FILE = DATA_DIR / "install.log"
 INSTALL_STATUS_FILE = DATA_DIR / "install-status.txt"
 SERVER_CONTROL_LOG_FILE = DATA_DIR / "server-control.log"
 
-SAVED_WORLDS_DIR = DATA_DIR / "server" / "saved_worlds"
+SAVED_WORLDS_DIR = DATA_DIR / "server" / "Pal" / "Saved" / "SaveGames"
 SAVE_EXPORT_DIR = DATA_DIR / "uploads"
 
 AUTH_FILE = DATA_DIR / "auth.json"
@@ -56,14 +60,14 @@ class ChangePasswordRequest(BaseModel):
 
 
 class ConfigRequest(BaseModel):
-    AutoStartWorldName: str = "world"
-    AutoCreateAndLoadWorld: bool = True
-    AutoCreateWorldSize: int = 1
-    AutoCreateWorldSeed: int | None = None
-    Password: str = ""
-    Port: int = SERVER_PORT
-    MaxPlayers: int = 10
-    EnableCheats: bool = False
+    ServerName: str = "TechTim Palworld Server"
+    ServerDescription: str = ""
+    AdminPassword: str = ""
+    ServerPassword: str = ""
+    PublicPort: int = SERVER_PORT
+    MaxPlayers: int = 32
+    RCONEnabled: bool = False
+    RCONPort: int = RCON_PORT
 
 
 def ensure_data_dirs() -> None:
@@ -239,19 +243,19 @@ def get_status() -> str:
 
 
 def get_config_path() -> Path:
-    return DATA_DIR / "server" / "config.json"
+    return DATA_DIR / "server" / "Pal" / "Saved" / "Config" / "LinuxServer" / "PalWorldSettings.ini"
 
 
 def default_config() -> dict:
     return {
-        "AutoStartWorldName": "world",
-        "AutoCreateAndLoadWorld": True,
-        "AutoCreateWorldSize": 1,
-        "AutoCreateWorldSeed": None,
-        "Password": "",
-        "Port": SERVER_PORT,
-        "MaxPlayers": 10,
-        "EnableCheats": False,
+        "ServerName": "TechTim Palworld Server",
+        "ServerDescription": "",
+        "AdminPassword": "",
+        "ServerPassword": "",
+        "PublicPort": SERVER_PORT,
+        "MaxPlayers": 32,
+        "RCONEnabled": False,
+        "RCONPort": RCON_PORT,
     }
 
 
@@ -259,40 +263,179 @@ def normalize_config(config: dict) -> dict:
     merged = default_config()
     merged.update(config)
 
-    merged["AutoStartWorldName"] = str(merged.get("AutoStartWorldName") or "world").strip() or "world"
-    merged["AutoCreateAndLoadWorld"] = bool(merged.get("AutoCreateAndLoadWorld"))
-    merged["AutoCreateWorldSize"] = max(1, min(5, int(merged.get("AutoCreateWorldSize") or 1)))
-    seed_value = merged.get("AutoCreateWorldSeed")
-    merged["AutoCreateWorldSeed"] = None if seed_value in ("", None) else int(seed_value)
-    merged["Password"] = str(merged.get("Password") or "")
-    merged["Port"] = max(1, min(65535, int(merged.get("Port") or SERVER_PORT)))
-    merged["MaxPlayers"] = max(1, min(100, int(merged.get("MaxPlayers") or 10)))
-    merged["EnableCheats"] = bool(merged.get("EnableCheats"))
+    merged["ServerName"] = str(merged.get("ServerName") or "TechTim Palworld Server").strip() or "TechTim Palworld Server"
+    merged["ServerDescription"] = str(merged.get("ServerDescription") or "")
+    merged["AdminPassword"] = str(merged.get("AdminPassword") or "")
+    merged["ServerPassword"] = str(merged.get("ServerPassword") or "")
+    merged["PublicPort"] = max(1, min(65535, int(merged.get("PublicPort") or SERVER_PORT)))
+    merged["MaxPlayers"] = max(1, min(100, int(merged.get("MaxPlayers") or 32)))
+    merged["RCONEnabled"] = bool(merged.get("RCONEnabled"))
+    merged["RCONPort"] = max(1, min(65535, int(merged.get("RCONPort") or RCON_PORT)))
 
     return merged
 
 
-def read_config() -> dict:
+PALWORLD_OPTION_DEFAULTS = {
+    "Difficulty": "None",
+    "DayTimeSpeedRate": 1.0,
+    "NightTimeSpeedRate": 1.0,
+    "ExpRate": 1.0,
+    "PalCaptureRate": 1.0,
+    "PalSpawnNumRate": 1.0,
+    "PalDamageRateAttack": 1.0,
+    "PalDamageRateDefense": 1.0,
+    "PlayerDamageRateAttack": 1.0,
+    "PlayerDamageRateDefense": 1.0,
+    "PlayerStomachDecreaceRate": 1.0,
+    "PlayerStaminaDecreaceRate": 1.0,
+    "PlayerAutoHPRegeneRate": 1.0,
+    "PlayerAutoHpRegeneRateInSleep": 1.0,
+    "PalStomachDecreaceRate": 1.0,
+    "PalStaminaDecreaceRate": 1.0,
+    "PalAutoHPRegeneRate": 1.0,
+    "PalAutoHpRegeneRateInSleep": 1.0,
+    "BuildObjectDamageRate": 1.0,
+    "BuildObjectDeteriorationDamageRate": 1.0,
+    "CollectionDropRate": 1.0,
+    "CollectionObjectHpRate": 1.0,
+    "CollectionObjectRespawnSpeedRate": 1.0,
+    "EnemyDropItemRate": 1.0,
+    "DeathPenalty": "All",
+    "bEnablePlayerToPlayerDamage": False,
+    "bEnableFriendlyFire": False,
+    "bEnableInvaderEnemy": True,
+    "bActiveUNKO": False,
+    "bEnableAimAssistPad": True,
+    "bEnableAimAssistKeyboard": False,
+    "DropItemMaxNum": 3000,
+    "DropItemMaxNum_UNKO": 100,
+    "BaseCampMaxNum": 128,
+    "BaseCampWorkerMaxNum": 15,
+    "DropItemAliveMaxHours": 1.0,
+    "bAutoResetGuildNoOnlinePlayers": False,
+    "AutoResetGuildTimeNoOnlinePlayers": 72.0,
+    "GuildPlayerMaxNum": 20,
+    "PalEggDefaultHatchingTime": 72.0,
+    "WorkSpeedRate": 1.0,
+    "bIsMultiplay": False,
+    "bIsPvP": False,
+    "bCanPickupOtherGuildDeathPenaltyDrop": False,
+    "bEnableNonLoginPenalty": True,
+    "bEnableFastTravel": True,
+    "bIsStartLocationSelectByMap": True,
+    "bExistPlayerAfterLogout": False,
+    "bEnableDefenseOtherGuildPlayer": False,
+    "CoopPlayerMaxNum": 4,
+    "ServerPlayerMaxNum": 32,
+    "ServerName": "TechTim Palworld Server",
+    "ServerDescription": "",
+    "AdminPassword": "",
+    "ServerPassword": "",
+    "PublicPort": SERVER_PORT,
+    "PublicIP": "",
+    "RCONEnabled": False,
+    "RCONPort": RCON_PORT,
+    "Region": "",
+    "bUseAuth": True,
+    "BanListURL": "https://api.palworldgame.com/api/banlist.txt",
+}
+
+
+PALWORLD_OPTION_ORDER = list(PALWORLD_OPTION_DEFAULTS.keys())
+
+
+def split_palworld_options(option_text: str) -> dict:
+    values = {}
+
+    for match in re.finditer(r"([A-Za-z0-9_]+)=(\"(?:[^\"\\\\]|\\\\.)*\"|[^,)]+)", option_text):
+        raw_value = match.group(2).strip()
+
+        if raw_value.startswith('"') and raw_value.endswith('"'):
+            values[match.group(1)] = raw_value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+        elif raw_value in {"True", "False"}:
+            values[match.group(1)] = raw_value == "True"
+        else:
+            try:
+                values[match.group(1)] = float(raw_value) if "." in raw_value else int(raw_value)
+            except ValueError:
+                values[match.group(1)] = raw_value
+
+    return values
+
+
+def read_palworld_options() -> dict:
     config_path = get_config_path()
 
     if not config_path.exists():
-        return default_config()
+        return PALWORLD_OPTION_DEFAULTS.copy()
 
     try:
-        return normalize_config(json.loads(config_path.read_text(encoding="utf-8")))
-    except (json.JSONDecodeError, OSError, ValueError):
-        return default_config()
+        text = config_path.read_text(encoding="utf-8")
+    except OSError:
+        return PALWORLD_OPTION_DEFAULTS.copy()
+
+    match = re.search(r"OptionSettings=\((.*)\)", text, re.DOTALL)
+
+    if not match:
+        return PALWORLD_OPTION_DEFAULTS.copy()
+
+    merged = PALWORLD_OPTION_DEFAULTS.copy()
+    merged.update(split_palworld_options(match.group(1)))
+    return merged
+
+
+def palworld_option_value(value) -> str:
+    if isinstance(value, bool):
+        return "True" if value else "False"
+
+    if isinstance(value, int):
+        return str(value)
+
+    if isinstance(value, float):
+        return f"{value:.6f}"
+
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def read_config() -> dict:
+    options = read_palworld_options()
+
+    return normalize_config({
+        "ServerName": options.get("ServerName"),
+        "ServerDescription": options.get("ServerDescription"),
+        "AdminPassword": options.get("AdminPassword"),
+        "ServerPassword": options.get("ServerPassword"),
+        "PublicPort": options.get("PublicPort"),
+        "MaxPlayers": options.get("ServerPlayerMaxNum"),
+        "RCONEnabled": options.get("RCONEnabled"),
+        "RCONPort": options.get("RCONPort"),
+    })
 
 
 def write_config(config: dict) -> Path:
-    server_dir = DATA_DIR / "server"
-    server_dir.mkdir(parents=True, exist_ok=True)
-
     config_path = get_config_path()
     normalized = normalize_config(config)
+    options = read_palworld_options()
+
+    options.update({
+        "ServerName": normalized["ServerName"],
+        "ServerDescription": normalized["ServerDescription"],
+        "AdminPassword": normalized["AdminPassword"],
+        "ServerPassword": normalized["ServerPassword"],
+        "PublicPort": normalized["PublicPort"],
+        "ServerPlayerMaxNum": normalized["MaxPlayers"],
+        "RCONEnabled": normalized["RCONEnabled"],
+        "RCONPort": normalized["RCONPort"],
+    })
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    ordered_keys = PALWORLD_OPTION_ORDER + [key for key in options if key not in PALWORLD_OPTION_ORDER]
+    option_text = ",".join(f"{key}={palworld_option_value(options[key])}" for key in ordered_keys)
 
     config_path.write_text(
-        json.dumps(normalized, indent=2, ensure_ascii=False),
+        "[/Script/Pal.PalGameWorldSettings]\n"
+        f"OptionSettings=({option_text})\n",
         encoding="utf-8",
     )
 
@@ -320,58 +463,19 @@ def list_saved_world_names() -> list[str]:
 
         if path.is_dir():
             worlds.add(path.name)
-        elif path.is_file():
-            worlds.add(path.stem or path.name)
 
     return sorted(worlds, key=str.casefold)
 
 
 def list_world_options(config: dict | None = None) -> list[str]:
-    worlds = set(list_saved_world_names())
-    source_config = config or read_config()
-    configured_world = str(source_config.get("AutoStartWorldName") or "").strip()
-
-    if configured_world and bool(source_config.get("AutoCreateAndLoadWorld")):
-        worlds.add(configured_world)
-
-    return sorted(worlds, key=str.casefold)
-
-
-def validate_world_name(world_name: str) -> str | None:
-    if not world_name:
-        return "월드 이름이 비어 있습니다. 서버 설정에서 월드 이름을 입력해주세요."
-
-    if world_name in {".", ".."} or "/" in world_name or "\\" in world_name:
-        return "월드 이름에는 /, \\, . 또는 .. 경로 문자를 사용할 수 없습니다."
-
-    if len(world_name) > 64:
-        return "월드 이름은 64자 이하로 입력해주세요."
-
-    return None
+    return list_saved_world_names()
 
 
 def validate_world_start_config(config: dict) -> str | None:
-    world_name = str(config.get("AutoStartWorldName") or "").strip()
-    auto_create = bool(config.get("AutoCreateAndLoadWorld"))
-    saved_worlds = list_saved_world_names()
-    name_error = validate_world_name(world_name)
+    if not str(config.get("ServerName") or "").strip():
+        return "서버 이름이 비어 있습니다. 서버 설정에서 서버 이름을 입력해주세요."
 
-    if name_error:
-        return name_error
-
-    if world_name in saved_worlds:
-        return None
-
-    if auto_create:
-        return None
-
-    if saved_worlds:
-        return (
-            f"'{world_name}' 월드를 찾을 수 없습니다. "
-            f"기존 저장 월드 중 하나를 선택하거나 자동 월드 생성을 켜주세요: {', '.join(saved_worlds)}"
-        )
-
-    return "저장된 월드가 없고 자동 월드 생성이 꺼져 있습니다. 자동 월드 생성을 켠 뒤 다시 시작해주세요."
+    return None
 
 
 def server_container_keeps_stdin_open(container) -> bool:
@@ -382,7 +486,7 @@ def server_container_keeps_stdin_open(container) -> bool:
 def is_server_container_running() -> bool:
     try:
         client = docker.from_env()
-        container = client.containers.get(ROMESTEAD_SERVER_CONTAINER)
+        container = client.containers.get(PALWORLD_SERVER_CONTAINER)
         container.reload()
         return container.status == "running"
     except docker.errors.NotFound:
@@ -440,16 +544,16 @@ def safe_extract_zip(zip_path: Path, target_dir: Path) -> None:
         zip_ref.extractall(target_dir)
 
 
-def install_romestead_job() -> None:
+def install_palworld_job() -> None:
     ensure_data_dirs()
 
     INSTALL_LOG_FILE.write_text("", encoding="utf-8")
     set_status("running")
 
-    write_log("Romestead Dedicated Server 설치 작업을 시작합니다.")
+    write_log("Palworld Dedicated Server 설치 작업을 시작합니다.")
     write_log("SteamCMD anonymous 로그인을 사용합니다.")
     write_log("Steam 계정 정보 입력은 필요하지 않습니다.")
-    write_log(f"Romestead Dedicated Server App ID: {ROMESTEAD_APP_ID}")
+    write_log(f"Palworld Dedicated Server App ID: {PALWORLD_APP_ID}")
 
     try:
         server_dir = DATA_DIR / "server"
@@ -467,12 +571,12 @@ def install_romestead_job() -> None:
         client.images.pull(STEAMCMD_IMAGE)
 
         write_log("SteamCMD 이미지 준비 완료.")
-        write_log("Romestead 서버 파일 다운로드를 시작합니다.")
+        write_log("Palworld 서버 파일 다운로드를 시작합니다.")
 
         steamcmd_command = [
             "+force_install_dir", "/server",
             "+login", "anonymous",
-            "+app_update", ROMESTEAD_APP_ID, "validate",
+            "+app_update", PALWORLD_APP_ID, "validate",
             "+quit",
         ]
 
@@ -482,7 +586,7 @@ def install_romestead_job() -> None:
         for attempt in range(1, max_attempts + 1):
             container = None
             missing_configuration = False
-            container_name = f"romestead-steamcmd-install-{int(time.time())}-{attempt}"
+            container_name = f"palworld-steamcmd-install-{int(time.time())}-{attempt}"
 
             write_log(f"SteamCMD 설치 시도 {attempt}/{max_attempts}")
 
@@ -542,25 +646,32 @@ def install_romestead_job() -> None:
             set_status("failed")
             return
 
-        server_dll = server_dir / "Server.dll"
+        server_executable = server_dir / "PalServer.sh"
 
-        if not server_dll.exists():
-            write_log("ERROR: 설치 명령은 종료되었지만 Server.dll 파일을 찾을 수 없습니다.")
+        if not server_executable.exists():
+            write_log("ERROR: 설치 명령은 종료되었지만 PalServer.sh 파일을 찾을 수 없습니다.")
             set_status("failed")
             return
 
+        try:
+            server_executable.chmod(0o755)
+        except OSError as chmod_error:
+            write_log(f"WARNING: PalServer.sh 실행 권한 설정 중 경고: {chmod_error}")
+
+        create_default_config()
+
         INSTALL_REQUEST_FILE.write_text(
-            "TechTim Romestead Dedicated Server install completed.\n"
+            "TechTim Palworld Dedicated Server install completed.\n"
             f"game={GAME_CODE}\n"
             f"panel_version={PANEL_VERSION}\n"
             "steam_login=anonymous\n"
-            f"app_id={ROMESTEAD_APP_ID}\n"
+            f"app_id={PALWORLD_APP_ID}\n"
             f"completed_at={datetime.now().isoformat(timespec='seconds')}\n",
             encoding="utf-8",
         )
 
-        write_log("Romestead Dedicated Server 파일 다운로드가 완료되었습니다.")
-        write_log("이제 Web GUI에서 config.json을 저장하고 서버를 시작할 수 있습니다.")
+        write_log("Palworld Dedicated Server 파일 다운로드가 완료되었습니다.")
+        write_log("이제 Web GUI에서 PalWorldSettings.ini를 저장하고 서버를 시작할 수 있습니다.")
         set_status("completed")
 
     except Exception as e:
@@ -583,9 +694,9 @@ def login_page(request: Request):
 <html lang="ko">
 <head>
   <meta charset="utf-8">
-  <title>TechTim Romestead Login</title>
+  <title>TechTim Palworld Login</title>
   <style>
-    body { min-height: 100vh; margin: 0; font-family: Arial, sans-serif; background: linear-gradient(135deg, rgba(12, 23, 20, 0.72), rgba(32, 28, 22, 0.56)), url("/static/romestead-panel-bg.png") center / cover fixed no-repeat; color: #1f2937; }
+    body { min-height: 100vh; margin: 0; font-family: Arial, sans-serif; background: radial-gradient(circle at 78% 14%, rgba(255, 219, 98, 0.55), transparent 24%), radial-gradient(circle at 20% 76%, rgba(80, 214, 204, 0.34), transparent 28%), linear-gradient(135deg, #6fc7df 0%, #d6f0e8 46%, #5ea976 70%, #1f5f58 100%); color: #1f2937; }
     .box { max-width: 420px; margin: 100px auto; background: rgba(255, 255, 255, 0.92); border: 1px solid rgba(255,255,255,0.56); border-radius: 16px; padding: 34px; box-shadow: 0 24px 70px rgba(0,0,0,0.34); backdrop-filter: blur(12px); }
     h1 { margin: 0 0 10px; font-size: 28px; }
     p { color: #6b7280; line-height: 1.5; }
@@ -598,7 +709,7 @@ def login_page(request: Request):
 </head>
 <body>
   <div class="box">
-    <h1>TechTim Romestead Panel</h1>
+    <h1>TechTim Palworld Panel</h1>
     <p>관리자 계정으로 로그인하세요.</p>
 
     <form id="loginForm">
@@ -672,7 +783,7 @@ def change_password_page(request: Request):
   <meta charset="utf-8">
   <title>Change Admin Password</title>
   <style>
-    body { min-height: 100vh; margin: 0; font-family: Arial, sans-serif; background: linear-gradient(135deg, rgba(12, 23, 20, 0.72), rgba(32, 28, 22, 0.56)), url("/static/romestead-panel-bg.png") center / cover fixed no-repeat; color: #1f2937; }
+    body { min-height: 100vh; margin: 0; font-family: Arial, sans-serif; background: radial-gradient(circle at 78% 14%, rgba(255, 219, 98, 0.55), transparent 24%), radial-gradient(circle at 20% 76%, rgba(80, 214, 204, 0.34), transparent 28%), linear-gradient(135deg, #6fc7df 0%, #d6f0e8 46%, #5ea976 70%, #1f5f58 100%); color: #1f2937; }
     .box { max-width: 460px; margin: 90px auto; background: rgba(255, 255, 255, 0.92); border: 1px solid rgba(255,255,255,0.56); border-radius: 16px; padding: 34px; box-shadow: 0 24px 70px rgba(0,0,0,0.34); backdrop-filter: blur(12px); }
     h1 { margin: 0 0 10px; font-size: 28px; }
     p { color: #6b7280; line-height: 1.5; }
@@ -831,9 +942,9 @@ def dashboard(request: Request):
 <html lang="ko">
 <head>
   <meta charset="utf-8">
-  <title>TechTim Romestead Server Panel</title>
+  <title>TechTim Palworld Server Panel</title>
   <style>
-    body { min-height: 100vh; margin: 0; font-family: Arial, sans-serif; background: linear-gradient(135deg, rgba(12, 23, 20, 0.7), rgba(32, 28, 22, 0.5)), url("/static/romestead-panel-bg.png") center / cover fixed no-repeat; color: #1f2937; }
+    body { min-height: 100vh; margin: 0; font-family: Arial, sans-serif; background: radial-gradient(circle at 78% 14%, rgba(255, 219, 98, 0.55), transparent 24%), radial-gradient(circle at 20% 76%, rgba(80, 214, 204, 0.34), transparent 28%), linear-gradient(135deg, #6fc7df 0%, #d6f0e8 46%, #5ea976 70%, #1f5f58 100%); color: #1f2937; }
     .wrap { max-width: 1180px; margin: 40px auto; background: rgba(255, 255, 255, 0.65); border: 1px solid rgba(255,255,255,0.58); border-radius: 16px; padding: 40px; box-shadow: 0 24px 80px rgba(0,0,0,0.35); backdrop-filter: blur(12px); }
     .topbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
     h1 { margin: 0; font-size: 34px; }
@@ -849,8 +960,7 @@ def dashboard(request: Request):
     .card-icon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 46px; width: 46px; height: 46px; border-radius: 10px; overflow: hidden; color: #ffffff; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.18), 0 8px 18px rgba(17, 24, 39, 0.12); }
     .card-icon svg { display: block; width: 26px; height: 26px; }
     .card-icon img { display: block; width: 100%; height: 100%; }
-    .card-icon.romestead-mark { background: #2f160d; }
-    .card-icon.romestead-mark img { width: 170%; height: 100%; object-fit: cover; object-position: 16% 50%; }
+    .card-icon.palworld-mark { background: linear-gradient(135deg, #27a9d8, #64c36f); }
     .card-icon.status-ok { background: #16a34a; }
     .card-icon.status-bad { background: #dc2626; }
     .card-icon.status-pending { background: linear-gradient(135deg, #d97706, #92400e); }
@@ -904,7 +1014,7 @@ def dashboard(request: Request):
 <body>
   <div class="wrap">
     <div class="topbar">
-      <h1>TechTim Romestead Server Panel</h1>
+      <h1>TechTim Palworld Server Panel</h1>
       <div class="top-links">
         <a class="top-link" href="https://discord.gg/Awy6Uh38KW" target="_blank" rel="noopener noreferrer" title="디스코드 접속" aria-label="디스코드 접속">
           <img src="https://cdn.simpleicons.org/discord/5865F2" alt="">
@@ -930,12 +1040,19 @@ def dashboard(request: Request):
 
     <div class="grid">
       <div class="card">
-        <div class="card-icon romestead-mark" aria-hidden="true">
-          <img src="/static/romestead-logo.png" alt="">
+        <div class="card-icon palworld-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 3.5c3.6 0 6.5 2.8 6.5 6.3 0 2.8-1.9 5.1-4.5 6l-2 4.7-2-4.7c-2.6-.9-4.5-3.2-4.5-6 0-3.5 2.9-6.3 6.5-6.3Z" />
+            <path d="M8.2 7.4 5.8 4.6l4 .9" />
+            <path d="m15.8 7.4 2.4-2.8-4 .9" />
+            <path d="M9.2 10.2h.01" />
+            <path d="M14.8 10.2h.01" />
+            <path d="M10 13c1.2.9 2.8.9 4 0" />
+          </svg>
         </div>
         <div class="card-text">
           <div class="label">게임</div>
-          <div class="value">Romestead</div>
+          <div class="value">Palworld</div>
         </div>
       </div>
       <div class="card">
@@ -987,39 +1104,37 @@ def dashboard(request: Request):
         <h2>서버 설정</h2>
         <div class="config-grid">
           <label>
-            <span class="field-title">월드 이름 <span class="help" tabindex="0" data-tip="기존 월드는 목록에서 선택하고, 새 월드는 이름을 직접 입력한 뒤 자동 월드 생성을 켜면 서버 시작 시 생성됩니다.">?</span></span>
-            <input id="cfgWorldName" type="text" list="worldNameList">
-            <datalist id="worldNameList"></datalist>
+            <span class="field-title">서버 이름 <span class="help" tabindex="0" data-tip="Palworld 서버 목록과 접속 화면에 표시되는 이름입니다.">?</span></span>
+            <input id="cfgServerName" type="text">
           </label>
           <label>
-            <span class="field-title">월드 크기 <span class="help" tabindex="0" data-tip="새 월드를 만들 때 적용되는 크기입니다. 값이 클수록 탐험 공간이 넓어질 수 있습니다.">?</span></span>
-            <input id="cfgWorldSize" type="number" min="1" max="5" step="1">
+            <span class="field-title">서버 설명 <span class="help" tabindex="0" data-tip="서버 소개 문구입니다. 비워두어도 서버 실행에는 문제가 없습니다.">?</span></span>
+            <input id="cfgDescription" type="text">
           </label>
           <label>
-            <span class="field-title">월드 시드 <span class="help" tabindex="0" data-tip="새 월드를 만들 때 사용할 생성 시드입니다. 비워두면 Romestead가 자동으로 정합니다.">?</span></span>
-            <input id="cfgWorldSeed" type="number" step="1">
+            <span class="field-title">관리자 비밀번호 <span class="help" tabindex="0" data-tip="Palworld 관리자 명령어 권한에 사용할 비밀번호입니다. 운영 서버에서는 반드시 설정하세요.">?</span></span>
+            <input id="cfgAdminPassword" type="text">
           </label>
           <label>
-            <span class="field-title">서버 비밀번호 <span class="help" tabindex="0" data-tip="비워두면 누구나 접속할 수 있습니다. 친구끼리만 이용하려면 비밀번호를 입력하세요.">?</span></span>
+            <span class="field-title">서버 비밀번호 <span class="help" tabindex="0" data-tip="비워두면 비밀번호 없이 접속할 수 있습니다. 지인 서버라면 입력하는 것을 권장합니다.">?</span></span>
             <input id="cfgPassword" type="text">
           </label>
           <label>
-            <span class="field-title">서버 포트 <span class="help" tabindex="0" data-tip="게임 서버가 사용하는 UDP 포트입니다. 기본값 8050을 권장합니다.">?</span></span>
+            <span class="field-title">서버 포트 <span class="help" tabindex="0" data-tip="Palworld 게임 접속용 UDP 포트입니다. 기본값 8211을 권장합니다.">?</span></span>
             <input id="cfgPort" type="number" min="1" max="65535" step="1">
           </label>
           <label>
-            <span class="field-title">최대 인원 <span class="help" tabindex="0" data-tip="동시에 접속할 수 있는 최대 플레이어 수입니다. 서버 사양에 맞춰 조절하세요.">?</span></span>
+            <span class="field-title">최대 인원 <span class="help" tabindex="0" data-tip="동시에 접속할 수 있는 최대 플레이어 수입니다. 기본값은 32명입니다.">?</span></span>
             <input id="cfgMaxPlayers" type="number" min="1" max="100" step="1">
           </label>
+          <label>
+            <span class="field-title">RCON 포트 <span class="help" tabindex="0" data-tip="RCON을 켰을 때 사용하는 TCP 포트입니다. 기본값은 25575입니다.">?</span></span>
+            <input id="cfgRconPort" type="number" min="1" max="65535" step="1">
+          </label>
           <div class="checkline">
-            <input id="cfgAutoCreate" type="checkbox">
-            <label class="check-text" for="cfgAutoCreate">자동 월드 생성</label>
-            <span class="help" tabindex="0" data-tip="서버 시작 시 월드가 없으면 자동으로 만들고 불러옵니다. 처음 구축할 때는 켜두는 것을 권장합니다.">?</span>
-          </div>
-          <div class="checkline">
-            <input id="cfgCheats" type="checkbox">
-            <label class="check-text" for="cfgCheats">치트 허용</label>
-            <span class="help" tabindex="0" data-tip="관리자/치트 기능 사용 여부입니다. 일반 플레이 서버라면 꺼두는 것을 권장합니다.">?</span>
+            <input id="cfgRconEnabled" type="checkbox">
+            <label class="check-text" for="cfgRconEnabled">RCON 사용</label>
+            <span class="help" tabindex="0" data-tip="외부 관리 도구에서 서버를 제어할 때 사용합니다. 필요할 때만 켜세요.">?</span>
           </div>
           <div class="config-save-wrap">
             <button id="configSaveBtn" onclick="saveConfig()">설정 저장</button>
@@ -1117,14 +1232,14 @@ def dashboard(request: Request):
       }
 
       [
-        "cfgWorldName",
-        "cfgWorldSize",
-        "cfgWorldSeed",
+        "cfgServerName",
+        "cfgDescription",
+        "cfgAdminPassword",
         "cfgPassword",
         "cfgPort",
         "cfgMaxPlayers",
-        "cfgAutoCreate",
-        "cfgCheats",
+        "cfgRconEnabled",
+        "cfgRconPort",
         "configSaveBtn"
       ].forEach(function (id) {
         const element = document.getElementById(id);
@@ -1140,7 +1255,7 @@ def dashboard(request: Request):
 
       currentLogMode = "install";
       btn.disabled = true;
-      result.innerText = "Romestead 엔진 설치 작업을 시작하는 중입니다...";
+      result.innerText = "Palworld 엔진 설치 작업을 시작하는 중입니다...";
 
       try {
         const response = await fetch("/api/install", {
@@ -1176,9 +1291,9 @@ def dashboard(request: Request):
         return;
       }
 
-      result.innerText = "Romestead 서버를 시작하는 중입니다...";
+      result.innerText = "Palworld 서버를 시작하는 중입니다...";
       currentLogMode = "server";
-      setLogText("[패널] Romestead 서버를 시작하는 중입니다...");
+      setLogText("[패널] Palworld 서버를 시작하는 중입니다...");
 
       try {
         const response = await fetch("/api/server/start", {
@@ -1217,7 +1332,7 @@ def dashboard(request: Request):
     async function stopServer() {
       const result = document.getElementById("result");
 
-      result.innerText = "Romestead 서버를 중지하는 중입니다...";
+      result.innerText = "Palworld 서버를 중지하는 중입니다...";
 
       try {
         const response = await fetch("/api/server/stop", {
@@ -1234,7 +1349,7 @@ def dashboard(request: Request):
 
         currentLogMode = "server";
         await loadServerStatus();
-        setLogText(data.log || ("[패널] " + (data.message || "Romestead 서버가 종료되었습니다.")));
+        setLogText(data.log || ("[패널] " + (data.message || "Palworld 서버가 종료되었습니다.")));
 
       } catch (err) {
         result.innerText = "서버 중지 요청 실패: " + err;
@@ -1244,7 +1359,7 @@ def dashboard(request: Request):
     async function restartServer() {
       const result = document.getElementById("result");
 
-      result.innerText = "Romestead 서버를 재시작하는 중입니다...";
+      result.innerText = "Palworld 서버를 재시작하는 중입니다...";
 
       try {
         const response = await fetch("/api/server/restart", {
@@ -1317,14 +1432,14 @@ def dashboard(request: Request):
     }
 
     function fillConfig(config) {
-      document.getElementById("cfgWorldName").value = config.AutoStartWorldName || "world";
-      document.getElementById("cfgWorldSize").value = config.AutoCreateWorldSize || 1;
-      document.getElementById("cfgWorldSeed").value = config.AutoCreateWorldSeed ?? "";
-      document.getElementById("cfgPassword").value = config.Password || "";
-      document.getElementById("cfgPort").value = config.Port || 8050;
-      document.getElementById("cfgMaxPlayers").value = config.MaxPlayers || 10;
-      document.getElementById("cfgAutoCreate").checked = Boolean(config.AutoCreateAndLoadWorld);
-      document.getElementById("cfgCheats").checked = Boolean(config.EnableCheats);
+      document.getElementById("cfgServerName").value = config.ServerName || "TechTim Palworld Server";
+      document.getElementById("cfgDescription").value = config.ServerDescription || "";
+      document.getElementById("cfgAdminPassword").value = config.AdminPassword || "";
+      document.getElementById("cfgPassword").value = config.ServerPassword || "";
+      document.getElementById("cfgPort").value = config.PublicPort || 8211;
+      document.getElementById("cfgMaxPlayers").value = config.MaxPlayers || 32;
+      document.getElementById("cfgRconEnabled").checked = Boolean(config.RCONEnabled);
+      document.getElementById("cfgRconPort").value = config.RCONPort || 25575;
     }
 
     function fillWorldList(worlds) {
@@ -1377,17 +1492,15 @@ def dashboard(request: Request):
     }
 
     function readConfigForm() {
-      const seedValue = document.getElementById("cfgWorldSeed").value.trim();
-
       return {
-        AutoStartWorldName: document.getElementById("cfgWorldName").value.trim() || "world",
-        AutoCreateAndLoadWorld: document.getElementById("cfgAutoCreate").checked,
-        AutoCreateWorldSize: Number(document.getElementById("cfgWorldSize").value || 1),
-        AutoCreateWorldSeed: seedValue === "" ? null : Number(seedValue),
-        Password: document.getElementById("cfgPassword").value,
-        Port: Number(document.getElementById("cfgPort").value || 8050),
+        ServerName: document.getElementById("cfgServerName").value.trim() || "TechTim Palworld Server",
+        ServerDescription: document.getElementById("cfgDescription").value,
+        AdminPassword: document.getElementById("cfgAdminPassword").value,
+        ServerPassword: document.getElementById("cfgPassword").value,
+        PublicPort: Number(document.getElementById("cfgPort").value || 8211),
         MaxPlayers: Number(document.getElementById("cfgMaxPlayers").value || 10),
-        EnableCheats: document.getElementById("cfgCheats").checked
+        RCONEnabled: document.getElementById("cfgRconEnabled").checked,
+        RCONPort: Number(document.getElementById("cfgRconPort").value || 25575)
       };
     }
 
@@ -1438,7 +1551,6 @@ def dashboard(request: Request):
         fillConfig(data.config || {});
         fillWorldList(data.worlds || []);
         showConfigSaveBubble();
-        addWorldOption(data.config && data.config.AutoStartWorldName);
         await loadServerStatus();
         result.innerText = "설정 저장 완료\\n저장 위치: " + data.path;
       } catch (err) {
@@ -1563,7 +1675,7 @@ def request_install(request: Request, background_tasks: BackgroundTasks):
             "message": "이미 설치 작업이 실행 중입니다.",
         }
 
-    background_tasks.add_task(install_romestead_job)
+    background_tasks.add_task(install_palworld_job)
 
     return {
         "status": "started",
@@ -1646,8 +1758,8 @@ def get_worlds(request: Request):
         "status": "ok",
         "path": str(SAVED_WORLDS_DIR),
         "worlds": list_world_options(config),
-        "saved_worlds": list_saved_world_names(),
-        "selected_world": config.get("AutoStartWorldName"),
+        "saved_games": list_saved_world_names(),
+        "selected_world": "",
     }
 
 
@@ -1673,7 +1785,7 @@ def save_config(payload: ConfigRequest, request: Request):
 
         return {
             "status": "ok",
-            "message": "config.json 저장 완료",
+            "message": "PalWorldSettings.ini 저장 완료",
             "path": str(config_path),
             "config": config,
             "worlds": list_world_options(config),
@@ -1683,7 +1795,7 @@ def save_config(payload: ConfigRequest, request: Request):
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"config.json 저장 중 오류가 발생했습니다: {e}",
+            detail=f"PalWorldSettings.ini 저장 중 오류가 발생했습니다: {e}",
         )
 
 
@@ -1701,18 +1813,18 @@ def start_server(request: Request):
                 "message": "서버 파일이 없습니다. 먼저 엔진 설치를 진행해주세요.",
             }
 
-        server_dll = server_dir / "Server.dll"
+        server_executable = server_dir / "PalServer.sh"
 
-        if not server_dll.exists():
+        if not server_executable.exists():
             return {
                 "status": "error",
-                "message": "Server.dll 파일을 찾을 수 없습니다. Romestead 서버 파일 설치 상태를 확인해주세요.",
+                "message": "PalServer.sh 파일을 찾을 수 없습니다. Palworld 서버 파일 설치 상태를 확인해주세요.",
             }
 
         config_path = create_default_config()
         server_config = read_config()
         clear_server_control_log()
-        write_server_control_log("Romestead 서버 시작 요청을 받았습니다.")
+        write_server_control_log("Palworld 서버 시작 요청을 받았습니다.")
 
         validation_error = validate_world_start_config(server_config)
 
@@ -1726,32 +1838,49 @@ def start_server(request: Request):
                 "worlds": list_world_options(server_config),
             }
 
-        effective_server_port = int(server_config.get("Port", SERVER_PORT))
+        effective_server_port = int(server_config.get("PublicPort", SERVER_PORT))
+        effective_rcon_port = int(server_config.get("RCONPort", RCON_PORT))
         client = docker.from_env()
 
         existing = client.containers.list(
             all=True,
-            filters={"name": ROMESTEAD_SERVER_CONTAINER},
+            filters={"name": PALWORLD_SERVER_CONTAINER},
         )
 
         for container in existing:
-            if container.name == ROMESTEAD_SERVER_CONTAINER:
+            if container.name == PALWORLD_SERVER_CONTAINER:
                 container.reload()
 
                 if container.status == "running" and server_container_keeps_stdin_open(container):
                     return {
                         "status": "running",
-                        "message": "Romestead 서버가 이미 실행 중입니다.",
+                        "message": "Palworld 서버가 이미 실행 중입니다.",
                     }
 
                 container.remove(force=True)
 
-        client.images.pull(DOTNET_IMAGE)
+        try:
+            server_executable.chmod(0o755)
+        except OSError:
+            pass
+
+        client.images.pull(PALWORLD_RUNTIME_IMAGE)
+
+        ports = {
+            f"{effective_server_port}/udp": effective_server_port,
+        }
+
+        if server_config.get("RCONEnabled"):
+            ports[f"{effective_rcon_port}/tcp"] = effective_rcon_port
 
         container = client.containers.run(
-            DOTNET_IMAGE,
-            command=["dotnet", "Server.dll"],
-            name=ROMESTEAD_SERVER_CONTAINER,
+            PALWORLD_RUNTIME_IMAGE,
+            command=[
+                "bash",
+                "-lc",
+                f"./PalServer.sh -port={effective_server_port} -useperfthreads -NoAsyncLoadingThread -UseMultithreadForDS",
+            ],
+            name=PALWORLD_SERVER_CONTAINER,
             working_dir="/server",
             detach=True,
             stdin_open=True,
@@ -1762,23 +1891,22 @@ def start_server(request: Request):
                     "mode": "rw",
                 }
             },
-            ports={
-                f"{effective_server_port}/udp": effective_server_port,
-            },
+            ports=ports,
         )
 
         return {
             "status": "started",
-            "message": "Romestead 서버 컨테이너를 시작했습니다.",
+            "message": "Palworld 서버 컨테이너를 시작했습니다.",
             "container": container.name,
             "config": str(config_path),
             "port": f"{effective_server_port}/udp",
+            "rcon_port": f"{effective_rcon_port}/tcp" if server_config.get("RCONEnabled") else "",
         }
 
     except Exception as e:
         return {
             "status": "error",
-            "message": "Romestead 서버 시작 중 오류가 발생했습니다.",
+            "message": "Palworld 서버 시작 중 오류가 발생했습니다.",
             "error": str(e),
         }
 
@@ -1791,15 +1919,15 @@ def stop_server(request: Request):
         client = docker.from_env()
 
         try:
-            container = client.containers.get(ROMESTEAD_SERVER_CONTAINER)
+            container = client.containers.get(PALWORLD_SERVER_CONTAINER)
         except docker.errors.NotFound:
             return {
                 "status": "not_created",
-                "message": "Romestead 서버 컨테이너가 아직 생성되지 않았습니다.",
+                "message": "Palworld 서버 컨테이너가 아직 생성되지 않았습니다.",
             }
 
         container.reload()
-        write_server_control_log("Romestead 서버 중지 요청을 받았습니다.")
+        write_server_control_log("Palworld 서버 중지 요청을 받았습니다.")
 
         try:
             container.update(restart_policy={"Name": "no"})
@@ -1810,10 +1938,10 @@ def stop_server(request: Request):
         container.reload()
 
         if container.status not in {"running", "restarting", "paused"}:
-            write_server_control_log("Romestead 서버가 이미 종료된 상태입니다.")
+            write_server_control_log("Palworld 서버가 이미 종료된 상태입니다.")
             return {
                 "status": "stopped",
-                "message": "Romestead 서버가 이미 종료되어 있습니다.",
+                "message": "Palworld 서버가 이미 종료되어 있습니다.",
                 "container": container.name,
                 "log": combined_server_log(container),
             }
@@ -1823,12 +1951,12 @@ def stop_server(request: Request):
         except Exception as e:
             write_server_control_log(f"정상 중지 실패, 강제 종료를 시도합니다: {e}")
             container.remove(force=True)
-            write_server_control_log("Romestead 서버가 강제로 종료되었습니다.")
+            write_server_control_log("Palworld 서버가 강제로 종료되었습니다.")
 
             return {
                 "status": "stopped",
-                "message": "Romestead 서버가 종료되었습니다.",
-                "container": ROMESTEAD_SERVER_CONTAINER,
+                "message": "Palworld 서버가 종료되었습니다.",
+                "container": PALWORLD_SERVER_CONTAINER,
                 "log": combined_server_log(),
             }
 
@@ -1838,20 +1966,20 @@ def stop_server(request: Request):
         if container.status in {"running", "restarting"}:
             write_server_control_log("중지 후 서버가 다시 실행되어 강제 제거를 진행했습니다.")
             container.remove(force=True)
-            write_server_control_log("Romestead 서버가 종료되었습니다.")
+            write_server_control_log("Palworld 서버가 종료되었습니다.")
 
             return {
                 "status": "stopped",
-                "message": "Romestead 서버가 종료되었습니다.",
-                "container": ROMESTEAD_SERVER_CONTAINER,
+                "message": "Palworld 서버가 종료되었습니다.",
+                "container": PALWORLD_SERVER_CONTAINER,
                 "log": combined_server_log(),
             }
 
-        write_server_control_log("Romestead 서버가 종료되었습니다.")
+        write_server_control_log("Palworld 서버가 종료되었습니다.")
 
         return {
             "status": "stopped",
-            "message": "Romestead 서버가 종료되었습니다.",
+            "message": "Palworld 서버가 종료되었습니다.",
             "container": container.name,
             "log": combined_server_log(container),
         }
@@ -1859,7 +1987,7 @@ def stop_server(request: Request):
     except Exception as e:
         return {
             "status": "error",
-            "message": "Romestead 서버 중지 중 오류가 발생했습니다.",
+            "message": "Palworld 서버 중지 중 오류가 발생했습니다.",
             "error": str(e),
         }
 
@@ -1872,11 +2000,11 @@ def restart_server(request: Request):
         client = docker.from_env()
 
         try:
-            container = client.containers.get(ROMESTEAD_SERVER_CONTAINER)
+            container = client.containers.get(PALWORLD_SERVER_CONTAINER)
         except docker.errors.NotFound:
             return {
                 "status": "not_created",
-                "message": "Romestead 서버 컨테이너가 없습니다. 먼저 서버 시작을 눌러주세요.",
+                "message": "Palworld 서버 컨테이너가 없습니다. 먼저 서버 시작을 눌러주세요.",
             }
 
         container.reload()
@@ -1890,7 +2018,7 @@ def restart_server(request: Request):
 
             return {
                 "status": "restarted",
-                "message": "Romestead 서버를 재시작했습니다.",
+                "message": "Palworld 서버를 재시작했습니다.",
                 "container": container.name,
             }
 
@@ -1900,7 +2028,7 @@ def restart_server(request: Request):
     except Exception as e:
         return {
             "status": "error",
-            "message": "Romestead 서버 재시작 중 오류가 발생했습니다.",
+            "message": "Palworld 서버 재시작 중 오류가 발생했습니다.",
             "error": str(e),
         }
 
@@ -1914,11 +2042,11 @@ def server_status(request: Request):
 
         containers = client.containers.list(
             all=True,
-            filters={"name": ROMESTEAD_SERVER_CONTAINER},
+            filters={"name": PALWORLD_SERVER_CONTAINER},
         )
 
         for container in containers:
-            if container.name == ROMESTEAD_SERVER_CONTAINER:
+            if container.name == PALWORLD_SERVER_CONTAINER:
                 container.reload()
 
                 return {
@@ -1929,7 +2057,7 @@ def server_status(request: Request):
 
         return {
             "status": "not_created",
-            "message": "Romestead 서버 컨테이너가 아직 생성되지 않았습니다.",
+            "message": "Palworld 서버 컨테이너가 아직 생성되지 않았습니다.",
         }
 
     except Exception as e:
@@ -1946,7 +2074,7 @@ def server_log(request: Request):
     try:
         client = docker.from_env()
         try:
-            container = client.containers.get(ROMESTEAD_SERVER_CONTAINER)
+            container = client.containers.get(PALWORLD_SERVER_CONTAINER)
         except docker.errors.NotFound:
             return {
                 "status": "not_created",
@@ -1981,7 +2109,7 @@ def download_saves(request: Request):
         SAVE_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        zip_path = SAVE_EXPORT_DIR / f"romestead-saves-{timestamp}.zip"
+        zip_path = SAVE_EXPORT_DIR / f"palworld-saves-{timestamp}.zip"
         zip_base = zip_path.with_suffix("")
 
         shutil.make_archive(
