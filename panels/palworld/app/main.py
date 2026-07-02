@@ -696,7 +696,7 @@ def login_page(request: Request):
   <meta charset="utf-8">
   <title>TechTim Palworld Login</title>
   <style>
-    body { min-height: 100vh; margin: 0; font-family: Arial, sans-serif; background: radial-gradient(circle at 78% 14%, rgba(255, 219, 98, 0.55), transparent 24%), radial-gradient(circle at 20% 76%, rgba(80, 214, 204, 0.34), transparent 28%), linear-gradient(135deg, #6fc7df 0%, #d6f0e8 46%, #5ea976 70%, #1f5f58 100%); color: #1f2937; }
+    body { min-height: 100vh; margin: 0; font-family: Arial, sans-serif; background: linear-gradient(135deg, rgba(9, 22, 29, 0.42), rgba(20, 53, 42, 0.28)), url("/static/palworld-panel-bg.png") center / cover fixed no-repeat; color: #1f2937; }
     .box { max-width: 420px; margin: 100px auto; background: rgba(255, 255, 255, 0.92); border: 1px solid rgba(255,255,255,0.56); border-radius: 16px; padding: 34px; box-shadow: 0 24px 70px rgba(0,0,0,0.34); backdrop-filter: blur(12px); }
     h1 { margin: 0 0 10px; font-size: 28px; }
     p { color: #6b7280; line-height: 1.5; }
@@ -783,7 +783,7 @@ def change_password_page(request: Request):
   <meta charset="utf-8">
   <title>Change Admin Password</title>
   <style>
-    body { min-height: 100vh; margin: 0; font-family: Arial, sans-serif; background: radial-gradient(circle at 78% 14%, rgba(255, 219, 98, 0.55), transparent 24%), radial-gradient(circle at 20% 76%, rgba(80, 214, 204, 0.34), transparent 28%), linear-gradient(135deg, #6fc7df 0%, #d6f0e8 46%, #5ea976 70%, #1f5f58 100%); color: #1f2937; }
+    body { min-height: 100vh; margin: 0; font-family: Arial, sans-serif; background: linear-gradient(135deg, rgba(9, 22, 29, 0.42), rgba(20, 53, 42, 0.28)), url("/static/palworld-panel-bg.png") center / cover fixed no-repeat; color: #1f2937; }
     .box { max-width: 460px; margin: 90px auto; background: rgba(255, 255, 255, 0.92); border: 1px solid rgba(255,255,255,0.56); border-radius: 16px; padding: 34px; box-shadow: 0 24px 70px rgba(0,0,0,0.34); backdrop-filter: blur(12px); }
     h1 { margin: 0 0 10px; font-size: 28px; }
     p { color: #6b7280; line-height: 1.5; }
@@ -944,7 +944,7 @@ def dashboard(request: Request):
   <meta charset="utf-8">
   <title>TechTim Palworld Server Panel</title>
   <style>
-    body { min-height: 100vh; margin: 0; font-family: Arial, sans-serif; background: radial-gradient(circle at 78% 14%, rgba(255, 219, 98, 0.55), transparent 24%), radial-gradient(circle at 20% 76%, rgba(80, 214, 204, 0.34), transparent 28%), linear-gradient(135deg, #6fc7df 0%, #d6f0e8 46%, #5ea976 70%, #1f5f58 100%); color: #1f2937; }
+    body { min-height: 100vh; margin: 0; font-family: Arial, sans-serif; background: linear-gradient(135deg, rgba(9, 22, 29, 0.42), rgba(20, 53, 42, 0.28)), url("/static/palworld-panel-bg.png") center / cover fixed no-repeat; color: #1f2937; }
     .wrap { max-width: 1180px; margin: 40px auto; background: rgba(255, 255, 255, 0.65); border: 1px solid rgba(255,255,255,0.58); border-radius: 16px; padding: 40px; box-shadow: 0 24px 80px rgba(0,0,0,0.35); backdrop-filter: blur(12px); }
     .topbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
     h1 { margin: 0; font-size: 34px; }
@@ -960,7 +960,8 @@ def dashboard(request: Request):
     .card-icon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 46px; width: 46px; height: 46px; border-radius: 10px; overflow: hidden; color: #ffffff; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.18), 0 8px 18px rgba(17, 24, 39, 0.12); }
     .card-icon svg { display: block; width: 26px; height: 26px; }
     .card-icon img { display: block; width: 100%; height: 100%; }
-    .card-icon.palworld-mark { background: linear-gradient(135deg, #27a9d8, #64c36f); }
+    .card-icon.palworld-mark { background: #1f8eb8; }
+    .card-icon.palworld-mark img { object-fit: cover; }
     .card-icon.status-ok { background: #16a34a; }
     .card-icon.status-bad { background: #dc2626; }
     .card-icon.status-pending { background: linear-gradient(135deg, #d97706, #92400e); }
@@ -1041,14 +1042,7 @@ def dashboard(request: Request):
     <div class="grid">
       <div class="card">
         <div class="card-icon palworld-mark" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 3.5c3.6 0 6.5 2.8 6.5 6.3 0 2.8-1.9 5.1-4.5 6l-2 4.7-2-4.7c-2.6-.9-4.5-3.2-4.5-6 0-3.5 2.9-6.3 6.5-6.3Z" />
-            <path d="M8.2 7.4 5.8 4.6l4 .9" />
-            <path d="m15.8 7.4 2.4-2.8-4 .9" />
-            <path d="M9.2 10.2h.01" />
-            <path d="M14.8 10.2h.01" />
-            <path d="M10 13c1.2.9 2.8.9 4 0" />
-          </svg>
+          <img src="/static/palworld-card-icon.png" alt="">
         </div>
         <div class="card-text">
           <div class="label">게임</div>
