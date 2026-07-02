@@ -1,9 +1,10 @@
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 import hashlib
 import json
 import os
@@ -68,6 +69,7 @@ class ConfigRequest(BaseModel):
     MaxPlayers: int = 32
     RCONEnabled: bool = False
     RCONPort: int = RCON_PORT
+    AdvancedOptions: dict[str, Any] = Field(default_factory=dict)
 
 
 def ensure_data_dirs() -> None:
@@ -277,6 +279,9 @@ def normalize_config(config: dict) -> dict:
 
 PALWORLD_OPTION_DEFAULTS = {
     "Difficulty": "None",
+    "RandomizerType": "None",
+    "RandomizerSeed": "",
+    "bIsRandomizerPalLevelRandom": False,
     "DayTimeSpeedRate": 1.0,
     "NightTimeSpeedRate": 1.0,
     "ExpRate": 1.0,
@@ -294,6 +299,7 @@ PALWORLD_OPTION_DEFAULTS = {
     "PalStaminaDecreaceRate": 1.0,
     "PalAutoHPRegeneRate": 1.0,
     "PalAutoHpRegeneRateInSleep": 1.0,
+    "BuildObjectHpRate": 1.0,
     "BuildObjectDamageRate": 1.0,
     "BuildObjectDeteriorationDamageRate": 1.0,
     "CollectionDropRate": 1.0,
@@ -304,12 +310,14 @@ PALWORLD_OPTION_DEFAULTS = {
     "bEnablePlayerToPlayerDamage": False,
     "bEnableFriendlyFire": False,
     "bEnableInvaderEnemy": True,
+    "EnablePredatorBossPal": True,
     "bActiveUNKO": False,
     "bEnableAimAssistPad": True,
     "bEnableAimAssistKeyboard": False,
     "DropItemMaxNum": 3000,
     "DropItemMaxNum_UNKO": 100,
     "BaseCampMaxNum": 128,
+    "BaseCampMaxNumInGuild": 3,
     "BaseCampWorkerMaxNum": 15,
     "DropItemAliveMaxHours": 1.0,
     "bAutoResetGuildNoOnlinePlayers": False,
@@ -317,14 +325,24 @@ PALWORLD_OPTION_DEFAULTS = {
     "GuildPlayerMaxNum": 20,
     "PalEggDefaultHatchingTime": 72.0,
     "WorkSpeedRate": 1.0,
+    "AutoSaveSpan": 30.0,
+    "CrossplayPlatforms": "(Steam,Xbox,PS5,Mac)",
+    "LogFormatType": "Text",
     "bIsMultiplay": False,
     "bIsPvP": False,
+    "bHardcore": False,
+    "bPalLost": False,
+    "bCharacterRecreateInHardcore": False,
     "bCanPickupOtherGuildDeathPenaltyDrop": False,
     "bEnableNonLoginPenalty": True,
     "bEnableFastTravel": True,
     "bIsStartLocationSelectByMap": True,
     "bExistPlayerAfterLogout": False,
     "bEnableDefenseOtherGuildPlayer": False,
+    "bInvisibleOtherGuildBaseCampAreaFX": False,
+    "bBuildAreaLimit": False,
+    "ItemWeightRate": 1.0,
+    "bShowPlayerList": False,
     "CoopPlayerMaxNum": 4,
     "ServerPlayerMaxNum": 32,
     "ServerName": "TechTim Palworld Server",
@@ -335,32 +353,245 @@ PALWORLD_OPTION_DEFAULTS = {
     "PublicIP": "",
     "RCONEnabled": False,
     "RCONPort": RCON_PORT,
+    "RESTAPIEnabled": False,
+    "RESTAPIPort": 8212,
+    "bIsUseBackupSaveData": True,
     "Region": "",
     "bUseAuth": True,
     "BanListURL": "https://api.palworldgame.com/api/banlist.txt",
+    "SupplyDropSpan": 180,
+    "ChatPostLimitPerMinute": 10,
+    "MaxBuildingLimitNum": 0,
+    "ServerReplicatePawnCullDistance": 15000.0,
+    "bAllowGlobalPalboxExport": True,
+    "bAllowGlobalPalboxImport": False,
+    "EquipmentDurabilityDamageRate": 1.0,
+    "ItemContainerForceMarkDirtyInterval": 1.0,
+    "ItemCorruptionMultiplier": 1.0,
+    "bEnableFastTravelOnlyBaseCamp": False,
+    "bAllowClientMod": True,
+    "bIsShowJoinLeftMessage": True,
+    "DenyTechnologyList": "()",
+    "GuildRejoinCooldownMinutes": 0,
+    "BlockRespawnTime": 5.0,
+    "RespawnPenaltyDurationThreshold": 0.0,
+    "RespawnPenaltyTimeScale": 2.0,
+    "bDisplayPvPItemNumOnWorldMap_BaseCamp": False,
+    "bDisplayPvPItemNumOnWorldMap_Player": False,
+    "AdditionalDropItemWhenPlayerKillingInPvPMode": "PlayerDropItem",
+    "AdditionalDropItemNumWhenPlayerKillingInPvPMode": 1,
+    "bAdditionalDropItemWhenPlayerKillingInPvPMode": False,
+    "bAllowEnhanceStat_Health": True,
+    "bAllowEnhanceStat_Attack": True,
+    "bAllowEnhanceStat_Stamina": True,
+    "bAllowEnhanceStat_Weight": True,
+    "bAllowEnhanceStat_WorkSpeed": True,
 }
 
 
 PALWORLD_OPTION_ORDER = list(PALWORLD_OPTION_DEFAULTS.keys())
+PALWORLD_RAW_STRING_OPTIONS = {
+    "Difficulty",
+    "RandomizerType",
+    "DeathPenalty",
+    "LogFormatType",
+    "AdditionalDropItemWhenPlayerKillingInPvPMode",
+}
+PALWORLD_ADVANCED_KEYS = {
+    "Difficulty",
+    "RandomizerType",
+    "RandomizerSeed",
+    "bIsRandomizerPalLevelRandom",
+    "DayTimeSpeedRate",
+    "NightTimeSpeedRate",
+    "ExpRate",
+    "PalCaptureRate",
+    "PalSpawnNumRate",
+    "PalDamageRateAttack",
+    "PalDamageRateDefense",
+    "PlayerDamageRateAttack",
+    "PlayerDamageRateDefense",
+    "PlayerStomachDecreaceRate",
+    "PlayerStaminaDecreaceRate",
+    "PalStomachDecreaceRate",
+    "PalStaminaDecreaceRate",
+    "BuildObjectHpRate",
+    "BuildObjectDamageRate",
+    "BuildObjectDeteriorationDamageRate",
+    "CollectionDropRate",
+    "CollectionObjectHpRate",
+    "CollectionObjectRespawnSpeedRate",
+    "EnemyDropItemRate",
+    "DeathPenalty",
+    "bEnablePlayerToPlayerDamage",
+    "bEnableFriendlyFire",
+    "EnablePredatorBossPal",
+    "DropItemMaxNum",
+    "BaseCampMaxNum",
+    "BaseCampMaxNumInGuild",
+    "BaseCampWorkerMaxNum",
+    "DropItemAliveMaxHours",
+    "bAutoResetGuildNoOnlinePlayers",
+    "AutoResetGuildTimeNoOnlinePlayers",
+    "GuildPlayerMaxNum",
+    "PalEggDefaultHatchingTime",
+    "WorkSpeedRate",
+    "AutoSaveSpan",
+    "CrossplayPlatforms",
+    "bIsPvP",
+    "bHardcore",
+    "bPalLost",
+    "bCanPickupOtherGuildDeathPenaltyDrop",
+    "bEnableNonLoginPenalty",
+    "bEnableFastTravel",
+    "bExistPlayerAfterLogout",
+    "bEnableDefenseOtherGuildPlayer",
+    "bBuildAreaLimit",
+    "ItemWeightRate",
+    "bShowPlayerList",
+    "CoopPlayerMaxNum",
+    "RESTAPIEnabled",
+    "RESTAPIPort",
+    "bIsUseBackupSaveData",
+    "Region",
+    "bUseAuth",
+    "SupplyDropSpan",
+    "ChatPostLimitPerMinute",
+    "MaxBuildingLimitNum",
+    "ServerReplicatePawnCullDistance",
+    "bAllowGlobalPalboxExport",
+    "bAllowGlobalPalboxImport",
+    "EquipmentDurabilityDamageRate",
+    "ItemContainerForceMarkDirtyInterval",
+    "ItemCorruptionMultiplier",
+    "bEnableFastTravelOnlyBaseCamp",
+    "bAllowClientMod",
+    "bIsShowJoinLeftMessage",
+    "DenyTechnologyList",
+    "GuildRejoinCooldownMinutes",
+    "BlockRespawnTime",
+    "RespawnPenaltyDurationThreshold",
+    "RespawnPenaltyTimeScale",
+    "bDisplayPvPItemNumOnWorldMap_BaseCamp",
+    "bDisplayPvPItemNumOnWorldMap_Player",
+    "AdditionalDropItemWhenPlayerKillingInPvPMode",
+    "AdditionalDropItemNumWhenPlayerKillingInPvPMode",
+    "bAdditionalDropItemWhenPlayerKillingInPvPMode",
+    "bAllowEnhanceStat_Health",
+    "bAllowEnhanceStat_Attack",
+    "bAllowEnhanceStat_Stamina",
+    "bAllowEnhanceStat_Weight",
+    "bAllowEnhanceStat_WorkSpeed",
+}
+
+
+def split_top_level_options(option_text: str) -> list[str]:
+    parts = []
+    current = []
+    quote = False
+    escape = False
+    depth = 0
+
+    for char in option_text:
+        if escape:
+            current.append(char)
+            escape = False
+            continue
+
+        if char == "\\" and quote:
+            current.append(char)
+            escape = True
+            continue
+
+        if char == '"':
+            quote = not quote
+        elif not quote and char == "(":
+            depth += 1
+        elif not quote and char == ")" and depth > 0:
+            depth -= 1
+
+        if char == "," and not quote and depth == 0:
+            part = "".join(current).strip()
+
+            if part:
+                parts.append(part)
+
+            current = []
+            continue
+
+        current.append(char)
+
+    part = "".join(current).strip()
+
+    if part:
+        parts.append(part)
+
+    return parts
+
+
+def parse_palworld_value(raw_value: str):
+    if raw_value.startswith('"') and raw_value.endswith('"'):
+        return raw_value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+
+    if raw_value in {"True", "False"}:
+        return raw_value == "True"
+
+    if raw_value.startswith("(") and raw_value.endswith(")"):
+        return raw_value
+
+    try:
+        return float(raw_value) if "." in raw_value else int(raw_value)
+    except ValueError:
+        return raw_value
 
 
 def split_palworld_options(option_text: str) -> dict:
     values = {}
 
-    for match in re.finditer(r"([A-Za-z0-9_]+)=(\"(?:[^\"\\\\]|\\\\.)*\"|[^,)]+)", option_text):
-        raw_value = match.group(2).strip()
+    for part in split_top_level_options(option_text):
+        if "=" not in part:
+            continue
 
-        if raw_value.startswith('"') and raw_value.endswith('"'):
-            values[match.group(1)] = raw_value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
-        elif raw_value in {"True", "False"}:
-            values[match.group(1)] = raw_value == "True"
-        else:
-            try:
-                values[match.group(1)] = float(raw_value) if "." in raw_value else int(raw_value)
-            except ValueError:
-                values[match.group(1)] = raw_value
+        key, raw_value = part.split("=", 1)
+        key = key.strip()
+        raw_value = raw_value.strip()
+
+        if not key:
+            continue
+
+        values[key] = parse_palworld_value(raw_value)
 
     return values
+
+
+def normalize_palworld_option(key: str, value):
+    default_value = PALWORLD_OPTION_DEFAULTS.get(key)
+
+    if isinstance(default_value, bool):
+        if isinstance(value, str):
+            return value.lower() == "true"
+
+        return bool(value)
+
+    if isinstance(default_value, int) and not isinstance(default_value, bool):
+        return int(value or 0)
+
+    if isinstance(default_value, float):
+        return float(value or 0)
+
+    return str(value or "")
+
+
+def normalize_advanced_options(options: dict) -> dict:
+    normalized = {}
+
+    for key, value in (options or {}).items():
+        if key not in PALWORLD_ADVANCED_KEYS:
+            continue
+
+        normalized[key] = normalize_palworld_option(key, value)
+
+    return normalized
 
 
 def read_palworld_options() -> dict:
@@ -384,7 +615,7 @@ def read_palworld_options() -> dict:
     return merged
 
 
-def palworld_option_value(value) -> str:
+def palworld_option_value(key: str, value) -> str:
     if isinstance(value, bool):
         return "True" if value else "False"
 
@@ -394,14 +625,19 @@ def palworld_option_value(value) -> str:
     if isinstance(value, float):
         return f"{value:.6f}"
 
+    if isinstance(value, str) and value.startswith("(") and value.endswith(")"):
+        return value
+
+    if key in PALWORLD_RAW_STRING_OPTIONS:
+        return str(value)
+
     escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
 
 
 def read_config() -> dict:
     options = read_palworld_options()
-
-    return normalize_config({
+    config = normalize_config({
         "ServerName": options.get("ServerName"),
         "ServerDescription": options.get("ServerDescription"),
         "AdminPassword": options.get("AdminPassword"),
@@ -411,6 +647,13 @@ def read_config() -> dict:
         "RCONEnabled": options.get("RCONEnabled"),
         "RCONPort": options.get("RCONPort"),
     })
+    config["AdvancedOptions"] = {
+        key: options.get(key, PALWORLD_OPTION_DEFAULTS.get(key))
+        for key in PALWORLD_OPTION_ORDER
+        if key in PALWORLD_ADVANCED_KEYS
+    }
+
+    return config
 
 
 def write_config(config: dict) -> Path:
@@ -428,10 +671,11 @@ def write_config(config: dict) -> Path:
         "RCONEnabled": normalized["RCONEnabled"],
         "RCONPort": normalized["RCONPort"],
     })
+    options.update(normalize_advanced_options(config.get("AdvancedOptions") or {}))
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     ordered_keys = PALWORLD_OPTION_ORDER + [key for key in options if key not in PALWORLD_OPTION_ORDER]
-    option_text = ",".join(f"{key}={palworld_option_value(options[key])}" for key in ordered_keys)
+    option_text = ",".join(f"{key}={palworld_option_value(key, options[key])}" for key in ordered_keys)
 
     config_path.write_text(
         "[/Script/Pal.PalGameWorldSettings]\n"
@@ -978,6 +1222,24 @@ def dashboard(request: Request):
     .config.locked .config-body { filter: blur(1.4px); opacity: 0.58; pointer-events: none; user-select: none; }
     .config h2 { margin: 0 0 16px; font-size: 22px; }
     .config-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+    .advanced-card { margin-top: 18px; min-height: 112px; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,0.55); background: linear-gradient(90deg, rgba(11, 32, 42, 0.78), rgba(27, 96, 77, 0.36)), url("/static/palworld-settings-bg.png") center / cover no-repeat; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 18px; color: #ffffff; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08); }
+    .advanced-copy { min-width: 0; }
+    .advanced-title { font-size: 20px; font-weight: bold; margin-bottom: 6px; }
+    .advanced-subtitle { color: rgba(255,255,255,0.82); font-size: 13px; line-height: 1.45; }
+    .advanced-button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 58px; height: 58px; border-radius: 14px; padding: 0; background: rgba(255,255,255,0.9); color: #0f766e; box-shadow: 0 14px 32px rgba(0,0,0,0.24); }
+    .advanced-button img { width: 38px; height: 38px; display: block; object-fit: cover; border-radius: 10px; }
+    .modal-backdrop { position: fixed; inset: 0; z-index: 100; display: none; align-items: center; justify-content: center; padding: 24px; background: rgba(10, 18, 28, 0.62); }
+    .modal-backdrop.show { display: flex; }
+    .modal { width: min(1060px, 100%); max-height: min(86vh, 900px); overflow: hidden; border-radius: 16px; border: 1px solid rgba(255,255,255,0.45); background: rgba(255,255,255,0.96); box-shadow: 0 28px 90px rgba(0,0,0,0.45); display: flex; flex-direction: column; }
+    .modal-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 20px; background: linear-gradient(90deg, rgba(34, 148, 177, 0.18), rgba(73, 182, 122, 0.16)); border-bottom: 1px solid #e5e7eb; }
+    .modal-head h2 { margin: 0; font-size: 22px; }
+    .modal-close { width: 40px; height: 40px; border-radius: 50%; padding: 0; background: #111827; color: #fff; }
+    .modal-body { overflow: auto; padding: 20px; }
+    .advanced-group { margin-bottom: 22px; }
+    .advanced-group h3 { margin: 0 0 12px; font-size: 17px; color: #111827; }
+    .advanced-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .advanced-check { margin-top: 0; align-self: end; min-height: 42px; }
+    .modal-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 20px; border-top: 1px solid #e5e7eb; background: #f9fafb; }
     label { display: block; font-size: 13px; font-weight: bold; color: #374151; }
     .field-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     .help { position: relative; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 18px; height: 18px; border-radius: 50%; border: 1px solid #9ca3af; color: #4b5563; background: #f9fafb; font-size: 12px; line-height: 1; cursor: help; }
@@ -1004,7 +1266,10 @@ def dashboard(request: Request):
       .topbar { align-items: flex-start; flex-direction: column; }
       .top-links { justify-content: flex-start; }
       .grid, .config-grid { grid-template-columns: 1fr; }
+      .advanced-card { align-items: flex-start; }
+      .advanced-grid { grid-template-columns: 1fr; }
       button { width: 100%; }
+      .advanced-button, .modal-close { width: 44px; height: 44px; }
       .config-save-wrap { width: 100%; }
       .save-bubble { max-width: calc(100% - 24px); white-space: normal; }
       .help::after { right: auto; left: 50%; transform: translate(-50%, 4px); max-width: min(220px, calc(100vw - 48px)); }
@@ -1135,6 +1400,29 @@ def dashboard(request: Request):
             <div id="configSaveBubble" class="save-bubble" role="status" aria-live="polite">설정이 저장되었습니다.</div>
           </div>
         </div>
+        <div class="advanced-card">
+          <div class="advanced-copy">
+            <div class="advanced-title">Palworld 상세 서버 설정</div>
+            <div class="advanced-subtitle">경험치, 포획률, 낮/밤 속도, 알 부화 시간, 전투 배율, 월드 규칙을 팝업에서 조정합니다.</div>
+          </div>
+          <button id="advancedSettingsBtn" class="advanced-button" type="button" onclick="openAdvancedSettings()" title="상세 설정 열기" aria-label="상세 설정 열기">
+            <img src="/static/palworld-settings-icon.png" alt="">
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div id="advancedModal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="advancedModalTitle">
+        <div class="modal-head">
+          <h2 id="advancedModalTitle">Palworld 상세 서버 설정</h2>
+          <button class="modal-close" type="button" onclick="closeAdvancedSettings()" title="닫기" aria-label="닫기">×</button>
+        </div>
+        <div id="advancedOptionsBody" class="modal-body"></div>
+        <div class="modal-foot">
+          <button class="secondary" type="button" onclick="closeAdvancedSettings()">닫기</button>
+          <button id="advancedSaveBtn" type="button" onclick="saveConfig()">설정 저장</button>
+        </div>
       </div>
     </div>
 
@@ -1156,6 +1444,79 @@ def dashboard(request: Request):
 
   <script>
     let currentLogMode = "install";
+    let advancedOptions = {};
+
+    const advancedOptionGroups = [
+      {
+        title: "배율",
+        fields: [
+          { key: "DayTimeSpeedRate", label: "낮 시간 속도", type: "number", step: "0.1", min: "0.1" },
+          { key: "NightTimeSpeedRate", label: "밤 시간 속도", type: "number", step: "0.1", min: "0.1" },
+          { key: "ExpRate", label: "경험치 배율", type: "number", step: "0.1", min: "0.1" },
+          { key: "PalCaptureRate", label: "포획률", type: "number", step: "0.1", min: "0.1" },
+          { key: "PalSpawnNumRate", label: "팰 출현 배율", type: "number", step: "0.1", min: "0.1" },
+          { key: "CollectionDropRate", label: "채집 드롭 배율", type: "number", step: "0.1", min: "0.1" },
+          { key: "EnemyDropItemRate", label: "적 드롭 배율", type: "number", step: "0.1", min: "0.1" },
+          { key: "WorkSpeedRate", label: "작업 속도", type: "number", step: "0.1", min: "0.1" },
+          { key: "PalEggDefaultHatchingTime", label: "알 부화 시간", type: "number", step: "0.1", min: "0" }
+        ]
+      },
+      {
+        title: "전투",
+        fields: [
+          { key: "PlayerDamageRateAttack", label: "플레이어 공격 배율", type: "number", step: "0.1", min: "0.1" },
+          { key: "PlayerDamageRateDefense", label: "플레이어 방어 배율", type: "number", step: "0.1", min: "0.1" },
+          { key: "PalDamageRateAttack", label: "팰 공격 배율", type: "number", step: "0.1", min: "0.1" },
+          { key: "PalDamageRateDefense", label: "팰 방어 배율", type: "number", step: "0.1", min: "0.1" },
+          { key: "DeathPenalty", label: "사망 패널티", type: "select", options: ["None", "Item", "ItemAndEquipment", "All"] },
+          { key: "bEnablePlayerToPlayerDamage", label: "플레이어 간 피해", type: "checkbox" },
+          { key: "bEnableFriendlyFire", label: "아군 피해", type: "checkbox" },
+          { key: "bIsPvP", label: "PvP 모드", type: "checkbox" },
+          { key: "bHardcore", label: "하드코어", type: "checkbox" }
+        ]
+      },
+      {
+        title: "생존/월드",
+        fields: [
+          { key: "PlayerStomachDecreaceRate", label: "플레이어 포만감 감소", type: "number", step: "0.1", min: "0" },
+          { key: "PlayerStaminaDecreaceRate", label: "플레이어 스태미나 감소", type: "number", step: "0.1", min: "0" },
+          { key: "PalStomachDecreaceRate", label: "팰 포만감 감소", type: "number", step: "0.1", min: "0" },
+          { key: "PalStaminaDecreaceRate", label: "팰 스태미나 감소", type: "number", step: "0.1", min: "0" },
+          { key: "ItemWeightRate", label: "아이템 무게 배율", type: "number", step: "0.1", min: "0" },
+          { key: "bEnableFastTravel", label: "빠른 이동 허용", type: "checkbox" },
+          { key: "bEnableFastTravelOnlyBaseCamp", label: "거점 빠른 이동만 허용", type: "checkbox" },
+          { key: "EnablePredatorBossPal", label: "프레데터 보스 팰", type: "checkbox" },
+          { key: "bPalLost", label: "팰 손실", type: "checkbox" }
+        ]
+      },
+      {
+        title: "거점/길드",
+        fields: [
+          { key: "BaseCampMaxNum", label: "전체 거점 최대 수", type: "number", step: "1", min: "1" },
+          { key: "BaseCampMaxNumInGuild", label: "길드 거점 최대 수", type: "number", step: "1", min: "1" },
+          { key: "BaseCampWorkerMaxNum", label: "거점 작업 팰 수", type: "number", step: "1", min: "1" },
+          { key: "GuildPlayerMaxNum", label: "길드 최대 인원", type: "number", step: "1", min: "1" },
+          { key: "bAutoResetGuildNoOnlinePlayers", label: "미접속 길드 자동 초기화", type: "checkbox" },
+          { key: "AutoResetGuildTimeNoOnlinePlayers", label: "길드 초기화 시간", type: "number", step: "1", min: "1" },
+          { key: "bAllowGlobalPalboxExport", label: "글로벌 팰박스 내보내기", type: "checkbox" },
+          { key: "bAllowGlobalPalboxImport", label: "글로벌 팰박스 가져오기", type: "checkbox" }
+        ]
+      },
+      {
+        title: "운영",
+        fields: [
+          { key: "AutoSaveSpan", label: "자동 저장 간격", type: "number", step: "1", min: "1" },
+          { key: "SupplyDropSpan", label: "보급품 드롭 간격", type: "number", step: "1", min: "0" },
+          { key: "ChatPostLimitPerMinute", label: "분당 채팅 제한", type: "number", step: "1", min: "1" },
+          { key: "DropItemMaxNum", label: "드롭 아이템 최대 수", type: "number", step: "1", min: "0" },
+          { key: "DropItemAliveMaxHours", label: "드롭 아이템 유지 시간", type: "number", step: "0.1", min: "0" },
+          { key: "ServerReplicatePawnCullDistance", label: "서버 복제 거리", type: "number", step: "100", min: "1000" },
+          { key: "bShowPlayerList", label: "플레이어 목록 표시", type: "checkbox" },
+          { key: "bIsShowJoinLeftMessage", label: "입장/퇴장 메시지", type: "checkbox" },
+          { key: "bAllowClientMod", label: "클라이언트 모드 허용", type: "checkbox" }
+        ]
+      }
+    ];
 
     function getLogBox() {
       return document.getElementById("installLog");
@@ -1234,12 +1595,18 @@ def dashboard(request: Request):
         "cfgMaxPlayers",
         "cfgRconEnabled",
         "cfgRconPort",
-        "configSaveBtn"
+        "configSaveBtn",
+        "advancedSettingsBtn",
+        "advancedSaveBtn"
       ].forEach(function (id) {
         const element = document.getElementById(id);
         if (element) {
           element.disabled = locked;
         }
+      });
+
+      document.querySelectorAll("[data-advanced-key]").forEach(function (element) {
+        element.disabled = locked;
       });
     }
 
@@ -1425,6 +1792,137 @@ def dashboard(request: Request):
       }
     }
 
+    function buildAdvancedOptions() {
+      const body = document.getElementById("advancedOptionsBody");
+
+      if (!body || body.dataset.ready === "true") {
+        return;
+      }
+
+      advancedOptionGroups.forEach(function (group) {
+        const groupEl = document.createElement("section");
+        groupEl.className = "advanced-group";
+
+        const title = document.createElement("h3");
+        title.innerText = group.title;
+        groupEl.appendChild(title);
+
+        const grid = document.createElement("div");
+        grid.className = "advanced-grid";
+
+        group.fields.forEach(function (field) {
+          let wrapper;
+          let input;
+
+          if (field.type === "checkbox") {
+            wrapper = document.createElement("div");
+            wrapper.className = "checkline advanced-check";
+
+            input = document.createElement("input");
+            input.type = "checkbox";
+            input.id = "adv_" + field.key;
+            input.dataset.advancedKey = field.key;
+            input.dataset.advancedType = field.type;
+
+            const label = document.createElement("label");
+            label.className = "check-text";
+            label.htmlFor = input.id;
+            label.innerText = field.label;
+
+            wrapper.appendChild(input);
+            wrapper.appendChild(label);
+          } else {
+            wrapper = document.createElement("label");
+
+            const title = document.createElement("span");
+            title.className = "field-title";
+            title.innerText = field.label;
+            wrapper.appendChild(title);
+
+            if (field.type === "select") {
+              input = document.createElement("select");
+              (field.options || []).forEach(function (optionValue) {
+                const option = document.createElement("option");
+                option.value = optionValue;
+                option.innerText = optionValue;
+                input.appendChild(option);
+              });
+            } else {
+              input = document.createElement("input");
+              input.type = field.type || "text";
+              if (field.step !== undefined) input.step = field.step;
+              if (field.min !== undefined) input.min = field.min;
+            }
+
+            input.id = "adv_" + field.key;
+            input.dataset.advancedKey = field.key;
+            input.dataset.advancedType = field.type || "text";
+            wrapper.appendChild(input);
+          }
+
+          grid.appendChild(wrapper);
+        });
+
+        groupEl.appendChild(grid);
+        body.appendChild(groupEl);
+      });
+
+      body.dataset.ready = "true";
+    }
+
+    function fillAdvancedOptions(options) {
+      advancedOptions = Object.assign({}, options || {});
+      buildAdvancedOptions();
+
+      document.querySelectorAll("[data-advanced-key]").forEach(function (element) {
+        const key = element.dataset.advancedKey;
+        const value = advancedOptions[key];
+
+        if (element.dataset.advancedType === "checkbox") {
+          element.checked = Boolean(value);
+        } else if (value !== undefined && value !== null) {
+          element.value = value;
+        }
+      });
+    }
+
+    function readAdvancedOptions() {
+      const options = Object.assign({}, advancedOptions);
+
+      document.querySelectorAll("[data-advanced-key]").forEach(function (element) {
+        const key = element.dataset.advancedKey;
+
+        if (element.dataset.advancedType === "checkbox") {
+          options[key] = element.checked;
+        } else if (element.dataset.advancedType === "number") {
+          options[key] = Number(element.value || 0);
+        } else {
+          options[key] = element.value;
+        }
+      });
+
+      return options;
+    }
+
+    function openAdvancedSettings() {
+      if (document.getElementById("configSection").classList.contains("locked")) {
+        return;
+      }
+
+      buildAdvancedOptions();
+      fillAdvancedOptions(advancedOptions);
+
+      const modal = document.getElementById("advancedModal");
+      modal.classList.add("show");
+      modal.setAttribute("aria-hidden", "false");
+    }
+
+    function closeAdvancedSettings() {
+      const modal = document.getElementById("advancedModal");
+      modal.classList.remove("show");
+      modal.setAttribute("aria-hidden", "true");
+    }
+
     function fillConfig(config) {
       document.getElementById("cfgServerName").value = config.ServerName || "TechTim Palworld Server";
       document.getElementById("cfgDescription").value = config.ServerDescription || "";
@@ -1434,10 +1932,16 @@ def dashboard(request: Request):
       document.getElementById("cfgMaxPlayers").value = config.MaxPlayers || 32;
       document.getElementById("cfgRconEnabled").checked = Boolean(config.RCONEnabled);
       document.getElementById("cfgRconPort").value = config.RCONPort || 25575;
+      fillAdvancedOptions(config.AdvancedOptions || {});
     }
 
     function fillWorldList(worlds) {
       const list = document.getElementById("worldNameList");
+
+      if (!list) {
+        return;
+      }
+
       list.innerHTML = "";
 
       (worlds || []).forEach(function (world) {
@@ -1450,6 +1954,10 @@ def dashboard(request: Request):
     function addWorldOption(worldName) {
       const list = document.getElementById("worldNameList");
       const normalized = (worldName || "").trim();
+
+      if (!list) {
+        return;
+      }
 
       if (!normalized) {
         return;
@@ -1494,7 +2002,8 @@ def dashboard(request: Request):
         PublicPort: Number(document.getElementById("cfgPort").value || 8211),
         MaxPlayers: Number(document.getElementById("cfgMaxPlayers").value || 10),
         RCONEnabled: document.getElementById("cfgRconEnabled").checked,
-        RCONPort: Number(document.getElementById("cfgRconPort").value || 25575)
+        RCONPort: Number(document.getElementById("cfgRconPort").value || 25575),
+        AdvancedOptions: readAdvancedOptions()
       };
     }
 
