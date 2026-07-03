@@ -17,6 +17,8 @@ import zipfile
 import docker
 
 app = FastAPI(title="TechTim Palworld Server Panel")
+ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+ANSI_FRAGMENT_RE = re.compile(r"(?:\[(?:0|1|2|3|4|5|7|9|10[0-7]|[34][0-7])m)+")
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
@@ -37,6 +39,7 @@ PALWORLD_SERVER_CONTAINER = os.getenv("PALWORLD_SERVER_CONTAINER", "palworld-ser
 PALWORLD_RUNTIME_IMAGE = os.getenv("PALWORLD_RUNTIME_IMAGE", STEAMCMD_IMAGE)
 SERVER_PORT = int(os.getenv("SERVER_PORT", "8211"))
 RCON_PORT = int(os.getenv("RCON_PORT", "25575"))
+SERVER_STOP_GRACE_SECONDS = int(os.getenv("SERVER_STOP_GRACE_SECONDS", "5"))
 
 INSTALL_REQUEST_FILE = DATA_DIR / "install-request.txt"
 INSTALL_LOG_FILE = DATA_DIR / "install.log"
@@ -207,20 +210,28 @@ def must_change_password() -> bool:
     return bool(auth_data.get("must_change_password", True))
 
 
+def sanitize_log_text(text: str) -> str:
+    clean_text = ANSI_ESCAPE_RE.sub("", str(text or ""))
+    clean_text = ANSI_FRAGMENT_RE.sub("", clean_text)
+    return clean_text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def write_log(message: str) -> None:
     ensure_data_dirs()
     now = datetime.now().isoformat(timespec="seconds")
+    clean_message = sanitize_log_text(message)
 
     with INSTALL_LOG_FILE.open("a", encoding="utf-8") as f:
-        f.write(f"[{now}] {message}\n")
+        f.write(f"[{now}] {clean_message}\n")
 
 
 def write_server_control_log(message: str) -> None:
     ensure_data_dirs()
     now = datetime.now().isoformat(timespec="seconds")
+    clean_message = sanitize_log_text(message)
 
     with SERVER_CONTROL_LOG_FILE.open("a", encoding="utf-8") as f:
-        f.write(f"[{now}] {message}\n")
+        f.write(f"[{now}] {clean_message}\n")
 
 
 def clear_server_control_log() -> None:
@@ -744,25 +755,25 @@ def read_server_control_log() -> str:
         return ""
 
     try:
-        return SERVER_CONTROL_LOG_FILE.read_text(encoding="utf-8")
+        return sanitize_log_text(SERVER_CONTROL_LOG_FILE.read_text(encoding="utf-8"))
     except OSError:
         return ""
 
 
 def read_container_log(container, tail: int = 200) -> str:
-    return container.logs(
+    return sanitize_log_text(container.logs(
         stdout=True,
         stderr=True,
         tail=tail,
-    ).decode("utf-8", errors="replace")
+    ).decode("utf-8", errors="replace"))
 
 
-def combined_server_log(container=None, include_control_log: bool = True) -> str:
+def combined_server_log(container=None, include_control_log: bool = True, tail: int = 200) -> str:
     logs = ""
 
     if container is not None:
         try:
-            logs = read_container_log(container)
+            logs = read_container_log(container, tail=tail)
         except Exception as e:
             logs = f"서버 로그 조회 실패: {e}"
 
@@ -850,7 +861,7 @@ def install_palworld_job() -> None:
                 )
 
                 for line in container.logs(stream=True, stdout=True, stderr=True, follow=True):
-                    text = line.decode("utf-8", errors="replace").rstrip()
+                    text = sanitize_log_text(line.decode("utf-8", errors="replace")).rstrip()
 
                     if "Missing configuration" in text:
                         missing_configuration = True
@@ -1222,12 +1233,15 @@ def dashboard(request: Request):
     .config.locked .config-body { filter: blur(1.4px); opacity: 0.58; pointer-events: none; user-select: none; }
     .config h2 { margin: 0 0 16px; font-size: 22px; }
     .config-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
-    .advanced-card { margin-top: 18px; min-height: 112px; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,0.55); background: linear-gradient(90deg, rgba(11, 32, 42, 0.78), rgba(27, 96, 77, 0.36)), url("/static/palworld-settings-bg.png") center / cover no-repeat; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 18px; color: #ffffff; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08); }
-    .advanced-copy { min-width: 0; }
+    .advanced-card { position: relative; margin-top: 18px; min-height: 128px; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,0.65); background: linear-gradient(90deg, rgba(11, 32, 42, 0.82), rgba(27, 96, 77, 0.32)), url("/static/palworld-settings-bg.png") center / cover no-repeat; display: flex; align-items: center; justify-content: flex-start; gap: 20px; padding: 20px; color: #ffffff; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.1), 0 16px 34px rgba(7, 18, 26, 0.16); }
+    .advanced-card::before { content: ""; position: absolute; inset: 8px; border-radius: 10px; border: 1px solid rgba(125, 211, 252, 0.44); background: linear-gradient(90deg, rgba(34,211,238,0.34), transparent 22%, transparent 78%, rgba(74,222,128,0.28)); pointer-events: none; }
+    .advanced-card::after { content: ""; position: absolute; left: 20px; top: 16px; bottom: 16px; width: 4px; border-radius: 999px; background: linear-gradient(180deg, #67e8f9, #a7f3d0 52%, #fde68a); box-shadow: 0 0 18px rgba(103,232,249,0.58); pointer-events: none; }
+    .advanced-copy { position: relative; z-index: 1; min-width: 0; }
     .advanced-title { font-size: 20px; font-weight: bold; margin-bottom: 6px; }
     .advanced-subtitle { color: rgba(255,255,255,0.82); font-size: 13px; line-height: 1.45; }
-    .advanced-button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 58px; height: 58px; border-radius: 14px; padding: 0; background: rgba(255,255,255,0.9); color: #0f766e; box-shadow: 0 14px 32px rgba(0,0,0,0.24); }
-    .advanced-button img { width: 38px; height: 38px; display: block; object-fit: cover; border-radius: 10px; }
+    .advanced-button { position: relative; z-index: 1; display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; flex: 0 0 auto; width: 86px; height: 86px; border-radius: 18px; padding: 8px; background: rgba(255,255,255,0.94); color: #0f766e; box-shadow: 0 16px 36px rgba(0,0,0,0.28), inset 0 0 0 1px rgba(15,118,110,0.18); }
+    .advanced-button img { width: 42px; height: 42px; display: block; object-fit: cover; border-radius: 11px; }
+    .advanced-button-label { color: #0f3f3d; font-size: 12px; font-weight: bold; line-height: 1; }
     .modal-backdrop { position: fixed; inset: 0; z-index: 100; display: none; align-items: center; justify-content: center; padding: 24px; background: rgba(10, 18, 28, 0.62); }
     .modal-backdrop.show { display: flex; }
     .modal { width: min(1060px, 100%); max-height: min(86vh, 900px); overflow: hidden; border-radius: 16px; border: 1px solid rgba(255,255,255,0.45); background: rgba(255,255,255,0.96); box-shadow: 0 28px 90px rgba(0,0,0,0.45); display: flex; flex-direction: column; }
@@ -1239,6 +1253,12 @@ def dashboard(request: Request):
     .advanced-group h3 { margin: 0 0 12px; font-size: 17px; color: #111827; }
     .advanced-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
     .advanced-check { margin-top: 0; align-self: end; min-height: 42px; }
+    .range-field { padding: 12px; border: 1px solid #e5e7eb; border-radius: 12px; background: #ffffff; }
+    .range-row { display: grid; grid-template-columns: minmax(0, 1fr) 86px; gap: 10px; align-items: center; margin-top: 8px; }
+    .range-number { margin-top: 0; text-align: right; }
+    input[type="range"].range-slider { appearance: none; width: 100%; height: 10px; margin: 0; padding: 0; border: 0; border-radius: 999px; background: linear-gradient(90deg, #14b8a6 var(--range-fill, 50%), #e5e7eb var(--range-fill, 50%)); cursor: pointer; }
+    input[type="range"].range-slider::-webkit-slider-thumb { appearance: none; width: 20px; height: 20px; border: 3px solid #ffffff; border-radius: 50%; background: #0f766e; box-shadow: 0 4px 12px rgba(15,118,110,0.34); }
+    input[type="range"].range-slider::-moz-range-thumb { width: 16px; height: 16px; border: 3px solid #ffffff; border-radius: 50%; background: #0f766e; box-shadow: 0 4px 12px rgba(15,118,110,0.34); }
     .modal-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 20px; border-top: 1px solid #e5e7eb; background: #f9fafb; }
     label { display: block; font-size: 13px; font-weight: bold; color: #374151; }
     .field-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
@@ -1269,7 +1289,8 @@ def dashboard(request: Request):
       .advanced-card { align-items: flex-start; }
       .advanced-grid { grid-template-columns: 1fr; }
       button { width: 100%; }
-      .advanced-button, .modal-close { width: 44px; height: 44px; }
+      .advanced-button { width: 86px; height: 86px; }
+      .modal-close { width: 44px; height: 44px; }
       .config-save-wrap { width: 100%; }
       .save-bubble { max-width: calc(100% - 24px); white-space: normal; }
       .help::after { right: auto; left: 50%; transform: translate(-50%, 4px); max-width: min(220px, calc(100vw - 48px)); }
@@ -1401,13 +1422,14 @@ def dashboard(request: Request):
           </div>
         </div>
         <div class="advanced-card">
+          <button id="advancedSettingsBtn" class="advanced-button" type="button" onclick="openAdvancedSettings()" title="상세 설정 열기" aria-label="상세 설정 열기">
+            <img src="/static/palworld-settings-icon.png" alt="">
+            <span class="advanced-button-label">설정하기</span>
+          </button>
           <div class="advanced-copy">
             <div class="advanced-title">Palworld 상세 서버 설정</div>
             <div class="advanced-subtitle">경험치, 포획률, 낮/밤 속도, 알 부화 시간, 전투 배율, 월드 규칙을 팝업에서 조정합니다.</div>
           </div>
-          <button id="advancedSettingsBtn" class="advanced-button" type="button" onclick="openAdvancedSettings()" title="상세 설정 열기" aria-label="상세 설정 열기">
-            <img src="/static/palworld-settings-icon.png" alt="">
-          </button>
         </div>
       </div>
     </div>
@@ -1450,24 +1472,24 @@ def dashboard(request: Request):
       {
         title: "배율",
         fields: [
-          { key: "DayTimeSpeedRate", label: "낮 시간 속도", type: "number", step: "0.1", min: "0.1" },
-          { key: "NightTimeSpeedRate", label: "밤 시간 속도", type: "number", step: "0.1", min: "0.1" },
-          { key: "ExpRate", label: "경험치 배율", type: "number", step: "0.1", min: "0.1" },
-          { key: "PalCaptureRate", label: "포획률", type: "number", step: "0.1", min: "0.1" },
-          { key: "PalSpawnNumRate", label: "팰 출현 배율", type: "number", step: "0.1", min: "0.1" },
-          { key: "CollectionDropRate", label: "채집 드롭 배율", type: "number", step: "0.1", min: "0.1" },
-          { key: "EnemyDropItemRate", label: "적 드롭 배율", type: "number", step: "0.1", min: "0.1" },
-          { key: "WorkSpeedRate", label: "작업 속도", type: "number", step: "0.1", min: "0.1" },
-          { key: "PalEggDefaultHatchingTime", label: "알 부화 시간", type: "number", step: "0.1", min: "0" }
+          { key: "DayTimeSpeedRate", label: "낮 시간 속도", type: "number", step: "0.1", min: "0.1", max: "5" },
+          { key: "NightTimeSpeedRate", label: "밤 시간 속도", type: "number", step: "0.1", min: "0.1", max: "5" },
+          { key: "ExpRate", label: "경험치 배율", type: "number", step: "0.1", min: "0.1", max: "20" },
+          { key: "PalCaptureRate", label: "포획률", type: "number", step: "0.1", min: "0.1", max: "10" },
+          { key: "PalSpawnNumRate", label: "팰 출현 배율", type: "number", step: "0.1", min: "0.1", max: "3" },
+          { key: "CollectionDropRate", label: "채집 드롭 배율", type: "number", step: "0.1", min: "0.1", max: "10" },
+          { key: "EnemyDropItemRate", label: "적 드롭 배율", type: "number", step: "0.1", min: "0.1", max: "10" },
+          { key: "WorkSpeedRate", label: "작업 속도", type: "number", step: "0.1", min: "0.1", max: "10" },
+          { key: "PalEggDefaultHatchingTime", label: "알 부화 시간", type: "number", step: "0.1", min: "0", max: "240" }
         ]
       },
       {
         title: "전투",
         fields: [
-          { key: "PlayerDamageRateAttack", label: "플레이어 공격 배율", type: "number", step: "0.1", min: "0.1" },
-          { key: "PlayerDamageRateDefense", label: "플레이어 방어 배율", type: "number", step: "0.1", min: "0.1" },
-          { key: "PalDamageRateAttack", label: "팰 공격 배율", type: "number", step: "0.1", min: "0.1" },
-          { key: "PalDamageRateDefense", label: "팰 방어 배율", type: "number", step: "0.1", min: "0.1" },
+          { key: "PlayerDamageRateAttack", label: "플레이어 공격 배율", type: "number", step: "0.1", min: "0.1", max: "5" },
+          { key: "PlayerDamageRateDefense", label: "플레이어 방어 배율", type: "number", step: "0.1", min: "0.1", max: "5" },
+          { key: "PalDamageRateAttack", label: "팰 공격 배율", type: "number", step: "0.1", min: "0.1", max: "5" },
+          { key: "PalDamageRateDefense", label: "팰 방어 배율", type: "number", step: "0.1", min: "0.1", max: "5" },
           { key: "DeathPenalty", label: "사망 패널티", type: "select", options: ["None", "Item", "ItemAndEquipment", "All"] },
           { key: "bEnablePlayerToPlayerDamage", label: "플레이어 간 피해", type: "checkbox" },
           { key: "bEnableFriendlyFire", label: "아군 피해", type: "checkbox" },
@@ -1478,11 +1500,11 @@ def dashboard(request: Request):
       {
         title: "생존/월드",
         fields: [
-          { key: "PlayerStomachDecreaceRate", label: "플레이어 포만감 감소", type: "number", step: "0.1", min: "0" },
-          { key: "PlayerStaminaDecreaceRate", label: "플레이어 스태미나 감소", type: "number", step: "0.1", min: "0" },
-          { key: "PalStomachDecreaceRate", label: "팰 포만감 감소", type: "number", step: "0.1", min: "0" },
-          { key: "PalStaminaDecreaceRate", label: "팰 스태미나 감소", type: "number", step: "0.1", min: "0" },
-          { key: "ItemWeightRate", label: "아이템 무게 배율", type: "number", step: "0.1", min: "0" },
+          { key: "PlayerStomachDecreaceRate", label: "플레이어 포만감 감소", type: "number", step: "0.1", min: "0", max: "5" },
+          { key: "PlayerStaminaDecreaceRate", label: "플레이어 스태미나 감소", type: "number", step: "0.1", min: "0", max: "5" },
+          { key: "PalStomachDecreaceRate", label: "팰 포만감 감소", type: "number", step: "0.1", min: "0", max: "5" },
+          { key: "PalStaminaDecreaceRate", label: "팰 스태미나 감소", type: "number", step: "0.1", min: "0", max: "5" },
+          { key: "ItemWeightRate", label: "아이템 무게 배율", type: "number", step: "0.1", min: "0", max: "10" },
           { key: "bEnableFastTravel", label: "빠른 이동 허용", type: "checkbox" },
           { key: "bEnableFastTravelOnlyBaseCamp", label: "거점 빠른 이동만 허용", type: "checkbox" },
           { key: "EnablePredatorBossPal", label: "프레데터 보스 팰", type: "checkbox" },
@@ -1492,12 +1514,12 @@ def dashboard(request: Request):
       {
         title: "거점/길드",
         fields: [
-          { key: "BaseCampMaxNum", label: "전체 거점 최대 수", type: "number", step: "1", min: "1" },
-          { key: "BaseCampMaxNumInGuild", label: "길드 거점 최대 수", type: "number", step: "1", min: "1" },
-          { key: "BaseCampWorkerMaxNum", label: "거점 작업 팰 수", type: "number", step: "1", min: "1" },
-          { key: "GuildPlayerMaxNum", label: "길드 최대 인원", type: "number", step: "1", min: "1" },
+          { key: "BaseCampMaxNum", label: "전체 거점 최대 수", type: "number", step: "1", min: "1", max: "512" },
+          { key: "BaseCampMaxNumInGuild", label: "길드 거점 최대 수", type: "number", step: "1", min: "1", max: "10" },
+          { key: "BaseCampWorkerMaxNum", label: "거점 작업 팰 수", type: "number", step: "1", min: "1", max: "50" },
+          { key: "GuildPlayerMaxNum", label: "길드 최대 인원", type: "number", step: "1", min: "1", max: "100" },
           { key: "bAutoResetGuildNoOnlinePlayers", label: "미접속 길드 자동 초기화", type: "checkbox" },
-          { key: "AutoResetGuildTimeNoOnlinePlayers", label: "길드 초기화 시간", type: "number", step: "1", min: "1" },
+          { key: "AutoResetGuildTimeNoOnlinePlayers", label: "길드 초기화 시간", type: "number", step: "1", min: "1", max: "720" },
           { key: "bAllowGlobalPalboxExport", label: "글로벌 팰박스 내보내기", type: "checkbox" },
           { key: "bAllowGlobalPalboxImport", label: "글로벌 팰박스 가져오기", type: "checkbox" }
         ]
@@ -1505,12 +1527,12 @@ def dashboard(request: Request):
       {
         title: "운영",
         fields: [
-          { key: "AutoSaveSpan", label: "자동 저장 간격", type: "number", step: "1", min: "1" },
-          { key: "SupplyDropSpan", label: "보급품 드롭 간격", type: "number", step: "1", min: "0" },
-          { key: "ChatPostLimitPerMinute", label: "분당 채팅 제한", type: "number", step: "1", min: "1" },
-          { key: "DropItemMaxNum", label: "드롭 아이템 최대 수", type: "number", step: "1", min: "0" },
-          { key: "DropItemAliveMaxHours", label: "드롭 아이템 유지 시간", type: "number", step: "0.1", min: "0" },
-          { key: "ServerReplicatePawnCullDistance", label: "서버 복제 거리", type: "number", step: "100", min: "1000" },
+          { key: "AutoSaveSpan", label: "자동 저장 간격", type: "number", step: "1", min: "1", max: "300" },
+          { key: "SupplyDropSpan", label: "보급품 드롭 간격", type: "number", step: "1", min: "0", max: "720" },
+          { key: "ChatPostLimitPerMinute", label: "분당 채팅 제한", type: "number", step: "1", min: "1", max: "120" },
+          { key: "DropItemMaxNum", label: "드롭 아이템 최대 수", type: "number", step: "1", min: "0", max: "10000" },
+          { key: "DropItemAliveMaxHours", label: "드롭 아이템 유지 시간", type: "number", step: "0.1", min: "0", max: "24" },
+          { key: "ServerReplicatePawnCullDistance", label: "서버 복제 거리", type: "number", step: "100", min: "1000", max: "50000" },
           { key: "bShowPlayerList", label: "플레이어 목록 표시", type: "checkbox" },
           { key: "bIsShowJoinLeftMessage", label: "입장/퇴장 메시지", type: "checkbox" },
           { key: "bAllowClientMod", label: "클라이언트 모드 허용", type: "checkbox" }
@@ -1608,6 +1630,10 @@ def dashboard(request: Request):
       document.querySelectorAll("[data-advanced-key]").forEach(function (element) {
         element.disabled = locked;
       });
+
+      document.querySelectorAll("[data-advanced-range]").forEach(function (element) {
+        element.disabled = locked;
+      });
     }
 
     async function requestInstall() {
@@ -1648,7 +1674,7 @@ def dashboard(request: Request):
       if (isRunningStatus(currentStatus)) {
         alert("이미 서버가 동작중입니다.");
         currentLogMode = "server";
-        await loadServerLog();
+        await loadServerLog({ preserveWhenEmpty: true });
         return;
       }
 
@@ -1683,7 +1709,7 @@ def dashboard(request: Request):
 
         currentLogMode = "server";
         await loadServerStatus();
-        await loadServerLog();
+        await loadServerLog({ preserveWhenEmpty: true });
 
       } catch (err) {
         result.innerText = "서버 시작 요청 실패: " + err;
@@ -1694,6 +1720,10 @@ def dashboard(request: Request):
       const result = document.getElementById("result");
 
       result.innerText = "Palworld 서버를 중지하는 중입니다...";
+      currentLogMode = "server";
+      document.getElementById("serverStatus").innerText = "stopping";
+      updateServerStatusIcon("stopping");
+      setLogText("[패널] Palworld 서버 중지 요청을 보냈습니다...");
 
       try {
         const response = await fetch("/api/server/stop", {
@@ -1709,6 +1739,11 @@ def dashboard(request: Request):
           (data.container ? "컨테이너: " + data.container : "");
 
         currentLogMode = "server";
+        if (data.status === "stopped" || data.status === "not_created") {
+          document.getElementById("serverStatus").innerText = data.status;
+          updateServerStatusIcon(data.status);
+          setConfigLocked(false);
+        }
         await loadServerStatus();
         setLogText(data.log || ("[패널] " + (data.message || "Palworld 서버가 종료되었습니다.")));
 
@@ -1792,6 +1827,29 @@ def dashboard(request: Request):
       }
     }
 
+    function updateRangeFill(range) {
+      const min = Number(range.min || 0);
+      const max = Number(range.max || 100);
+      const value = Number(range.value || min);
+      const percent = max > min ? ((value - min) / (max - min)) * 100 : 0;
+      range.style.setProperty("--range-fill", Math.max(0, Math.min(100, percent)) + "%");
+    }
+
+    function clampNumberInput(element) {
+      let value = Number(element.value || 0);
+
+      if (element.min !== "") {
+        value = Math.max(Number(element.min), value);
+      }
+
+      if (element.max !== "") {
+        value = Math.min(Number(element.max), value);
+      }
+
+      element.value = value;
+      return value;
+    }
+
     function buildAdvancedOptions() {
       const body = document.getElementById("advancedOptionsBody");
 
@@ -1847,17 +1905,66 @@ def dashboard(request: Request):
                 option.innerText = optionValue;
                 input.appendChild(option);
               });
+            } else if (field.type === "number" && field.max !== undefined) {
+              wrapper.className = "range-field";
+
+              const row = document.createElement("div");
+              row.className = "range-row";
+
+              const range = document.createElement("input");
+              range.type = "range";
+              range.className = "range-slider";
+              range.id = "adv_range_" + field.key;
+              range.dataset.advancedRange = field.key;
+              range.step = field.step || "1";
+              range.min = field.min !== undefined ? field.min : "0";
+              range.max = field.max;
+
+              input = document.createElement("input");
+              input.type = "number";
+              input.className = "range-number";
+              if (field.step !== undefined) input.step = field.step;
+              if (field.min !== undefined) input.min = field.min;
+              if (field.max !== undefined) input.max = field.max;
+
+              range.addEventListener("input", function () {
+                input.value = range.value;
+                updateRangeFill(range);
+              });
+
+              input.addEventListener("input", function () {
+                if (input.value === "") {
+                  return;
+                }
+
+                range.value = input.value;
+                updateRangeFill(range);
+              });
+
+              input.addEventListener("change", function () {
+                input.value = clampNumberInput(input);
+                range.value = input.value;
+                updateRangeFill(range);
+              });
+
+              row.appendChild(range);
+              row.appendChild(input);
+              wrapper.appendChild(row);
             } else {
               input = document.createElement("input");
               input.type = field.type || "text";
               if (field.step !== undefined) input.step = field.step;
               if (field.min !== undefined) input.min = field.min;
+              if (field.max !== undefined) input.max = field.max;
+              wrapper.appendChild(input);
             }
 
             input.id = "adv_" + field.key;
             input.dataset.advancedKey = field.key;
             input.dataset.advancedType = field.type || "text";
-            wrapper.appendChild(input);
+            if (!input.parentNode) {
+              wrapper.appendChild(input);
+            }
           }
 
           grid.appendChild(wrapper);
@@ -1883,6 +1990,14 @@ def dashboard(request: Request):
         } else if (value !== undefined && value !== null) {
           element.value = value;
         }
+
+        if (element.dataset.advancedType === "number") {
+          const range = document.querySelector('[data-advanced-range="' + key + '"]');
+          if (range) {
+            range.value = element.value;
+            updateRangeFill(range);
+          }
+        }
       });
     }
 
@@ -1895,7 +2010,12 @@ def dashboard(request: Request):
         if (element.dataset.advancedType === "checkbox") {
           options[key] = element.checked;
         } else if (element.dataset.advancedType === "number") {
-          options[key] = Number(element.value || 0);
+          options[key] = clampNumberInput(element);
+          const range = document.querySelector('[data-advanced-range="' + key + '"]');
+          if (range) {
+            range.value = options[key];
+            updateRangeFill(range);
+          }
         } else {
           options[key] = element.value;
         }
@@ -2061,14 +2181,30 @@ def dashboard(request: Request):
       }
     }
 
-    async function loadServerLog() {
+    async function loadServerLog(options) {
       currentLogMode = "server";
+      const preserveWhenEmpty = Boolean(options && options.preserveWhenEmpty);
 
       try {
         const response = await fetch("/api/server/log");
         const data = await response.json();
+        const logText = data.log || data.error || "";
 
-        setLogText(data.log || data.error || "서버 로그가 없습니다.");
+        if (logText) {
+          setLogText(logText);
+          return;
+        }
+
+        if (preserveWhenEmpty) {
+          return;
+        }
+
+        if (["running", "restarting", "started"].includes((data.status || "").toLowerCase())) {
+          setLogText("[패널] 서버 로그 수신을 기다리는 중입니다...");
+          return;
+        }
+
+        setLogText("서버 로그가 없습니다.");
       } catch (err) {
         setLogText("서버 로그 조회 실패: " + err);
       }
@@ -2207,7 +2343,7 @@ def install_log(request: Request):
 
     return {
         "status": get_status(),
-        "log": INSTALL_LOG_FILE.read_text(encoding="utf-8"),
+        "log": sanitize_log_text(INSTALL_LOG_FILE.read_text(encoding="utf-8")),
     }
 
 
@@ -2446,13 +2582,14 @@ def stop_server(request: Request):
                 "status": "stopped",
                 "message": "Palworld 서버가 이미 종료되어 있습니다.",
                 "container": container.name,
-                "log": combined_server_log(container),
+                "log": combined_server_log(container, tail=80),
             }
 
         try:
-            container.stop(timeout=30)
+            write_server_control_log(f"정상 종료 신호를 보냈습니다. 최대 {SERVER_STOP_GRACE_SECONDS}초만 대기합니다.")
+            container.stop(timeout=SERVER_STOP_GRACE_SECONDS)
         except Exception as e:
-            write_server_control_log(f"정상 중지 실패, 강제 종료를 시도합니다: {e}")
+            write_server_control_log(f"정상 중지 대기 중 경고가 발생해 강제 종료를 진행합니다: {e}")
             container.remove(force=True)
             write_server_control_log("Palworld 서버가 강제로 종료되었습니다.")
 
@@ -2463,11 +2600,21 @@ def stop_server(request: Request):
                 "log": combined_server_log(),
             }
 
-        time.sleep(2)
-        container.reload()
+        try:
+            container.reload()
+        except Exception as reload_error:
+            write_server_control_log(f"중지 후 컨테이너 상태 확인 중 경고: {reload_error}")
+            write_server_control_log("Palworld 서버가 종료되었습니다.")
+
+            return {
+                "status": "stopped",
+                "message": "Palworld 서버가 종료되었습니다.",
+                "container": PALWORLD_SERVER_CONTAINER,
+                "log": combined_server_log(tail=80),
+            }
 
         if container.status in {"running", "restarting"}:
-            write_server_control_log("중지 후 서버가 다시 실행되어 강제 제거를 진행했습니다.")
+            write_server_control_log("짧은 대기 후에도 서버가 실행 중이라 강제 제거를 진행했습니다.")
             container.remove(force=True)
             write_server_control_log("Palworld 서버가 종료되었습니다.")
 
@@ -2484,7 +2631,7 @@ def stop_server(request: Request):
             "status": "stopped",
             "message": "Palworld 서버가 종료되었습니다.",
             "container": container.name,
-            "log": combined_server_log(container),
+            "log": combined_server_log(container, tail=80),
         }
 
     except Exception as e:
