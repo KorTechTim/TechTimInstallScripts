@@ -7,6 +7,7 @@ from pathlib import Path
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import time
@@ -15,6 +16,8 @@ import zipfile
 import docker
 
 app = FastAPI(title="TechTim Romestead Server Panel")
+ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+ANSI_FRAGMENT_RE = re.compile(r"(?:\[(?:0|1|2|3|4|5|7|9|10[0-7]|[34][0-7])m)+")
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
@@ -32,13 +35,15 @@ ROMESTEAD_APP_ID = os.getenv("ROMESTEAD_APP_ID", "4763510")
 ROMESTEAD_SERVER_CONTAINER = os.getenv("ROMESTEAD_SERVER_CONTAINER", "romestead-server")
 DOTNET_IMAGE = os.getenv("DOTNET_IMAGE", "mcr.microsoft.com/dotnet/runtime:8.0")
 SERVER_PORT = int(os.getenv("SERVER_PORT", "8050"))
+SERVER_STOP_GRACE_SECONDS = int(os.getenv("SERVER_STOP_GRACE_SECONDS", "5"))
 
 INSTALL_REQUEST_FILE = DATA_DIR / "install-request.txt"
 INSTALL_LOG_FILE = DATA_DIR / "install.log"
 INSTALL_STATUS_FILE = DATA_DIR / "install-status.txt"
 SERVER_CONTROL_LOG_FILE = DATA_DIR / "server-control.log"
 
-SAVED_WORLDS_DIR = DATA_DIR / "server" / "saved_worlds"
+SERVER_ROOT_DIR = DATA_DIR / "server"
+SAVED_WORLDS_DIR = SERVER_ROOT_DIR / "saved_worlds"
 SAVE_EXPORT_DIR = DATA_DIR / "uploads"
 
 AUTH_FILE = DATA_DIR / "auth.json"
@@ -66,9 +71,18 @@ class ConfigRequest(BaseModel):
     EnableCheats: bool = False
 
 
+class FileExplorerCreateDirRequest(BaseModel):
+    path: str = ""
+    name: str
+
+
+class FileExplorerDeleteRequest(BaseModel):
+    path: str
+
+
 def ensure_data_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    (DATA_DIR / "server").mkdir(parents=True, exist_ok=True)
+    SERVER_ROOT_DIR.mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "backups").mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "uploads").mkdir(parents=True, exist_ok=True)
     SAVED_WORLDS_DIR.mkdir(parents=True, exist_ok=True)
@@ -201,20 +215,28 @@ def must_change_password() -> bool:
     return bool(auth_data.get("must_change_password", True))
 
 
+def sanitize_log_text(text: str) -> str:
+    clean_text = ANSI_ESCAPE_RE.sub("", str(text or ""))
+    clean_text = ANSI_FRAGMENT_RE.sub("", clean_text)
+    return clean_text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def write_log(message: str) -> None:
     ensure_data_dirs()
     now = datetime.now().isoformat(timespec="seconds")
+    clean_message = sanitize_log_text(message)
 
     with INSTALL_LOG_FILE.open("a", encoding="utf-8") as f:
-        f.write(f"[{now}] {message}\n")
+        f.write(f"[{now}] {clean_message}\n")
 
 
 def write_server_control_log(message: str) -> None:
     ensure_data_dirs()
     now = datetime.now().isoformat(timespec="seconds")
+    clean_message = sanitize_log_text(message)
 
     with SERVER_CONTROL_LOG_FILE.open("a", encoding="utf-8") as f:
-        f.write(f"[{now}] {message}\n")
+        f.write(f"[{now}] {clean_message}\n")
 
 
 def clear_server_control_log() -> None:
@@ -396,25 +418,25 @@ def read_server_control_log() -> str:
         return ""
 
     try:
-        return SERVER_CONTROL_LOG_FILE.read_text(encoding="utf-8")
+        return sanitize_log_text(SERVER_CONTROL_LOG_FILE.read_text(encoding="utf-8"))
     except OSError:
         return ""
 
 
 def read_container_log(container, tail: int = 200) -> str:
-    return container.logs(
+    return sanitize_log_text(container.logs(
         stdout=True,
         stderr=True,
         tail=tail,
-    ).decode("utf-8", errors="replace")
+    ).decode("utf-8", errors="replace"))
 
 
-def combined_server_log(container=None, include_control_log: bool = True) -> str:
+def combined_server_log(container=None, include_control_log: bool = True, tail: int = 200) -> str:
     logs = ""
 
     if container is not None:
         try:
-            logs = read_container_log(container)
+            logs = read_container_log(container, tail=tail)
         except Exception as e:
             logs = f"서버 로그 조회 실패: {e}"
 
@@ -438,6 +460,61 @@ def safe_extract_zip(zip_path: Path, target_dir: Path) -> None:
                 raise ValueError("ZIP 파일에 허용되지 않는 경로가 포함되어 있습니다.")
 
         zip_ref.extractall(target_dir)
+
+
+def server_root() -> Path:
+    ensure_data_dirs()
+    return SERVER_ROOT_DIR.resolve()
+
+
+def resolve_server_path(relative_path: str = "") -> Path:
+    root = server_root()
+    cleaned = (relative_path or "").strip().replace("\\", "/").lstrip("/")
+    candidate = (root / cleaned).resolve()
+
+    if candidate != root and not str(candidate).startswith(str(root) + os.sep):
+        raise HTTPException(status_code=400, detail="서버 폴더 밖으로 이동할 수 없습니다.")
+
+    return candidate
+
+
+def server_relative_path(path: Path) -> str:
+    root = server_root()
+    resolved = path.resolve()
+
+    if resolved == root:
+        return ""
+
+    return resolved.relative_to(root).as_posix()
+
+
+def validate_entry_name(name: str) -> str:
+    cleaned = Path(name or "").name.strip()
+
+    if not cleaned or cleaned in {".", ".."}:
+        raise HTTPException(status_code=400, detail="올바른 이름을 입력해주세요.")
+
+    return cleaned
+
+
+def file_entry(path: Path) -> dict:
+    stat = path.stat()
+
+    return {
+        "name": path.name,
+        "path": server_relative_path(path),
+        "type": "dir" if path.is_dir() else "file",
+        "size": stat.st_size if path.is_file() else 0,
+        "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+    }
+
+
+def require_server_stopped_for_file_write() -> None:
+    if is_server_container_running():
+        raise HTTPException(
+            status_code=409,
+            detail="서버 실행 중에는 파일 업로드, 삭제, 폴더 생성을 할 수 없습니다. 서버를 중지한 뒤 다시 시도해주세요.",
+        )
 
 
 def install_romestead_job() -> None:
@@ -502,7 +579,7 @@ def install_romestead_job() -> None:
                 )
 
                 for line in container.logs(stream=True, stdout=True, stderr=True, follow=True):
-                    text = line.decode("utf-8", errors="replace").rstrip()
+                    text = sanitize_log_text(line.decode("utf-8", errors="replace")).rstrip()
 
                     if "Missing configuration" in text:
                         missing_configuration = True
@@ -867,6 +944,25 @@ def dashboard(request: Request):
     .config.locked .config-body { filter: blur(1.4px); opacity: 0.58; pointer-events: none; user-select: none; }
     .config h2 { margin: 0 0 16px; font-size: 22px; }
     .config-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+    .modal-backdrop { position: fixed; inset: 0; z-index: 100; display: none; align-items: center; justify-content: center; padding: 24px; background: rgba(10, 18, 28, 0.62); }
+    .modal-backdrop.show { display: flex; }
+    .modal { width: min(1060px, 100%); max-height: min(86vh, 900px); overflow: hidden; border-radius: 16px; border: 1px solid rgba(255,255,255,0.45); background: rgba(255,255,255,0.96); box-shadow: 0 28px 90px rgba(0,0,0,0.45); display: flex; flex-direction: column; }
+    .modal-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 20px; background: linear-gradient(90deg, rgba(47, 22, 13, 0.16), rgba(86, 58, 37, 0.12)); border-bottom: 1px solid #e5e7eb; }
+    .modal-head h2 { margin: 0; font-size: 22px; }
+    .modal-close { width: 40px; height: 40px; border-radius: 50%; padding: 0; background: #111827; color: #fff; }
+    .modal-body { overflow: auto; padding: 20px; }
+    .explorer-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+    .explorer-path { min-width: 220px; padding: 10px 12px; border-radius: 10px; background: #eef2f7; color: #1f2937; font-family: Consolas, Monaco, monospace; font-size: 13px; }
+    .explorer-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .explorer-actions button { padding: 10px 12px; border-radius: 9px; }
+    .explorer-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .explorer-table th, .explorer-table td { padding: 10px 8px; border-bottom: 1px solid #e5e7eb; text-align: left; vertical-align: middle; }
+    .explorer-table th { color: #4b5563; font-size: 12px; background: #f9fafb; }
+    .explorer-name { display: inline-flex; align-items: center; gap: 8px; min-width: 0; border: 0; padding: 0; background: transparent; color: #7c2d12; font-weight: bold; cursor: pointer; }
+    .explorer-name.file { color: #1f2937; cursor: default; }
+    .explorer-row-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+    .explorer-row-actions button { padding: 8px 10px; border-radius: 8px; font-size: 12px; }
+    .explorer-note { margin-top: 12px; color: #6b7280; font-size: 12px; line-height: 1.45; }
     label { display: block; font-size: 13px; font-weight: bold; color: #374151; }
     .field-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     .help { position: relative; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 18px; height: 18px; border-radius: 50%; border: 1px solid #9ca3af; color: #4b5563; background: #f9fafb; font-size: 12px; line-height: 1; cursor: help; }
@@ -1036,9 +1132,41 @@ def dashboard(request: Request):
       <button class="secondary" onclick="restartServer()">서버 재시작</button>
       <button class="secondary" onclick="loadServerLog()">서버 로그 보기</button>
       <button class="secondary" onclick="loadLog()">설치 로그 보기</button>
-      <button class="secondary" onclick="downloadSaves()">세이브 다운로드</button>
-      <button class="secondary" onclick="triggerSaveUpload()">세이브 업로드</button>
-      <input id="saveUploadInput" type="file" accept=".zip" onchange="uploadSaves()" style="display:none">
+      <button class="secondary" onclick="openFileExplorer()">서버 디렉토리 탐색기</button>
+      <input id="fileExplorerUploadInput" type="file" onchange="uploadExplorerFile()" style="display:none">
+    </div>
+
+    <div id="fileExplorerModal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="fileExplorerTitle">
+        <div class="modal-head">
+          <h2 id="fileExplorerTitle">서버 디렉토리 탐색기</h2>
+          <button class="modal-close" type="button" onclick="closeFileExplorer()" title="닫기" aria-label="닫기">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="explorer-toolbar">
+            <div id="fileExplorerPath" class="explorer-path">/server</div>
+            <div class="explorer-actions">
+              <button class="secondary" type="button" onclick="loadFileExplorer()">새로고침</button>
+              <button id="fileExplorerUpBtn" class="secondary" type="button" onclick="goFileExplorerParent()">상위 폴더</button>
+              <button id="fileExplorerNewDirBtn" class="secondary" type="button" onclick="createExplorerDirectory()">폴더 생성</button>
+              <button id="fileExplorerUploadBtn" type="button" onclick="triggerExplorerUpload()">파일 업로드</button>
+            </div>
+          </div>
+          <table class="explorer-table">
+            <thead>
+              <tr>
+                <th>이름</th>
+                <th>종류</th>
+                <th>크기</th>
+                <th>수정일</th>
+                <th style="text-align:right">작업</th>
+              </tr>
+            </thead>
+            <tbody id="fileExplorerBody"></tbody>
+          </table>
+          <div id="fileExplorerNote" class="explorer-note"></div>
+        </div>
+      </div>
     </div>
 
     <div id="result" class="result" hidden></div>
@@ -1172,7 +1300,7 @@ def dashboard(request: Request):
       if (isRunningStatus(currentStatus)) {
         alert("이미 서버가 동작중입니다.");
         currentLogMode = "server";
-        await loadServerLog();
+        await loadServerLog({ preserveWhenEmpty: true });
         return;
       }
 
@@ -1207,7 +1335,7 @@ def dashboard(request: Request):
 
         currentLogMode = "server";
         await loadServerStatus();
-        await loadServerLog();
+        await loadServerLog({ preserveWhenEmpty: true });
 
       } catch (err) {
         result.innerText = "서버 시작 요청 실패: " + err;
@@ -1218,6 +1346,10 @@ def dashboard(request: Request):
       const result = document.getElementById("result");
 
       result.innerText = "Romestead 서버를 중지하는 중입니다...";
+      currentLogMode = "server";
+      document.getElementById("serverStatus").innerText = "stopping";
+      updateServerStatusIcon("stopping");
+      setLogText("[패널] Romestead 서버 중지 요청을 보냈습니다...");
 
       try {
         const response = await fetch("/api/server/stop", {
@@ -1233,6 +1365,12 @@ def dashboard(request: Request):
           (data.container ? "컨테이너: " + data.container : "");
 
         currentLogMode = "server";
+        if (data.status === "stopped" || data.status === "not_created") {
+          document.getElementById("serverStatus").innerText = data.status;
+          updateServerStatusIcon(data.status);
+          setConfigLocked(false);
+          setFileExplorerWriteLocked(false);
+        }
         await loadServerStatus();
         setLogText(data.log || ("[패널] " + (data.message || "Romestead 서버가 종료되었습니다.")));
 
@@ -1268,51 +1406,241 @@ def dashboard(request: Request):
       }
     }
 
-    function downloadSaves() {
-      const result = document.getElementById("result");
-      result.innerText = "세이브 파일 다운로드를 준비합니다...";
-      window.location.href = "/api/saves/download";
+    let fileExplorerPath = "";
+    let fileExplorerLocked = false;
+
+    function formatFileSize(size) {
+      const bytes = Number(size || 0);
+
+      if (bytes < 1024) return bytes + " B";
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+      if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + " MB";
+      return (bytes / 1024 / 1024 / 1024).toFixed(1) + " GB";
     }
 
-    function triggerSaveUpload() {
-      const input = document.getElementById("saveUploadInput");
-      input.click();
+    function setFileExplorerWriteLocked(locked) {
+      fileExplorerLocked = locked;
+      ["fileExplorerNewDirBtn", "fileExplorerUploadBtn"].forEach(function (id) {
+        const element = document.getElementById(id);
+        if (element) {
+          element.disabled = locked;
+        }
+      });
+
+      const note = document.getElementById("fileExplorerNote");
+      if (note) {
+        note.innerText = locked
+          ? "서버 실행 중에는 안전을 위해 업로드, 삭제, 폴더 생성을 막습니다. 다운로드와 탐색은 가능합니다."
+          : "서버 폴더 안에서만 탐색, 업로드, 다운로드, 삭제가 가능합니다.";
+      }
     }
 
-    async function uploadSaves() {
-      const result = document.getElementById("result");
-      const input = document.getElementById("saveUploadInput");
+    async function openFileExplorer() {
+      const modal = document.getElementById("fileExplorerModal");
+      modal.classList.add("show");
+      modal.setAttribute("aria-hidden", "false");
+      await loadFileExplorer(fileExplorerPath || "");
+    }
 
-      if (!input.files || input.files.length === 0) {
-        result.innerText = "업로드할 세이브 ZIP 파일을 선택해주세요.";
+    function closeFileExplorer() {
+      const modal = document.getElementById("fileExplorerModal");
+      modal.classList.remove("show");
+      modal.setAttribute("aria-hidden", "true");
+    }
+
+    async function loadFileExplorer(path) {
+      if (path !== undefined) {
+        fileExplorerPath = path;
+      }
+
+      const body = document.getElementById("fileExplorerBody");
+      body.innerHTML = '<tr><td colspan="5">목록을 불러오는 중입니다...</td></tr>';
+
+      try {
+        const response = await fetch("/api/files?path=" + encodeURIComponent(fileExplorerPath || ""));
+        const data = await response.json();
+
+        if (!response.ok) {
+          body.innerHTML = '<tr><td colspan="5">오류: ' + (data.detail || "목록 조회 실패") + '</td></tr>';
+          return;
+        }
+
+        fileExplorerPath = data.path || "";
+        document.getElementById("fileExplorerPath").innerText = "/server" + (fileExplorerPath ? "/" + fileExplorerPath : "");
+        document.getElementById("fileExplorerUpBtn").disabled = !fileExplorerPath;
+        setFileExplorerWriteLocked(Boolean(data.write_locked));
+        renderFileExplorerEntries(data.entries || []);
+      } catch (err) {
+        body.innerHTML = '<tr><td colspan="5">목록 조회 실패: ' + err + '</td></tr>';
+      }
+    }
+
+    function renderFileExplorerEntries(entries) {
+      const body = document.getElementById("fileExplorerBody");
+      body.innerHTML = "";
+
+      if (!entries.length) {
+        body.innerHTML = '<tr><td colspan="5">폴더가 비어 있습니다.</td></tr>';
         return;
       }
 
-      const selectedFile = input.files[0];
-      const formData = new FormData();
-      formData.append("file", selectedFile);
+      entries.forEach(function (entry) {
+        const row = document.createElement("tr");
+        const nameCell = document.createElement("td");
+        const nameButton = document.createElement("button");
+        nameButton.className = "explorer-name" + (entry.type === "file" ? " file" : "");
+        nameButton.type = "button";
+        nameButton.innerText = (entry.type === "dir" ? "[폴더] " : "[파일] ") + entry.name;
 
-      result.innerText = "세이브 파일을 업로드하는 중입니다...";
+        if (entry.type === "dir") {
+          nameButton.onclick = function () { loadFileExplorer(entry.path); };
+        } else {
+          nameButton.disabled = true;
+        }
+
+        nameCell.appendChild(nameButton);
+        row.appendChild(nameCell);
+
+        const typeCell = document.createElement("td");
+        typeCell.innerText = entry.type === "dir" ? "폴더" : "파일";
+        row.appendChild(typeCell);
+
+        const sizeCell = document.createElement("td");
+        sizeCell.innerText = entry.type === "file" ? formatFileSize(entry.size) : "-";
+        row.appendChild(sizeCell);
+
+        const modifiedCell = document.createElement("td");
+        modifiedCell.innerText = entry.modified || "";
+        row.appendChild(modifiedCell);
+
+        const actionCell = document.createElement("td");
+        actionCell.className = "explorer-row-actions";
+
+        if (entry.type === "file") {
+          const downloadButton = document.createElement("button");
+          downloadButton.className = "secondary";
+          downloadButton.type = "button";
+          downloadButton.innerText = "다운로드";
+          downloadButton.onclick = function () { downloadExplorerFile(entry.path); };
+          actionCell.appendChild(downloadButton);
+        }
+
+        const deleteButton = document.createElement("button");
+        deleteButton.className = "danger";
+        deleteButton.type = "button";
+        deleteButton.innerText = "삭제";
+        deleteButton.disabled = fileExplorerLocked;
+        deleteButton.onclick = function () { deleteExplorerEntry(entry.path); };
+        actionCell.appendChild(deleteButton);
+
+        row.appendChild(actionCell);
+        body.appendChild(row);
+      });
+    }
+
+    function goFileExplorerParent() {
+      if (!fileExplorerPath) {
+        return;
+      }
+
+      const parts = fileExplorerPath.split("/").filter(Boolean);
+      parts.pop();
+      loadFileExplorer(parts.join("/"));
+    }
+
+    function downloadExplorerFile(path) {
+      window.location.href = "/api/files/download?path=" + encodeURIComponent(path);
+    }
+
+    function triggerExplorerUpload() {
+      if (fileExplorerLocked) {
+        return;
+      }
+
+      document.getElementById("fileExplorerUploadInput").click();
+    }
+
+    async function uploadExplorerFile() {
+      const input = document.getElementById("fileExplorerUploadInput");
+
+      if (!input.files || input.files.length === 0) {
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append("file", input.files[0]);
 
       try {
-        const response = await fetch("/api/saves/upload", {
+        const response = await fetch("/api/files/upload?path=" + encodeURIComponent(fileExplorerPath || ""), {
           method: "POST",
           body: formData
         });
-
         const data = await response.json();
 
-        result.innerText =
-          "세이브 업로드 결과\\n" +
-          "상태: " + data.status + "\\n" +
-          "메시지: " + (data.message || "") + "\\n" +
-          "파일명: " + (data.filename || selectedFile.name) + "\\n" +
-          (data.target ? "저장 위치: " + data.target : "");
+        if (!response.ok) {
+          alert(data.detail || "파일 업로드 실패");
+          return;
+        }
 
+        await loadFileExplorer(fileExplorerPath);
       } catch (err) {
-        result.innerText = "세이브 업로드 실패: " + err;
+        alert("파일 업로드 실패: " + err);
       } finally {
         input.value = "";
+      }
+    }
+
+    async function createExplorerDirectory() {
+      if (fileExplorerLocked) {
+        return;
+      }
+
+      const name = window.prompt("생성할 폴더 이름을 입력해주세요.");
+
+      if (!name) {
+        return;
+      }
+
+      try {
+        const response = await fetch("/api/files/mkdir", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: fileExplorerPath || "", name: name })
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+          alert(data.detail || "폴더 생성 실패");
+          return;
+        }
+
+        await loadFileExplorer(fileExplorerPath);
+      } catch (err) {
+        alert("폴더 생성 실패: " + err);
+      }
+    }
+
+    async function deleteExplorerEntry(path) {
+      if (fileExplorerLocked || !window.confirm("선택한 항목을 삭제할까요?")) {
+        return;
+      }
+
+      try {
+        const response = await fetch("/api/files/delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: path })
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+          alert(data.detail || "삭제 실패");
+          return;
+        }
+
+        await loadFileExplorer(fileExplorerPath);
+      } catch (err) {
+        alert("삭제 실패: " + err);
       }
     }
 
@@ -1446,14 +1774,32 @@ def dashboard(request: Request):
       }
     }
 
-    async function loadServerLog() {
+    async function loadServerLog(options) {
       currentLogMode = "server";
+      const preserveWhenEmpty = Boolean(options && options.preserveWhenEmpty);
 
       try {
         const response = await fetch("/api/server/log");
         const data = await response.json();
+        const logText = data.log || data.error || "";
 
-        setLogText(data.log || data.error || "서버 로그가 없습니다.");
+        if (logText) {
+          setLogText(logText);
+          return;
+        }
+
+        if (preserveWhenEmpty) {
+          return;
+        }
+
+        const logStatus = (data.container_status || data.status || "").toLowerCase();
+
+        if (["running", "restarting", "started"].includes(logStatus)) {
+          setLogText("[패널] 서버 로그 수신을 기다리는 중입니다...");
+          return;
+        }
+
+        setLogText("서버 로그가 없습니다.");
       } catch (err) {
         setLogText("서버 로그 조회 실패: " + err);
       }
@@ -1467,11 +1813,13 @@ def dashboard(request: Request):
         document.getElementById("serverStatus").innerText = status;
         updateServerStatusIcon(status);
         setConfigLocked(isRunningStatus(status));
+        setFileExplorerWriteLocked(isRunningStatus(status));
         return status;
       } catch (err) {
         document.getElementById("serverStatus").innerText = "error";
         updateServerStatusIcon("error");
         setConfigLocked(false);
+        setFileExplorerWriteLocked(false);
         return "error";
       }
     }
@@ -1592,7 +1940,7 @@ def install_log(request: Request):
 
     return {
         "status": get_status(),
-        "log": INSTALL_LOG_FILE.read_text(encoding="utf-8"),
+        "log": sanitize_log_text(INSTALL_LOG_FILE.read_text(encoding="utf-8")),
     }
 
 
@@ -1815,13 +2163,14 @@ def stop_server(request: Request):
                 "status": "stopped",
                 "message": "Romestead 서버가 이미 종료되어 있습니다.",
                 "container": container.name,
-                "log": combined_server_log(container),
+                "log": combined_server_log(container, tail=80),
             }
 
         try:
-            container.stop(timeout=30)
+            write_server_control_log(f"정상 종료 신호를 보냈습니다. 최대 {SERVER_STOP_GRACE_SECONDS}초만 대기합니다.")
+            container.stop(timeout=SERVER_STOP_GRACE_SECONDS)
         except Exception as e:
-            write_server_control_log(f"정상 중지 실패, 강제 종료를 시도합니다: {e}")
+            write_server_control_log(f"정상 중지 대기 중 경고가 발생해 강제 종료를 진행합니다: {e}")
             container.remove(force=True)
             write_server_control_log("Romestead 서버가 강제로 종료되었습니다.")
 
@@ -1832,11 +2181,21 @@ def stop_server(request: Request):
                 "log": combined_server_log(),
             }
 
-        time.sleep(2)
-        container.reload()
+        try:
+            container.reload()
+        except Exception as reload_error:
+            write_server_control_log(f"중지 후 컨테이너 상태 확인 중 경고: {reload_error}")
+            write_server_control_log("Romestead 서버가 종료되었습니다.")
+
+            return {
+                "status": "stopped",
+                "message": "Romestead 서버가 종료되었습니다.",
+                "container": ROMESTEAD_SERVER_CONTAINER,
+                "log": combined_server_log(tail=80),
+            }
 
         if container.status in {"running", "restarting"}:
-            write_server_control_log("중지 후 서버가 다시 실행되어 강제 제거를 진행했습니다.")
+            write_server_control_log("짧은 대기 후에도 서버가 실행 중이라 강제 제거를 진행했습니다.")
             container.remove(force=True)
             write_server_control_log("Romestead 서버가 종료되었습니다.")
 
@@ -1853,7 +2212,7 @@ def stop_server(request: Request):
             "status": "stopped",
             "message": "Romestead 서버가 종료되었습니다.",
             "container": container.name,
-            "log": combined_server_log(container),
+            "log": combined_server_log(container, tail=80),
         }
 
     except Exception as e:
@@ -1957,7 +2316,10 @@ def server_log(request: Request):
         include_control_log = container.status not in {"running", "restarting"}
 
         return {
-            "status": "ok",
+            "status": container.status,
+            "api_status": "ok",
+            "container_status": container.status,
+            "container": container.name,
             "log": combined_server_log(container, include_control_log=include_control_log),
         }
 
@@ -1969,6 +2331,128 @@ def server_log(request: Request):
             "log": control_log,
             "error": str(e),
         }
+
+
+@app.get("/api/files")
+def list_files(request: Request, path: str = ""):
+    require_auth(request)
+
+    target = resolve_server_path(path)
+
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="경로를 찾을 수 없습니다.")
+
+    if not target.is_dir():
+        raise HTTPException(status_code=400, detail="폴더 경로만 열 수 있습니다.")
+
+    entries = []
+
+    for child in target.iterdir():
+        try:
+            entries.append(file_entry(child))
+        except OSError:
+            continue
+
+    entries.sort(key=lambda item: (item["type"] != "dir", item["name"].lower()))
+
+    return {
+        "status": "ok",
+        "root": "/server",
+        "path": server_relative_path(target),
+        "parent": server_relative_path(target.parent) if target.resolve() != server_root() else "",
+        "write_locked": is_server_container_running(),
+        "entries": entries,
+    }
+
+
+@app.get("/api/files/download")
+def download_file(request: Request, path: str):
+    require_auth(request)
+
+    target = resolve_server_path(path)
+
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="다운로드할 파일을 찾을 수 없습니다.")
+
+    return FileResponse(
+        path=str(target),
+        filename=target.name,
+    )
+
+
+@app.post("/api/files/upload")
+async def upload_file(request: Request, path: str = "", file: UploadFile = File(...)):
+    require_auth(request)
+    require_server_stopped_for_file_write()
+
+    target_dir = resolve_server_path(path)
+
+    if not target_dir.exists() or not target_dir.is_dir():
+        raise HTTPException(status_code=404, detail="업로드할 폴더를 찾을 수 없습니다.")
+
+    filename = validate_entry_name(file.filename or f"upload-{int(time.time())}")
+    target = (target_dir / filename).resolve()
+    resolve_server_path(server_relative_path(target))
+
+    with target.open("wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    return {
+        "status": "ok",
+        "message": "파일 업로드가 완료되었습니다.",
+        "path": server_relative_path(target),
+        "filename": filename,
+    }
+
+
+@app.post("/api/files/mkdir")
+def create_directory(payload: FileExplorerCreateDirRequest, request: Request):
+    require_auth(request)
+    require_server_stopped_for_file_write()
+
+    parent = resolve_server_path(payload.path)
+
+    if not parent.exists() or not parent.is_dir():
+        raise HTTPException(status_code=404, detail="폴더를 생성할 위치를 찾을 수 없습니다.")
+
+    dirname = validate_entry_name(payload.name)
+    target = (parent / dirname).resolve()
+    resolve_server_path(server_relative_path(target))
+    target.mkdir(parents=False, exist_ok=False)
+
+    return {
+        "status": "ok",
+        "message": "폴더가 생성되었습니다.",
+        "path": server_relative_path(target),
+    }
+
+
+@app.post("/api/files/delete")
+def delete_file_entry(payload: FileExplorerDeleteRequest, request: Request):
+    require_auth(request)
+    require_server_stopped_for_file_write()
+
+    target = resolve_server_path(payload.path)
+
+    if target == server_root():
+        raise HTTPException(status_code=400, detail="서버 루트 폴더는 삭제할 수 없습니다.")
+
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="삭제할 항목을 찾을 수 없습니다.")
+
+    if target.is_dir():
+        try:
+            target.rmdir()
+        except OSError:
+            raise HTTPException(status_code=400, detail="비어 있지 않은 폴더는 삭제할 수 없습니다.")
+    else:
+        target.unlink()
+
+    return {
+        "status": "ok",
+        "message": "삭제되었습니다.",
+        "path": payload.path,
+    }
 
 
 @app.get("/api/saves/download")
