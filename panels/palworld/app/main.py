@@ -46,7 +46,8 @@ INSTALL_LOG_FILE = DATA_DIR / "install.log"
 INSTALL_STATUS_FILE = DATA_DIR / "install-status.txt"
 SERVER_CONTROL_LOG_FILE = DATA_DIR / "server-control.log"
 
-SAVED_WORLDS_DIR = DATA_DIR / "server" / "Pal" / "Saved" / "SaveGames"
+SAVED_ROOT_DIR = DATA_DIR / "server" / "Pal" / "Saved"
+SAVED_WORLDS_DIR = SAVED_ROOT_DIR / "SaveGames"
 SAVE_EXPORT_DIR = DATA_DIR / "uploads"
 
 AUTH_FILE = DATA_DIR / "auth.json"
@@ -75,11 +76,21 @@ class ConfigRequest(BaseModel):
     AdvancedOptions: dict[str, Any] = Field(default_factory=dict)
 
 
+class FileExplorerCreateDirRequest(BaseModel):
+    path: str = ""
+    name: str
+
+
+class FileExplorerDeleteRequest(BaseModel):
+    path: str
+
+
 def ensure_data_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "server").mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "backups").mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "uploads").mkdir(parents=True, exist_ok=True)
+    SAVED_ROOT_DIR.mkdir(parents=True, exist_ok=True)
     SAVED_WORLDS_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -799,6 +810,61 @@ def safe_extract_zip(zip_path: Path, target_dir: Path) -> None:
         zip_ref.extractall(target_dir)
 
 
+def saved_root() -> Path:
+    ensure_data_dirs()
+    return SAVED_ROOT_DIR.resolve()
+
+
+def resolve_saved_path(relative_path: str = "") -> Path:
+    root = saved_root()
+    cleaned = (relative_path or "").strip().replace("\\", "/").lstrip("/")
+    candidate = (root / cleaned).resolve()
+
+    if candidate != root and not str(candidate).startswith(str(root) + os.sep):
+        raise HTTPException(status_code=400, detail="Saved 폴더 밖으로 이동할 수 없습니다.")
+
+    return candidate
+
+
+def saved_relative_path(path: Path) -> str:
+    root = saved_root()
+    resolved = path.resolve()
+
+    if resolved == root:
+        return ""
+
+    return resolved.relative_to(root).as_posix()
+
+
+def validate_entry_name(name: str) -> str:
+    cleaned = Path(name or "").name.strip()
+
+    if not cleaned or cleaned in {".", ".."}:
+        raise HTTPException(status_code=400, detail="올바른 이름을 입력해주세요.")
+
+    return cleaned
+
+
+def file_entry(path: Path) -> dict:
+    stat = path.stat()
+
+    return {
+        "name": path.name,
+        "path": saved_relative_path(path),
+        "type": "dir" if path.is_dir() else "file",
+        "size": stat.st_size if path.is_file() else 0,
+        "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+    }
+
+
+def require_server_stopped_for_file_write() -> None:
+    if is_server_container_running():
+        raise HTTPException(
+            status_code=409,
+            detail="서버 실행 중에는 파일 업로드, 삭제, 폴더 생성을 할 수 없습니다. 서버를 중지한 뒤 다시 시도해주세요.",
+        )
+
+
 def install_palworld_job() -> None:
     ensure_data_dirs()
 
@@ -1233,14 +1299,15 @@ def dashboard(request: Request):
     .config.locked .config-body { filter: blur(1.4px); opacity: 0.58; pointer-events: none; user-select: none; }
     .config h2 { margin: 0 0 16px; font-size: 22px; }
     .config-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
-    .advanced-card { position: relative; margin-top: 18px; min-height: 128px; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,0.65); background: linear-gradient(90deg, rgba(11, 32, 42, 0.82), rgba(27, 96, 77, 0.32)), url("/static/palworld-settings-bg.png") center / cover no-repeat; display: flex; align-items: center; justify-content: flex-start; gap: 20px; padding: 20px; color: #ffffff; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.1), 0 16px 34px rgba(7, 18, 26, 0.16); }
-    .advanced-card::before { content: ""; position: absolute; inset: 8px; border-radius: 10px; border: 1px solid rgba(125, 211, 252, 0.44); background: linear-gradient(90deg, rgba(34,211,238,0.34), transparent 22%, transparent 78%, rgba(74,222,128,0.28)); pointer-events: none; }
-    .advanced-card::after { content: ""; position: absolute; left: 20px; top: 16px; bottom: 16px; width: 4px; border-radius: 999px; background: linear-gradient(180deg, #67e8f9, #a7f3d0 52%, #fde68a); box-shadow: 0 0 18px rgba(103,232,249,0.58); pointer-events: none; }
-    .advanced-copy { position: relative; z-index: 1; min-width: 0; }
+    .advanced-card { position: relative; margin-top: 18px; min-height: 132px; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,0.66); background: linear-gradient(90deg, rgba(8, 38, 48, 0.9), rgba(20, 81, 71, 0.44)), url("/static/palworld-settings-bg.png") center / cover no-repeat; display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; gap: 24px; padding: 22px 28px; color: #ffffff; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.12), 0 16px 34px rgba(7, 18, 26, 0.16); }
+    .advanced-card::before { content: ""; position: absolute; inset: 8px; border-radius: 10px; border: 1px solid rgba(125, 211, 252, 0.44); background: linear-gradient(90deg, rgba(34,211,238,0.22), transparent 26%, transparent 76%, rgba(74,222,128,0.28)); pointer-events: none; }
+    .advanced-copy { position: relative; z-index: 1; min-width: 0; padding-left: 22px; }
+    .advanced-copy::before { content: ""; position: absolute; left: 0; top: 4px; bottom: 4px; width: 4px; border-radius: 999px; background: linear-gradient(180deg, #67e8f9, #a7f3d0 52%, #fde68a); box-shadow: 0 0 18px rgba(103,232,249,0.58); }
     .advanced-title { font-size: 20px; font-weight: bold; margin-bottom: 6px; }
     .advanced-subtitle { color: rgba(255,255,255,0.82); font-size: 13px; line-height: 1.45; }
-    .advanced-button { position: relative; z-index: 1; display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; flex: 0 0 auto; width: 86px; height: 86px; border-radius: 18px; padding: 8px; background: rgba(255,255,255,0.94); color: #0f766e; box-shadow: 0 16px 36px rgba(0,0,0,0.28), inset 0 0 0 1px rgba(15,118,110,0.18); }
-    .advanced-button img { width: 42px; height: 42px; display: block; object-fit: cover; border-radius: 11px; }
+    .advanced-button { position: relative; z-index: 1; display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; width: 96px; height: 96px; border-radius: 20px; padding: 10px; background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(226,252,247,0.94)); color: #0f766e; border: 1px solid rgba(255,255,255,0.92); box-shadow: 0 18px 38px rgba(0,0,0,0.3), inset 0 0 0 1px rgba(15,118,110,0.2); }
+    .advanced-button:hover { transform: translateY(-1px); box-shadow: 0 20px 42px rgba(0,0,0,0.34), inset 0 0 0 1px rgba(15,118,110,0.28); }
+    .advanced-button img { width: 46px; height: 46px; display: block; object-fit: cover; border-radius: 12px; }
     .advanced-button-label { color: #0f3f3d; font-size: 12px; font-weight: bold; line-height: 1; }
     .modal-backdrop { position: fixed; inset: 0; z-index: 100; display: none; align-items: center; justify-content: center; padding: 24px; background: rgba(10, 18, 28, 0.62); }
     .modal-backdrop.show { display: flex; }
@@ -1249,6 +1316,18 @@ def dashboard(request: Request):
     .modal-head h2 { margin: 0; font-size: 22px; }
     .modal-close { width: 40px; height: 40px; border-radius: 50%; padding: 0; background: #111827; color: #fff; }
     .modal-body { overflow: auto; padding: 20px; }
+    .explorer-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+    .explorer-path { min-width: 220px; padding: 10px 12px; border-radius: 10px; background: #eef2f7; color: #1f2937; font-family: Consolas, Monaco, monospace; font-size: 13px; }
+    .explorer-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .explorer-actions button { padding: 10px 12px; border-radius: 9px; }
+    .explorer-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .explorer-table th, .explorer-table td { padding: 10px 8px; border-bottom: 1px solid #e5e7eb; text-align: left; vertical-align: middle; }
+    .explorer-table th { color: #4b5563; font-size: 12px; background: #f9fafb; }
+    .explorer-name { display: inline-flex; align-items: center; gap: 8px; min-width: 0; border: 0; padding: 0; background: transparent; color: #0f766e; font-weight: bold; cursor: pointer; }
+    .explorer-name.file { color: #1f2937; cursor: default; }
+    .explorer-row-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+    .explorer-row-actions button { padding: 8px 10px; border-radius: 8px; font-size: 12px; }
+    .explorer-note { margin-top: 12px; color: #6b7280; font-size: 12px; line-height: 1.45; }
     .advanced-group { margin-bottom: 22px; }
     .advanced-group h3 { margin: 0 0 12px; font-size: 17px; color: #111827; }
     .advanced-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
@@ -1276,6 +1355,8 @@ def dashboard(request: Request):
     button:disabled { opacity: 0.6; cursor: not-allowed; }
     .config-save-wrap { position: relative; display: inline-flex; align-items: center; width: fit-content; }
     .config-save-wrap button { position: relative; z-index: 1; }
+    .advanced-save-wrap { position: relative; display: inline-flex; align-items: center; width: fit-content; }
+    .advanced-save-wrap button { position: relative; z-index: 1; }
     .save-bubble { position: absolute; left: 50%; bottom: calc(100% + 10px); z-index: 30; min-width: 148px; width: max-content; max-width: min(220px, calc(100vw - 48px)); padding: 10px 12px; border-radius: 10px; background: #111827; color: #ffffff; font-size: 13px; font-weight: bold; line-height: 1.35; text-align: center; white-space: nowrap; box-shadow: 0 12px 26px rgba(17,24,39,0.26); opacity: 0; pointer-events: none; transform: translate(-50%, 6px); transition: opacity 0.18s ease, transform 0.18s ease; }
     .save-bubble::after { content: ""; position: absolute; left: 50%; top: 100%; border-width: 7px 7px 0 7px; border-style: solid; border-color: #111827 transparent transparent transparent; transform: translateX(-50%); }
     .save-bubble.show { opacity: 1; transform: translate(-50%, 0); }
@@ -1286,7 +1367,7 @@ def dashboard(request: Request):
       .topbar { align-items: flex-start; flex-direction: column; }
       .top-links { justify-content: flex-start; }
       .grid, .config-grid { grid-template-columns: 1fr; }
-      .advanced-card { align-items: flex-start; }
+      .advanced-card { grid-template-columns: 86px minmax(0, 1fr); gap: 16px; padding: 18px; }
       .advanced-grid { grid-template-columns: 1fr; }
       button { width: 100%; }
       .advanced-button { width: 86px; height: 86px; }
@@ -1443,7 +1524,10 @@ def dashboard(request: Request):
         <div id="advancedOptionsBody" class="modal-body"></div>
         <div class="modal-foot">
           <button class="secondary" type="button" onclick="closeAdvancedSettings()">닫기</button>
-          <button id="advancedSaveBtn" type="button" onclick="saveConfig()">설정 저장</button>
+          <div class="advanced-save-wrap">
+            <button id="advancedSaveBtn" type="button" onclick="saveConfig({ source: 'advanced' })">설정 저장</button>
+            <div id="advancedSaveBubble" class="save-bubble" role="status" aria-live="polite">저장완료</div>
+          </div>
         </div>
       </div>
     </div>
@@ -1455,9 +1539,41 @@ def dashboard(request: Request):
       <button class="secondary" onclick="restartServer()">서버 재시작</button>
       <button class="secondary" onclick="loadServerLog()">서버 로그 보기</button>
       <button class="secondary" onclick="loadLog()">설치 로그 보기</button>
-      <button class="secondary" onclick="downloadSaves()">세이브 다운로드</button>
-      <button class="secondary" onclick="triggerSaveUpload()">세이브 업로드</button>
-      <input id="saveUploadInput" type="file" accept=".zip" onchange="uploadSaves()" style="display:none">
+      <button class="secondary" onclick="openFileExplorer()">서버 디렉토리 탐색기</button>
+      <input id="fileExplorerUploadInput" type="file" onchange="uploadExplorerFile()" style="display:none">
+    </div>
+
+    <div id="fileExplorerModal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="fileExplorerTitle">
+        <div class="modal-head">
+          <h2 id="fileExplorerTitle">서버 디렉토리 탐색기</h2>
+          <button class="modal-close" type="button" onclick="closeFileExplorer()" title="닫기" aria-label="닫기">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="explorer-toolbar">
+            <div id="fileExplorerPath" class="explorer-path">/Saved</div>
+            <div class="explorer-actions">
+              <button class="secondary" type="button" onclick="loadFileExplorer()">새로고침</button>
+              <button id="fileExplorerUpBtn" class="secondary" type="button" onclick="goFileExplorerParent()">상위 폴더</button>
+              <button id="fileExplorerNewDirBtn" class="secondary" type="button" onclick="createExplorerDirectory()">폴더 생성</button>
+              <button id="fileExplorerUploadBtn" type="button" onclick="triggerExplorerUpload()">파일 업로드</button>
+            </div>
+          </div>
+          <table class="explorer-table">
+            <thead>
+              <tr>
+                <th>이름</th>
+                <th>종류</th>
+                <th>크기</th>
+                <th>수정일</th>
+                <th style="text-align:right">작업</th>
+              </tr>
+            </thead>
+            <tbody id="fileExplorerBody"></tbody>
+          </table>
+          <div id="fileExplorerNote" class="explorer-note"></div>
+        </div>
+      </div>
     </div>
 
     <div id="result" class="result" hidden></div>
@@ -1779,51 +1895,241 @@ def dashboard(request: Request):
       }
     }
 
-    function downloadSaves() {
-      const result = document.getElementById("result");
-      result.innerText = "세이브 파일 다운로드를 준비합니다...";
-      window.location.href = "/api/saves/download";
+    let fileExplorerPath = "";
+    let fileExplorerLocked = false;
+
+    function formatFileSize(size) {
+      const bytes = Number(size || 0);
+
+      if (bytes < 1024) return bytes + " B";
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+      if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + " MB";
+      return (bytes / 1024 / 1024 / 1024).toFixed(1) + " GB";
     }
 
-    function triggerSaveUpload() {
-      const input = document.getElementById("saveUploadInput");
-      input.click();
+    function setFileExplorerWriteLocked(locked) {
+      fileExplorerLocked = locked;
+      ["fileExplorerNewDirBtn", "fileExplorerUploadBtn"].forEach(function (id) {
+        const element = document.getElementById(id);
+        if (element) {
+          element.disabled = locked;
+        }
+      });
+
+      const note = document.getElementById("fileExplorerNote");
+      if (note) {
+        note.innerText = locked
+          ? "서버 실행 중에는 안전을 위해 업로드, 삭제, 폴더 생성을 막습니다. 다운로드와 탐색은 가능합니다."
+          : "Saved 폴더 안에서만 탐색, 업로드, 다운로드, 삭제가 가능합니다.";
+      }
     }
 
-    async function uploadSaves() {
-      const result = document.getElementById("result");
-      const input = document.getElementById("saveUploadInput");
+    async function openFileExplorer() {
+      const modal = document.getElementById("fileExplorerModal");
+      modal.classList.add("show");
+      modal.setAttribute("aria-hidden", "false");
+      await loadFileExplorer(fileExplorerPath || "");
+    }
 
-      if (!input.files || input.files.length === 0) {
-        result.innerText = "업로드할 세이브 ZIP 파일을 선택해주세요.";
+    function closeFileExplorer() {
+      const modal = document.getElementById("fileExplorerModal");
+      modal.classList.remove("show");
+      modal.setAttribute("aria-hidden", "true");
+    }
+
+    async function loadFileExplorer(path) {
+      if (path !== undefined) {
+        fileExplorerPath = path;
+      }
+
+      const body = document.getElementById("fileExplorerBody");
+      body.innerHTML = '<tr><td colspan="5">목록을 불러오는 중입니다...</td></tr>';
+
+      try {
+        const response = await fetch("/api/files?path=" + encodeURIComponent(fileExplorerPath || ""));
+        const data = await response.json();
+
+        if (!response.ok) {
+          body.innerHTML = '<tr><td colspan="5">오류: ' + (data.detail || "목록 조회 실패") + '</td></tr>';
+          return;
+        }
+
+        fileExplorerPath = data.path || "";
+        document.getElementById("fileExplorerPath").innerText = "/Saved" + (fileExplorerPath ? "/" + fileExplorerPath : "");
+        document.getElementById("fileExplorerUpBtn").disabled = !fileExplorerPath;
+        setFileExplorerWriteLocked(Boolean(data.write_locked));
+        renderFileExplorerEntries(data.entries || []);
+      } catch (err) {
+        body.innerHTML = '<tr><td colspan="5">목록 조회 실패: ' + err + '</td></tr>';
+      }
+    }
+
+    function renderFileExplorerEntries(entries) {
+      const body = document.getElementById("fileExplorerBody");
+      body.innerHTML = "";
+
+      if (!entries.length) {
+        body.innerHTML = '<tr><td colspan="5">폴더가 비어 있습니다.</td></tr>';
         return;
       }
 
-      const selectedFile = input.files[0];
-      const formData = new FormData();
-      formData.append("file", selectedFile);
+      entries.forEach(function (entry) {
+        const row = document.createElement("tr");
+        const nameCell = document.createElement("td");
+        const nameButton = document.createElement("button");
+        nameButton.className = "explorer-name" + (entry.type === "file" ? " file" : "");
+        nameButton.type = "button";
+        nameButton.innerText = (entry.type === "dir" ? "📁 " : "📄 ") + entry.name;
 
-      result.innerText = "세이브 파일을 업로드하는 중입니다...";
+        if (entry.type === "dir") {
+          nameButton.onclick = function () { loadFileExplorer(entry.path); };
+        } else {
+          nameButton.disabled = true;
+        }
+
+        nameCell.appendChild(nameButton);
+        row.appendChild(nameCell);
+
+        const typeCell = document.createElement("td");
+        typeCell.innerText = entry.type === "dir" ? "폴더" : "파일";
+        row.appendChild(typeCell);
+
+        const sizeCell = document.createElement("td");
+        sizeCell.innerText = entry.type === "file" ? formatFileSize(entry.size) : "-";
+        row.appendChild(sizeCell);
+
+        const modifiedCell = document.createElement("td");
+        modifiedCell.innerText = entry.modified || "";
+        row.appendChild(modifiedCell);
+
+        const actionCell = document.createElement("td");
+        actionCell.className = "explorer-row-actions";
+
+        if (entry.type === "file") {
+          const downloadButton = document.createElement("button");
+          downloadButton.className = "secondary";
+          downloadButton.type = "button";
+          downloadButton.innerText = "다운로드";
+          downloadButton.onclick = function () { downloadExplorerFile(entry.path); };
+          actionCell.appendChild(downloadButton);
+        }
+
+        const deleteButton = document.createElement("button");
+        deleteButton.className = "danger";
+        deleteButton.type = "button";
+        deleteButton.innerText = "삭제";
+        deleteButton.disabled = fileExplorerLocked;
+        deleteButton.onclick = function () { deleteExplorerEntry(entry.path); };
+        actionCell.appendChild(deleteButton);
+
+        row.appendChild(actionCell);
+        body.appendChild(row);
+      });
+    }
+
+    function goFileExplorerParent() {
+      if (!fileExplorerPath) {
+        return;
+      }
+
+      const parts = fileExplorerPath.split("/").filter(Boolean);
+      parts.pop();
+      loadFileExplorer(parts.join("/"));
+    }
+
+    function downloadExplorerFile(path) {
+      window.location.href = "/api/files/download?path=" + encodeURIComponent(path);
+    }
+
+    function triggerExplorerUpload() {
+      if (fileExplorerLocked) {
+        return;
+      }
+
+      document.getElementById("fileExplorerUploadInput").click();
+    }
+
+    async function uploadExplorerFile() {
+      const input = document.getElementById("fileExplorerUploadInput");
+
+      if (!input.files || input.files.length === 0) {
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append("file", input.files[0]);
 
       try {
-        const response = await fetch("/api/saves/upload", {
+        const response = await fetch("/api/files/upload?path=" + encodeURIComponent(fileExplorerPath || ""), {
           method: "POST",
           body: formData
         });
-
         const data = await response.json();
 
-        result.innerText =
-          "세이브 업로드 결과\\n" +
-          "상태: " + data.status + "\\n" +
-          "메시지: " + (data.message || "") + "\\n" +
-          "파일명: " + (data.filename || selectedFile.name) + "\\n" +
-          (data.target ? "저장 위치: " + data.target : "");
+        if (!response.ok) {
+          alert(data.detail || "파일 업로드 실패");
+          return;
+        }
 
+        await loadFileExplorer(fileExplorerPath);
       } catch (err) {
-        result.innerText = "세이브 업로드 실패: " + err;
+        alert("파일 업로드 실패: " + err);
       } finally {
         input.value = "";
+      }
+    }
+
+    async function createExplorerDirectory() {
+      if (fileExplorerLocked) {
+        return;
+      }
+
+      const name = window.prompt("생성할 폴더 이름을 입력해주세요.");
+
+      if (!name) {
+        return;
+      }
+
+      try {
+        const response = await fetch("/api/files/mkdir", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: fileExplorerPath || "", name: name })
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+          alert(data.detail || "폴더 생성 실패");
+          return;
+        }
+
+        await loadFileExplorer(fileExplorerPath);
+      } catch (err) {
+        alert("폴더 생성 실패: " + err);
+      }
+    }
+
+    async function deleteExplorerEntry(path) {
+      if (fileExplorerLocked || !window.confirm("선택한 항목을 삭제할까요?")) {
+        return;
+      }
+
+      try {
+        const response = await fetch("/api/files/delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: path })
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+          alert(data.detail || "삭제 실패");
+          return;
+        }
+
+        await loadFileExplorer(fileExplorerPath);
+      } catch (err) {
+        alert("삭제 실패: " + err);
       }
     }
 
@@ -2097,20 +2403,39 @@ def dashboard(request: Request):
     }
 
     let configSaveBubbleTimer = null;
+    let advancedSaveBubbleTimer = null;
 
-    function showConfigSaveBubble() {
-      const bubble = document.getElementById("configSaveBubble");
+    function showSaveBubble(bubbleId, durationMs, onDone) {
+      const bubble = document.getElementById(bubbleId);
 
       if (!bubble) {
         return;
       }
 
-      window.clearTimeout(configSaveBubbleTimer);
+      const isAdvancedBubble = bubbleId === "advancedSaveBubble";
+      window.clearTimeout(isAdvancedBubble ? advancedSaveBubbleTimer : configSaveBubbleTimer);
       bubble.classList.add("show");
 
-      configSaveBubbleTimer = window.setTimeout(function () {
+      const timer = window.setTimeout(function () {
         bubble.classList.remove("show");
-      }, 2200);
+        if (onDone) {
+          onDone();
+        }
+      }, durationMs);
+
+      if (isAdvancedBubble) {
+        advancedSaveBubbleTimer = timer;
+      } else {
+        configSaveBubbleTimer = timer;
+      }
+    }
+
+    function showConfigSaveBubble() {
+      showSaveBubble("configSaveBubble", 2200);
+    }
+
+    function showAdvancedSaveBubbleAndClose() {
+      showSaveBubble("advancedSaveBubble", 1000, closeAdvancedSettings);
     }
 
     function readConfigForm() {
@@ -2148,8 +2473,9 @@ def dashboard(request: Request):
       }
     }
 
-    async function saveConfig() {
+    async function saveConfig(options) {
       const result = document.getElementById("result");
+      const isAdvancedSave = Boolean(options && options.source === "advanced");
 
       if (document.getElementById("configSection").classList.contains("locked")) {
         return;
@@ -2173,7 +2499,11 @@ def dashboard(request: Request):
 
         fillConfig(data.config || {});
         fillWorldList(data.worlds || []);
-        showConfigSaveBubble();
+        if (isAdvancedSave) {
+          showAdvancedSaveBubbleAndClose();
+        } else {
+          showConfigSaveBubble();
+        }
         await loadServerStatus();
         result.innerText = "설정 저장 완료\\n저장 위치: " + data.path;
       } catch (err) {
@@ -2199,7 +2529,9 @@ def dashboard(request: Request):
           return;
         }
 
-        if (["running", "restarting", "started"].includes((data.status || "").toLowerCase())) {
+        const logStatus = (data.container_status || data.status || "").toLowerCase();
+
+        if (["running", "restarting", "started"].includes(logStatus)) {
           setLogText("[패널] 서버 로그 수신을 기다리는 중입니다...");
           return;
         }
@@ -2218,11 +2550,13 @@ def dashboard(request: Request):
         document.getElementById("serverStatus").innerText = status;
         updateServerStatusIcon(status);
         setConfigLocked(isRunningStatus(status));
+        setFileExplorerWriteLocked(isRunningStatus(status));
         return status;
       } catch (err) {
         document.getElementById("serverStatus").innerText = "error";
         updateServerStatusIcon("error");
         setConfigLocked(false);
+        setFileExplorerWriteLocked(false);
         return "error";
       }
     }
@@ -2735,7 +3069,10 @@ def server_log(request: Request):
         include_control_log = container.status not in {"running", "restarting"}
 
         return {
-            "status": "ok",
+            "status": container.status,
+            "api_status": "ok",
+            "container_status": container.status,
+            "container": container.name,
             "log": combined_server_log(container, include_control_log=include_control_log),
         }
 
@@ -2747,6 +3084,128 @@ def server_log(request: Request):
             "log": control_log,
             "error": str(e),
         }
+
+
+@app.get("/api/files")
+def list_files(request: Request, path: str = ""):
+    require_auth(request)
+
+    target = resolve_saved_path(path)
+
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="경로를 찾을 수 없습니다.")
+
+    if not target.is_dir():
+        raise HTTPException(status_code=400, detail="폴더 경로만 열 수 있습니다.")
+
+    entries = []
+
+    for child in target.iterdir():
+        try:
+            entries.append(file_entry(child))
+        except OSError:
+            continue
+
+    entries.sort(key=lambda item: (item["type"] != "dir", item["name"].lower()))
+
+    return {
+        "status": "ok",
+        "root": "/Saved",
+        "path": saved_relative_path(target),
+        "parent": saved_relative_path(target.parent) if target.resolve() != saved_root() else "",
+        "write_locked": is_server_container_running(),
+        "entries": entries,
+    }
+
+
+@app.get("/api/files/download")
+def download_file(request: Request, path: str):
+    require_auth(request)
+
+    target = resolve_saved_path(path)
+
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="다운로드할 파일을 찾을 수 없습니다.")
+
+    return FileResponse(
+        path=str(target),
+        filename=target.name,
+    )
+
+
+@app.post("/api/files/upload")
+async def upload_file(request: Request, path: str = "", file: UploadFile = File(...)):
+    require_auth(request)
+    require_server_stopped_for_file_write()
+
+    target_dir = resolve_saved_path(path)
+
+    if not target_dir.exists() or not target_dir.is_dir():
+        raise HTTPException(status_code=404, detail="업로드할 폴더를 찾을 수 없습니다.")
+
+    filename = validate_entry_name(file.filename or f"upload-{int(time.time())}")
+    target = (target_dir / filename).resolve()
+    resolve_saved_path(saved_relative_path(target))
+
+    with target.open("wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    return {
+        "status": "ok",
+        "message": "파일 업로드가 완료되었습니다.",
+        "path": saved_relative_path(target),
+        "filename": filename,
+    }
+
+
+@app.post("/api/files/mkdir")
+def create_directory(payload: FileExplorerCreateDirRequest, request: Request):
+    require_auth(request)
+    require_server_stopped_for_file_write()
+
+    parent = resolve_saved_path(payload.path)
+
+    if not parent.exists() or not parent.is_dir():
+        raise HTTPException(status_code=404, detail="폴더를 생성할 위치를 찾을 수 없습니다.")
+
+    dirname = validate_entry_name(payload.name)
+    target = (parent / dirname).resolve()
+    resolve_saved_path(saved_relative_path(target))
+    target.mkdir(parents=False, exist_ok=False)
+
+    return {
+        "status": "ok",
+        "message": "폴더가 생성되었습니다.",
+        "path": saved_relative_path(target),
+    }
+
+
+@app.post("/api/files/delete")
+def delete_file_entry(payload: FileExplorerDeleteRequest, request: Request):
+    require_auth(request)
+    require_server_stopped_for_file_write()
+
+    target = resolve_saved_path(payload.path)
+
+    if target == saved_root():
+        raise HTTPException(status_code=400, detail="Saved 루트 폴더는 삭제할 수 없습니다.")
+
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="삭제할 항목을 찾을 수 없습니다.")
+
+    if target.is_dir():
+        try:
+            target.rmdir()
+        except OSError:
+            raise HTTPException(status_code=400, detail="비어 있지 않은 폴더는 삭제할 수 없습니다.")
+    else:
+        target.unlink()
+
+    return {
+        "status": "ok",
+        "message": "삭제되었습니다.",
+        "path": payload.path,
+    }
 
 
 @app.get("/api/saves/download")
