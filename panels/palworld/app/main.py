@@ -1718,6 +1718,40 @@ def dashboard(request: Request):
       return (status || "").toLowerCase() === "running";
     }
 
+    function displayInstallStatus(status) {
+      const normalized = (status || "").toLowerCase();
+      const labels = {
+        completed: "설치 완료",
+        started: "설치 중",
+        installing: "설치 중",
+        running: "설치 중",
+        pending: "대기 중",
+        not_started: "설치 전",
+        failed: "설치 실패",
+        error: "오류"
+      };
+      return labels[normalized] || status || "확인 중";
+    }
+
+    function displayServerStatus(status) {
+      const normalized = (status || "").toLowerCase();
+      const labels = {
+        running: "실행 중",
+        starting: "시작 중",
+        started: "시작됨",
+        stopping: "중지 중",
+        stopped: "중지됨",
+        restarting: "재시작 중",
+        created: "생성됨",
+        exited: "종료됨",
+        dead: "비정상 종료",
+        not_created: "생성 전",
+        config_error: "설정 오류",
+        error: "오류"
+      };
+      return labels[normalized] || status || "확인 중";
+    }
+
     function setConfigLocked(locked) {
       const section = document.getElementById("configSection");
       if (section) {
@@ -1837,7 +1871,7 @@ def dashboard(request: Request):
 
       result.innerText = "Palworld 서버를 중지하는 중입니다...";
       currentLogMode = "server";
-      document.getElementById("serverStatus").innerText = "stopping";
+      document.getElementById("serverStatus").innerText = displayServerStatus("stopping");
       updateServerStatusIcon("stopping");
       setLogText("[패널] Palworld 서버 중지 요청을 보냈습니다...");
 
@@ -1856,7 +1890,7 @@ def dashboard(request: Request):
 
         currentLogMode = "server";
         if (data.status === "stopped" || data.status === "not_created") {
-          document.getElementById("serverStatus").innerText = data.status;
+          document.getElementById("serverStatus").innerText = displayServerStatus(data.status);
           updateServerStatusIcon(data.status);
           setConfigLocked(false);
         }
@@ -2547,13 +2581,13 @@ def dashboard(request: Request):
         const response = await fetch("/api/server/status");
         const data = await response.json();
         const status = data.status || "error";
-        document.getElementById("serverStatus").innerText = status;
+        document.getElementById("serverStatus").innerText = displayServerStatus(status);
         updateServerStatusIcon(status);
         setConfigLocked(isRunningStatus(status));
         setFileExplorerWriteLocked(isRunningStatus(status));
         return status;
       } catch (err) {
-        document.getElementById("serverStatus").innerText = "error";
+        document.getElementById("serverStatus").innerText = displayServerStatus("error");
         updateServerStatusIcon("error");
         setConfigLocked(false);
         setFileExplorerWriteLocked(false);
@@ -2565,10 +2599,10 @@ def dashboard(request: Request):
       try {
         const response = await fetch("/api/install/status");
         const data = await response.json();
-        document.getElementById("installStatus").innerText = data.status;
+        document.getElementById("installStatus").innerText = displayInstallStatus(data.status);
         updateInstallStatusIcon(data.status);
       } catch (err) {
-        document.getElementById("installStatus").innerText = "error";
+        document.getElementById("installStatus").innerText = displayInstallStatus("error");
         updateInstallStatusIcon("error");
       }
     }

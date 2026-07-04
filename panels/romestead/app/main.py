@@ -965,6 +965,10 @@ def dashboard(request: Request):
     .explorer-note { margin-top: 12px; color: #6b7280; font-size: 12px; line-height: 1.45; }
     label { display: block; font-size: 13px; font-weight: bold; color: #374151; }
     .field-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .field-title-left { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+    .field-link { display: inline-flex; align-items: center; justify-content: center; width: 1.25em; height: 1.25em; color: #4b5563; border-radius: 4px; text-decoration: none; }
+    .field-link:hover { color: #111827; background: #f3f4f6; }
+    .field-link svg { display: block; width: 1em; height: 1em; }
     .help { position: relative; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 18px; height: 18px; border-radius: 50%; border: 1px solid #9ca3af; color: #4b5563; background: #f9fafb; font-size: 12px; line-height: 1; cursor: help; }
     .help::after { content: attr(data-tip); position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 20; width: 220px; padding: 10px 12px; border-radius: 8px; background: #111827; color: #f9fafb; font-size: 12px; font-weight: normal; line-height: 1.45; box-shadow: 0 10px 24px rgba(0,0,0,0.18); opacity: 0; pointer-events: none; transform: translateY(4px); transition: opacity 0.15s ease, transform 0.15s ease; }
     .help::before { content: ""; position: absolute; right: 7px; bottom: calc(100% + 2px); z-index: 21; border-width: 6px 6px 0 6px; border-style: solid; border-color: #111827 transparent transparent transparent; opacity: 0; pointer-events: none; transition: opacity 0.15s ease; }
@@ -1092,7 +1096,19 @@ def dashboard(request: Request):
             <input id="cfgWorldSize" type="number" min="1" max="5" step="1">
           </label>
           <label>
-            <span class="field-title">월드 시드 <span class="help" tabindex="0" data-tip="새 월드를 만들 때 사용할 생성 시드입니다. 비워두면 Romestead가 자동으로 정합니다.">?</span></span>
+            <span class="field-title">
+              <span class="field-title-left">
+                월드 시드
+                <a class="field-link" href="https://www.romestead.tools/seed-map" target="_blank" rel="noopener noreferrer" title="Romestead Seed Map 열기" aria-label="Romestead Seed Map 새 창으로 열기">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M3 10.5 12 3l9 7.5" />
+                    <path d="M5 9.5V21h14V9.5" />
+                    <path d="M9 21v-7h6v7" />
+                  </svg>
+                </a>
+              </span>
+              <span class="help" tabindex="0" data-tip="새 월드를 만들 때 사용할 생성 시드입니다. 비워두면 Romestead가 자동으로 정합니다.">?</span>
+            </span>
             <input id="cfgWorldSeed" type="number" step="1">
           </label>
           <label>
@@ -1238,6 +1254,40 @@ def dashboard(request: Request):
       return (status || "").toLowerCase() === "running";
     }
 
+    function displayInstallStatus(status) {
+      const normalized = (status || "").toLowerCase();
+      const labels = {
+        completed: "설치 완료",
+        started: "설치 중",
+        installing: "설치 중",
+        running: "설치 중",
+        pending: "대기 중",
+        not_started: "설치 전",
+        failed: "설치 실패",
+        error: "오류"
+      };
+      return labels[normalized] || status || "확인 중";
+    }
+
+    function displayServerStatus(status) {
+      const normalized = (status || "").toLowerCase();
+      const labels = {
+        running: "실행 중",
+        starting: "시작 중",
+        started: "시작됨",
+        stopping: "중지 중",
+        stopped: "중지됨",
+        restarting: "재시작 중",
+        created: "생성됨",
+        exited: "종료됨",
+        dead: "비정상 종료",
+        not_created: "생성 전",
+        config_error: "설정 오류",
+        error: "오류"
+      };
+      return labels[normalized] || status || "확인 중";
+    }
+
     function setConfigLocked(locked) {
       const section = document.getElementById("configSection");
       if (section) {
@@ -1347,7 +1397,7 @@ def dashboard(request: Request):
 
       result.innerText = "Romestead 서버를 중지하는 중입니다...";
       currentLogMode = "server";
-      document.getElementById("serverStatus").innerText = "stopping";
+      document.getElementById("serverStatus").innerText = displayServerStatus("stopping");
       updateServerStatusIcon("stopping");
       setLogText("[패널] Romestead 서버 중지 요청을 보냈습니다...");
 
@@ -1366,7 +1416,7 @@ def dashboard(request: Request):
 
         currentLogMode = "server";
         if (data.status === "stopped" || data.status === "not_created") {
-          document.getElementById("serverStatus").innerText = data.status;
+          document.getElementById("serverStatus").innerText = displayServerStatus(data.status);
           updateServerStatusIcon(data.status);
           setConfigLocked(false);
           setFileExplorerWriteLocked(false);
@@ -1810,13 +1860,13 @@ def dashboard(request: Request):
         const response = await fetch("/api/server/status");
         const data = await response.json();
         const status = data.status || "error";
-        document.getElementById("serverStatus").innerText = status;
+        document.getElementById("serverStatus").innerText = displayServerStatus(status);
         updateServerStatusIcon(status);
         setConfigLocked(isRunningStatus(status));
         setFileExplorerWriteLocked(isRunningStatus(status));
         return status;
       } catch (err) {
-        document.getElementById("serverStatus").innerText = "error";
+        document.getElementById("serverStatus").innerText = displayServerStatus("error");
         updateServerStatusIcon("error");
         setConfigLocked(false);
         setFileExplorerWriteLocked(false);
@@ -1828,10 +1878,10 @@ def dashboard(request: Request):
       try {
         const response = await fetch("/api/install/status");
         const data = await response.json();
-        document.getElementById("installStatus").innerText = data.status;
+        document.getElementById("installStatus").innerText = displayInstallStatus(data.status);
         updateInstallStatusIcon(data.status);
       } catch (err) {
-        document.getElementById("installStatus").innerText = "error";
+        document.getElementById("installStatus").innerText = displayInstallStatus("error");
         updateInstallStatusIcon("error");
       }
     }
