@@ -33,6 +33,26 @@ mask_code() {
   echo "${code:0:4}...${code: -4}"
 }
 
+configure_timezone() {
+  local timezone="Asia/Seoul"
+
+  echo "Configuring OS timezone: $timezone"
+
+  if command -v timedatectl >/dev/null 2>&1; then
+    timedatectl set-timezone "$timezone" || true
+  fi
+
+  if [ -f "/usr/share/zoneinfo/$timezone" ]; then
+    ln -snf "/usr/share/zoneinfo/$timezone" /etc/localtime
+    echo "$timezone" > /etc/timezone
+  fi
+
+  echo "Current timezone: $(cat /etc/timezone 2>/dev/null || echo "$timezone")"
+  echo "Current time: $(date)"
+}
+
+configure_timezone
+
 echo "======================================"
 echo "TechTim Romestead Panel Install"
 echo "Started at: $(date)"
