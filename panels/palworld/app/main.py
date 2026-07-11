@@ -261,6 +261,7 @@ def pull_docker_image_with_progress(client, image: str) -> None:
     last_progress_log = 0.0
     pull_started_at = time.monotonic()
     last_event_at = time.monotonic()
+    last_visible_log_at = time.monotonic()
     received_event = False
     pull_events: queue.Queue = queue.Queue()
 
@@ -285,14 +286,16 @@ def pull_docker_image_with_progress(client, image: str) -> None:
         try:
             event_type, payload = pull_events.get(timeout=DOCKER_PULL_HEARTBEAT_SECONDS)
         except queue.Empty:
-            idle_seconds = int(time.monotonic() - last_event_at)
-            elapsed_seconds = int(time.monotonic() - pull_started_at)
+            now = time.monotonic()
+            idle_seconds = int(now - last_event_at)
+            elapsed_seconds = int(now - pull_started_at)
             elapsed_minutes, elapsed_remainder = divmod(elapsed_seconds, 60)
             write_log(
                 "[docker] 이미지 다운로드 또는 압축 해제가 계속 진행 중입니다. "
                 f"전체 경과: {elapsed_minutes}분 {elapsed_remainder}초, "
                 f"마지막 Docker 응답: {idle_seconds}초 전"
             )
+            last_visible_log_at = now
             continue
 
         if event_type == "error":
@@ -328,9 +331,20 @@ def pull_docker_image_with_progress(client, image: str) -> None:
                 message += f" {progress}"
 
             write_log(message)
+            last_visible_log_at = now
 
             if progress:
                 last_progress_log = now
+        elif now - last_visible_log_at >= DOCKER_PULL_HEARTBEAT_SECONDS:
+            elapsed_seconds = int(now - pull_started_at)
+            elapsed_minutes, elapsed_remainder = divmod(elapsed_seconds, 60)
+            current_status = status or layer_statuses.get(layer_id) or "처리 중"
+            write_log(
+                f"[docker] 작업 진행 중: {layer_id} / {current_status}. "
+                f"전체 경과: {elapsed_minutes}분 {elapsed_remainder}초, "
+                "Docker 응답 수신 중"
+            )
+            last_visible_log_at = now
 
         if status:
             layer_statuses[layer_id] = status
