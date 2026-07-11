@@ -79,10 +79,12 @@ configure_host_firewall() {
 
   allow_iptables_port INPUT tcp 8080
   allow_iptables_port INPUT udp 8211
+  allow_iptables_port INPUT tcp 8212
   allow_iptables_port INPUT tcp 25575
 
   allow_iptables_port DOCKER-USER tcp 8080
   allow_iptables_port DOCKER-USER udp 8211
+  allow_iptables_port DOCKER-USER tcp 8212
   allow_iptables_port DOCKER-USER tcp 25575
 }
 
@@ -178,9 +180,7 @@ services:
       - PANEL_VERSION=${PANEL_VERSION}
       - DATA_DIR=/data
       - HOST_DATA_DIR=${INSTALL_DIR}/data
-      - STEAMCMD_IMAGE=steamcmd/steamcmd:ubuntu
-      - PALWORLD_APP_ID=2394010
-      - PALWORLD_RUNTIME_IMAGE=steamcmd/steamcmd:ubuntu
+      - PALWORLD_RUNTIME_IMAGE=ghcr.io/pocketpairjp/palserver:v1.0.0.100427
       - SERVER_PORT=8211
       - RCON_PORT=25575
       - PALWORLD_SERVER_CONTAINER=palworld-server

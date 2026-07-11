@@ -32,11 +32,11 @@ PANEL_VERSION = os.getenv("PANEL_VERSION", "1.0.0")
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 HOST_DATA_DIR = Path(os.getenv("HOST_DATA_DIR", "/opt/techtim/palworld/data"))
 
-STEAMCMD_IMAGE = os.getenv("STEAMCMD_IMAGE", "steamcmd/steamcmd:ubuntu")
-PALWORLD_APP_ID = os.getenv("PALWORLD_APP_ID", "2394010")
-
 PALWORLD_SERVER_CONTAINER = os.getenv("PALWORLD_SERVER_CONTAINER", "palworld-server")
-PALWORLD_RUNTIME_IMAGE = os.getenv("PALWORLD_RUNTIME_IMAGE", STEAMCMD_IMAGE)
+PALWORLD_RUNTIME_IMAGE = os.getenv(
+    "PALWORLD_RUNTIME_IMAGE",
+    "ghcr.io/pocketpairjp/palserver:v1.0.0.100427",
+)
 SERVER_PORT = int(os.getenv("SERVER_PORT", "8211"))
 RCON_PORT = int(os.getenv("RCON_PORT", "25575"))
 SERVER_STOP_GRACE_SECONDS = int(os.getenv("SERVER_STOP_GRACE_SECONDS", "5"))
@@ -45,6 +45,8 @@ INSTALL_REQUEST_FILE = DATA_DIR / "install-request.txt"
 INSTALL_LOG_FILE = DATA_DIR / "install.log"
 INSTALL_STATUS_FILE = DATA_DIR / "install-status.txt"
 SERVER_CONTROL_LOG_FILE = DATA_DIR / "server-control.log"
+RUNTIME_HELPER_FILE = DATA_DIR / "palworld-runtime-helper.sh"
+HOST_RUNTIME_HELPER_FILE = HOST_DATA_DIR / "palworld-runtime-helper.sh"
 
 SAVED_ROOT_DIR = DATA_DIR / "server" / "Pal" / "Saved"
 SAVED_WORLDS_DIR = SAVED_ROOT_DIR / "SaveGames"
@@ -92,6 +94,17 @@ def ensure_data_dirs() -> None:
     (DATA_DIR / "uploads").mkdir(parents=True, exist_ok=True)
     SAVED_ROOT_DIR.mkdir(parents=True, exist_ok=True)
     SAVED_WORLDS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def ensure_official_runtime_files() -> None:
+    ensure_data_dirs()
+    RUNTIME_HELPER_FILE.write_text(
+        "#!/bin/sh\n"
+        "sudo chown -R user:usergroup /pal/Package/Pal/Saved\n"
+        "exec /bin/sh /pal/Package/PalServer.sh \"$@\"\n",
+        encoding="utf-8",
+    )
+    RUNTIME_HELPER_FILE.chmod(0o755)
 
 
 def password_hash(password: str, salt: str) -> str:
@@ -266,6 +279,30 @@ def get_status() -> str:
     return INSTALL_STATUS_FILE.read_text(encoding="utf-8").strip()
 
 
+def has_official_runtime_install_marker() -> bool:
+    if not INSTALL_REQUEST_FILE.exists():
+        return False
+
+    try:
+        marker = INSTALL_REQUEST_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+    return (
+        "distribution=pocketpair-official-docker" in marker
+        and f"runtime_image={PALWORLD_RUNTIME_IMAGE}" in marker
+    )
+
+
+def get_effective_install_status() -> str:
+    status = get_status()
+
+    if status == "completed" and not has_official_runtime_install_marker():
+        return "update_required"
+
+    return status
+
+
 def get_config_path() -> Path:
     return DATA_DIR / "server" / "Pal" / "Saved" / "Config" / "LinuxServer" / "PalWorldSettings.ini"
 
@@ -435,8 +472,12 @@ PALWORLD_ADVANCED_KEYS = {
     "PlayerDamageRateDefense",
     "PlayerStomachDecreaceRate",
     "PlayerStaminaDecreaceRate",
+    "PlayerAutoHPRegeneRate",
+    "PlayerAutoHpRegeneRateInSleep",
     "PalStomachDecreaceRate",
     "PalStaminaDecreaceRate",
+    "PalAutoHPRegeneRate",
+    "PalAutoHpRegeneRateInSleep",
     "BuildObjectHpRate",
     "BuildObjectDamageRate",
     "BuildObjectDeteriorationDamageRate",
@@ -447,8 +488,11 @@ PALWORLD_ADVANCED_KEYS = {
     "DeathPenalty",
     "bEnablePlayerToPlayerDamage",
     "bEnableFriendlyFire",
+    "bEnableInvaderEnemy",
+    "bActiveUNKO",
     "EnablePredatorBossPal",
     "DropItemMaxNum",
+    "DropItemMaxNum_UNKO",
     "BaseCampMaxNum",
     "BaseCampMaxNumInGuild",
     "BaseCampWorkerMaxNum",
@@ -460,23 +504,31 @@ PALWORLD_ADVANCED_KEYS = {
     "WorkSpeedRate",
     "AutoSaveSpan",
     "CrossplayPlatforms",
+    "bIsMultiplay",
     "bIsPvP",
     "bHardcore",
     "bPalLost",
+    "bCharacterRecreateInHardcore",
     "bCanPickupOtherGuildDeathPenaltyDrop",
     "bEnableNonLoginPenalty",
     "bEnableFastTravel",
+    "bIsStartLocationSelectByMap",
     "bExistPlayerAfterLogout",
     "bEnableDefenseOtherGuildPlayer",
+    "bInvisibleOtherGuildBaseCampAreaFX",
     "bBuildAreaLimit",
+    "bEnableAimAssistPad",
+    "bEnableAimAssistKeyboard",
     "ItemWeightRate",
     "bShowPlayerList",
     "CoopPlayerMaxNum",
+    "PublicIP",
     "RESTAPIEnabled",
     "RESTAPIPort",
     "bIsUseBackupSaveData",
     "Region",
     "bUseAuth",
+    "BanListURL",
     "SupplyDropSpan",
     "ChatPostLimitPerMinute",
     "MaxBuildingLimitNum",
@@ -489,6 +541,7 @@ PALWORLD_ADVANCED_KEYS = {
     "bEnableFastTravelOnlyBaseCamp",
     "bAllowClientMod",
     "bIsShowJoinLeftMessage",
+    "LogFormatType",
     "DenyTechnologyList",
     "GuildRejoinCooldownMinutes",
     "BlockRespawnTime",
@@ -749,12 +802,25 @@ def server_container_keeps_stdin_open(container) -> bool:
     return bool(config.get("OpenStdin"))
 
 
+def server_container_uses_official_runtime(container) -> bool:
+    config = container.attrs.get("Config", {})
+    entrypoint = config.get("Entrypoint") or []
+
+    if isinstance(entrypoint, str):
+        entrypoint = [entrypoint]
+
+    return (
+        config.get("Image") == PALWORLD_RUNTIME_IMAGE
+        and "/pal/helper.sh" in entrypoint
+    )
+
+
 def is_server_container_running() -> bool:
     try:
         client = docker.from_env()
         container = client.containers.get(PALWORLD_SERVER_CONTAINER)
         container.reload()
-        return container.status == "running"
+        return container.status == "running" and server_container_uses_official_runtime(container)
     except docker.errors.NotFound:
         return False
     except Exception:
@@ -872,126 +938,51 @@ def install_palworld_job() -> None:
     set_status("running")
 
     write_log("Palworld Dedicated Server 설치 작업을 시작합니다.")
-    write_log("SteamCMD anonymous 로그인을 사용합니다.")
-    write_log("Steam 계정 정보 입력은 필요하지 않습니다.")
-    write_log(f"Palworld Dedicated Server App ID: {PALWORLD_APP_ID}")
+    write_log("Pocketpair 공식 Palworld 1.0 Docker 이미지를 사용합니다.")
+    write_log(f"공식 런타임 이미지: {PALWORLD_RUNTIME_IMAGE}")
 
     try:
-        server_dir = DATA_DIR / "server"
-        host_server_dir = HOST_DATA_DIR / "server"
-        host_server_dir.mkdir(parents=True, exist_ok=True)
-
-        write_log(f"패널 내부 서버 경로: {server_dir}")
-        write_log(f"호스트 서버 경로: {host_server_dir}")
-        write_log(f"SteamCMD 이미지: {STEAMCMD_IMAGE}")
-
         client = docker.from_env()
-
         write_log("Docker Engine 연결 성공.")
-        write_log("SteamCMD 이미지를 확인합니다. 최초 실행 시 pull 시간이 걸릴 수 있습니다.")
-        client.images.pull(STEAMCMD_IMAGE)
-
-        write_log("SteamCMD 이미지 준비 완료.")
-        write_log("Palworld 서버 파일 다운로드를 시작합니다.")
-
-        steamcmd_command = [
-            "+force_install_dir", "/server",
-            "+login", "anonymous",
-            "+app_update", PALWORLD_APP_ID, "validate",
-            "+quit",
-        ]
 
         max_attempts = 3
-        exit_code = -1
+        image_ready = False
 
         for attempt in range(1, max_attempts + 1):
-            container = None
-            missing_configuration = False
-            container_name = f"palworld-steamcmd-install-{int(time.time())}-{attempt}"
-
-            write_log(f"SteamCMD 설치 시도 {attempt}/{max_attempts}")
+            write_log(f"공식 이미지 다운로드 시도 {attempt}/{max_attempts}")
 
             try:
-                container = client.containers.run(
-                    STEAMCMD_IMAGE,
-                    command=steamcmd_command,
-                    name=container_name,
-                    detach=True,
-                    remove=False,
-                    volumes={
-                        str(host_server_dir): {
-                            "bind": "/server",
-                            "mode": "rw",
-                        }
-                    },
-                )
-
-                for line in container.logs(stream=True, stdout=True, stderr=True, follow=True):
-                    text = sanitize_log_text(line.decode("utf-8", errors="replace")).rstrip()
-
-                    if "Missing configuration" in text:
-                        missing_configuration = True
-
-                    if text:
-                        write_log(f"[steamcmd] {text}")
-
-                result = container.wait()
-                exit_code = result.get("StatusCode", -1)
-
-            except Exception as attempt_error:
-                exit_code = -1
-                write_log(f"SteamCMD 설치 시도 중 오류 발생: {attempt_error}")
-
-            finally:
-                if container is not None:
-                    try:
-                        container.remove(force=True)
-                    except Exception as remove_error:
-                        write_log(f"SteamCMD 설치 컨테이너 삭제 중 경고: {remove_error}")
-
-            if exit_code == 0:
-                write_log(f"SteamCMD 설치 시도 {attempt}/{max_attempts} 성공")
+                client.images.pull(PALWORLD_RUNTIME_IMAGE)
+                image_ready = True
+                write_log(f"공식 이미지 다운로드 시도 {attempt}/{max_attempts} 성공")
                 break
-
-            write_log(f"WARNING: SteamCMD 설치 시도 {attempt}/{max_attempts} 실패. exit_code={exit_code}")
-
-            if missing_configuration:
-                write_log("Steam 서버에서 설치 정보를 일시적으로 받지 못했습니다. 잠시 후 자동 재시도합니다.")
+            except Exception as attempt_error:
+                write_log(f"WARNING: 공식 이미지 다운로드 시도 {attempt}/{max_attempts} 실패: {attempt_error}")
 
             if attempt < max_attempts:
                 time.sleep(20)
 
-        if exit_code != 0:
-            write_log(f"ERROR: SteamCMD 설치가 {max_attempts}회 모두 실패했습니다. 마지막 exit_code={exit_code}")
-            write_log("App ID, anonymous 설치 지원 여부, Steam 서버 상태, 네트워크 상태를 확인해주세요.")
+        if not image_ready:
+            write_log(f"ERROR: 공식 Palworld 이미지를 {max_attempts}회 모두 다운로드하지 못했습니다.")
+            write_log("GHCR 연결 상태와 Docker Engine 로그를 확인해주세요.")
             set_status("failed")
             return
 
-        server_executable = server_dir / "PalServer.sh"
-
-        if not server_executable.exists():
-            write_log("ERROR: 설치 명령은 종료되었지만 PalServer.sh 파일을 찾을 수 없습니다.")
-            set_status("failed")
-            return
-
-        try:
-            server_executable.chmod(0o755)
-        except OSError as chmod_error:
-            write_log(f"WARNING: PalServer.sh 실행 권한 설정 중 경고: {chmod_error}")
-
+        ensure_official_runtime_files()
         create_default_config()
 
         INSTALL_REQUEST_FILE.write_text(
             "TechTim Palworld Dedicated Server install completed.\n"
             f"game={GAME_CODE}\n"
             f"panel_version={PANEL_VERSION}\n"
-            "steam_login=anonymous\n"
-            f"app_id={PALWORLD_APP_ID}\n"
+            "distribution=pocketpair-official-docker\n"
+            f"runtime_image={PALWORLD_RUNTIME_IMAGE}\n"
             f"completed_at={datetime.now().isoformat(timespec='seconds')}\n",
             encoding="utf-8",
         )
 
-        write_log("Palworld Dedicated Server 파일 다운로드가 완료되었습니다.")
+        write_log("Pocketpair 공식 Palworld 1.0 서버 이미지 설치가 완료되었습니다.")
+        write_log(f"세이브 및 설정 경로: {SAVED_ROOT_DIR}")
         write_log("이제 Web GUI에서 PalWorldSettings.ini를 저장하고 서버를 시작할 수 있습니다.")
         set_status("completed")
 
@@ -1586,6 +1577,18 @@ def dashboard(request: Request):
 
     const advancedOptionGroups = [
       {
+        title: "접속/플랫폼",
+        fields: [
+          { key: "CoopPlayerMaxNum", label: "협동 플레이 인원", type: "number", step: "1", min: "1", max: "32" },
+          { key: "PublicIP", label: "공개 IP", type: "text" },
+          { key: "Region", label: "서버 지역", type: "text" },
+          { key: "CrossplayPlatforms", label: "크로스플레이 플랫폼", type: "text" },
+          { key: "BanListURL", label: "밴 목록 URL", type: "text" },
+          { key: "bUseAuth", label: "서버 인증 사용", type: "checkbox" },
+          { key: "bIsMultiplay", label: "멀티플레이 모드", type: "checkbox" }
+        ]
+      },
+      {
         title: "배율",
         fields: [
           { key: "DayTimeSpeedRate", label: "낮 시간 속도", type: "number", step: "0.1", min: "0.1", max: "5" },
@@ -1600,6 +1603,20 @@ def dashboard(request: Request):
         ]
       },
       {
+        title: "회복/건축/채집",
+        fields: [
+          { key: "PlayerAutoHPRegeneRate", label: "플레이어 HP 회복", type: "number", step: "0.1", min: "0", max: "10" },
+          { key: "PlayerAutoHpRegeneRateInSleep", label: "플레이어 수면 HP 회복", type: "number", step: "0.1", min: "0", max: "10" },
+          { key: "PalAutoHPRegeneRate", label: "팰 HP 회복", type: "number", step: "0.1", min: "0", max: "10" },
+          { key: "PalAutoHpRegeneRateInSleep", label: "팰 수면 HP 회복", type: "number", step: "0.1", min: "0", max: "10" },
+          { key: "BuildObjectHpRate", label: "건축물 HP 배율", type: "number", step: "0.1", min: "0.1", max: "10" },
+          { key: "BuildObjectDamageRate", label: "건축물 피해 배율", type: "number", step: "0.1", min: "0.1", max: "10" },
+          { key: "BuildObjectDeteriorationDamageRate", label: "건축물 열화 피해", type: "number", step: "0.1", min: "0", max: "10" },
+          { key: "CollectionObjectHpRate", label: "채집 오브젝트 HP", type: "number", step: "0.1", min: "0.1", max: "10" },
+          { key: "CollectionObjectRespawnSpeedRate", label: "채집 리스폰 속도", type: "number", step: "0.1", min: "0.1", max: "10" }
+        ]
+      },
+      {
         title: "전투",
         fields: [
           { key: "PlayerDamageRateAttack", label: "플레이어 공격 배율", type: "number", step: "0.1", min: "0.1", max: "5" },
@@ -1610,11 +1627,14 @@ def dashboard(request: Request):
           { key: "bEnablePlayerToPlayerDamage", label: "플레이어 간 피해", type: "checkbox" },
           { key: "bEnableFriendlyFire", label: "아군 피해", type: "checkbox" },
           { key: "bIsPvP", label: "PvP 모드", type: "checkbox" },
-          { key: "bHardcore", label: "하드코어", type: "checkbox" }
+          { key: "bHardcore", label: "하드코어", type: "checkbox" },
+          { key: "bCharacterRecreateInHardcore", label: "하드코어 캐릭터 재생성", type: "checkbox" },
+          { key: "bEnableInvaderEnemy", label: "습격 이벤트", type: "checkbox" },
+          { key: "bActiveUNKO", label: "UNKO 활성화", type: "checkbox" }
         ]
       },
       {
-        title: "생존/월드",
+        title: "생존/이동",
         fields: [
           { key: "PlayerStomachDecreaceRate", label: "플레이어 포만감 감소", type: "number", step: "0.1", min: "0", max: "5" },
           { key: "PlayerStaminaDecreaceRate", label: "플레이어 스태미나 감소", type: "number", step: "0.1", min: "0", max: "5" },
@@ -1624,7 +1644,11 @@ def dashboard(request: Request):
           { key: "bEnableFastTravel", label: "빠른 이동 허용", type: "checkbox" },
           { key: "bEnableFastTravelOnlyBaseCamp", label: "거점 빠른 이동만 허용", type: "checkbox" },
           { key: "EnablePredatorBossPal", label: "프레데터 보스 팰", type: "checkbox" },
-          { key: "bPalLost", label: "팰 손실", type: "checkbox" }
+          { key: "bPalLost", label: "팰 손실", type: "checkbox" },
+          { key: "bEnableAimAssistPad", label: "패드 조준 보정", type: "checkbox" },
+          { key: "bEnableAimAssistKeyboard", label: "키보드 조준 보정", type: "checkbox" },
+          { key: "bIsStartLocationSelectByMap", label: "지도에서 시작 위치 선택", type: "checkbox" },
+          { key: "bExistPlayerAfterLogout", label: "로그아웃 후 캐릭터 유지", type: "checkbox" }
         ]
       },
       {
@@ -1637,7 +1661,12 @@ def dashboard(request: Request):
           { key: "bAutoResetGuildNoOnlinePlayers", label: "미접속 길드 자동 초기화", type: "checkbox" },
           { key: "AutoResetGuildTimeNoOnlinePlayers", label: "길드 초기화 시간", type: "number", step: "1", min: "1", max: "720" },
           { key: "bAllowGlobalPalboxExport", label: "글로벌 팰박스 내보내기", type: "checkbox" },
-          { key: "bAllowGlobalPalboxImport", label: "글로벌 팰박스 가져오기", type: "checkbox" }
+          { key: "bAllowGlobalPalboxImport", label: "글로벌 팰박스 가져오기", type: "checkbox" },
+          { key: "MaxBuildingLimitNum", label: "건축물 제한 수", type: "number", step: "1", min: "0", max: "10000" },
+          { key: "bBuildAreaLimit", label: "건축 구역 제한", type: "checkbox" },
+          { key: "bCanPickupOtherGuildDeathPenaltyDrop", label: "타 길드 사망 드롭 줍기", type: "checkbox" },
+          { key: "bEnableDefenseOtherGuildPlayer", label: "타 길드 방어 허용", type: "checkbox" },
+          { key: "bInvisibleOtherGuildBaseCampAreaFX", label: "타 길드 거점 표시 숨김", type: "checkbox" }
         ]
       },
       {
@@ -1647,11 +1676,30 @@ def dashboard(request: Request):
           { key: "SupplyDropSpan", label: "보급품 드롭 간격", type: "number", step: "1", min: "0", max: "720" },
           { key: "ChatPostLimitPerMinute", label: "분당 채팅 제한", type: "number", step: "1", min: "1", max: "120" },
           { key: "DropItemMaxNum", label: "드롭 아이템 최대 수", type: "number", step: "1", min: "0", max: "10000" },
+          { key: "DropItemMaxNum_UNKO", label: "UNKO 드롭 최대 수", type: "number", step: "1", min: "0", max: "1000" },
           { key: "DropItemAliveMaxHours", label: "드롭 아이템 유지 시간", type: "number", step: "0.1", min: "0", max: "24" },
           { key: "ServerReplicatePawnCullDistance", label: "서버 복제 거리", type: "number", step: "100", min: "1000", max: "50000" },
+          { key: "bEnableNonLoginPenalty", label: "미접속 패널티", type: "checkbox" },
+          { key: "bIsUseBackupSaveData", label: "공식 백업 저장 사용", type: "checkbox" },
           { key: "bShowPlayerList", label: "플레이어 목록 표시", type: "checkbox" },
           { key: "bIsShowJoinLeftMessage", label: "입장/퇴장 메시지", type: "checkbox" },
-          { key: "bAllowClientMod", label: "클라이언트 모드 허용", type: "checkbox" }
+          { key: "bAllowClientMod", label: "클라이언트 모드 허용", type: "checkbox" },
+          { key: "LogFormatType", label: "로그 형식", type: "select", options: ["Text", "Json"] }
+        ]
+      },
+      {
+        title: "랜덤라이저",
+        fields: [
+          { key: "RandomizerType", label: "랜덤라이저 방식", type: "select", options: ["None", "Region", "All"] },
+          { key: "RandomizerSeed", label: "랜덤라이저 시드", type: "text" },
+          { key: "bIsRandomizerPalLevelRandom", label: "팰 레벨 랜덤", type: "checkbox" }
+        ]
+      },
+      {
+        title: "REST API",
+        fields: [
+          { key: "RESTAPIEnabled", label: "REST API 활성화", type: "checkbox" },
+          { key: "RESTAPIPort", label: "REST API 포트", type: "number", step: "1", min: "1", max: "65535" }
         ]
       }
     ];
@@ -1695,7 +1743,7 @@ def dashboard(request: Request):
 
       if (normalized === "completed") {
         setStatusIcon("installStatusIcon", "status-ok", "check");
-      } else if (["not_started", "failed", "error"].includes(normalized)) {
+      } else if (["not_started", "failed", "error", "update_required"].includes(normalized)) {
         setStatusIcon("installStatusIcon", "status-bad", "x");
       } else {
         setStatusIcon("installStatusIcon", "status-pending", "pending");
@@ -1707,7 +1755,7 @@ def dashboard(request: Request):
 
       if (normalized === "running") {
         setStatusIcon("serverStatusIcon", "server-live", "server");
-      } else if (["not_created", "stopped", "exited", "dead", "error", "config_error"].includes(normalized)) {
+      } else if (["not_created", "stopped", "exited", "dead", "error", "config_error", "outdated"].includes(normalized)) {
         setStatusIcon("serverStatusIcon", "status-bad", "x");
       } else {
         setStatusIcon("serverStatusIcon", "status-pending", "pending");
@@ -1727,6 +1775,7 @@ def dashboard(request: Request):
         running: "설치 중",
         pending: "대기 중",
         not_started: "설치 전",
+        update_required: "1.0 설치 필요",
         failed: "설치 실패",
         error: "오류"
       };
@@ -1746,6 +1795,7 @@ def dashboard(request: Request):
         exited: "종료됨",
         dead: "비정상 종료",
         not_created: "생성 전",
+        outdated: "교체 필요",
         config_error: "설정 오류",
         error: "오류"
       };
@@ -2695,7 +2745,7 @@ def install_status(request: Request):
     require_auth(request)
 
     return {
-        "status": get_status(),
+        "status": get_effective_install_status(),
     }
 
 
@@ -2811,25 +2861,16 @@ def start_server(request: Request):
     require_auth(request)
 
     try:
-        server_dir = DATA_DIR / "server"
-        host_server_dir = HOST_DATA_DIR / "server"
-
-        if not server_dir.exists():
+        if get_effective_install_status() != "completed":
             return {
                 "status": "error",
-                "message": "서버 파일이 없습니다. 먼저 엔진 설치를 진행해주세요.",
+                "message": "공식 Palworld 서버 이미지가 설치되지 않았습니다. 먼저 엔진 설치를 진행해주세요.",
             }
 
-        server_executable = server_dir / "PalServer.sh"
-
-        if not server_executable.exists():
-            return {
-                "status": "error",
-                "message": "PalServer.sh 파일을 찾을 수 없습니다. Palworld 서버 파일 설치 상태를 확인해주세요.",
-            }
-
+        ensure_official_runtime_files()
         config_path = create_default_config()
         server_config = read_config()
+        advanced_options = server_config.get("AdvancedOptions") or {}
         clear_server_control_log()
         write_server_control_log("Palworld 서버 시작 요청을 받았습니다.")
 
@@ -2847,6 +2888,8 @@ def start_server(request: Request):
 
         effective_server_port = int(server_config.get("PublicPort", SERVER_PORT))
         effective_rcon_port = int(server_config.get("RCONPort", RCON_PORT))
+        effective_rest_port = int(advanced_options.get("RESTAPIPort", 8212))
+        rest_api_enabled = bool(advanced_options.get("RESTAPIEnabled", False))
         client = docker.from_env()
 
         existing = client.containers.list(
@@ -2858,7 +2901,11 @@ def start_server(request: Request):
             if container.name == PALWORLD_SERVER_CONTAINER:
                 container.reload()
 
-                if container.status == "running" and server_container_keeps_stdin_open(container):
+                if (
+                    container.status == "running"
+                    and server_container_keeps_stdin_open(container)
+                    and server_container_uses_official_runtime(container)
+                ):
                     return {
                         "status": "running",
                         "message": "Palworld 서버가 이미 실행 중입니다.",
@@ -2867,11 +2914,13 @@ def start_server(request: Request):
                 container.remove(force=True)
 
         try:
-            server_executable.chmod(0o755)
-        except OSError:
-            pass
-
-        client.images.pull(PALWORLD_RUNTIME_IMAGE)
+            client.images.get(PALWORLD_RUNTIME_IMAGE)
+        except docker.errors.ImageNotFound:
+            write_server_control_log("공식 Palworld 서버 이미지가 없어 시작을 중단했습니다.")
+            return {
+                "status": "install_required",
+                "message": "공식 Palworld 1.0 이미지가 없습니다. 엔진 설치를 먼저 진행해주세요.",
+            }
 
         ports = {
             f"{effective_server_port}/udp": effective_server_port,
@@ -2880,23 +2929,34 @@ def start_server(request: Request):
         if server_config.get("RCONEnabled"):
             ports[f"{effective_rcon_port}/tcp"] = effective_rcon_port
 
+        if rest_api_enabled:
+            ports[f"{effective_rest_port}/tcp"] = effective_rest_port
+
+        host_saved_root = HOST_DATA_DIR / "server" / "Pal" / "Saved"
+
         container = client.containers.run(
             PALWORLD_RUNTIME_IMAGE,
-            entrypoint=["/bin/bash"],
+            entrypoint=["/pal/helper.sh"],
             command=[
-                "-lc",
-                f"exec ./PalServer.sh -port={effective_server_port} -useperfthreads -NoAsyncLoadingThread -UseMultithreadForDS",
+                f"-port={effective_server_port}",
+                "-useperfthreads",
+                "-NoAsyncLoadingThread",
+                "-UseMultithreadForDS",
             ],
             name=PALWORLD_SERVER_CONTAINER,
-            working_dir="/server",
+            working_dir="/pal/Package",
             detach=True,
             stdin_open=True,
             restart_policy={"Name": "unless-stopped"},
             volumes={
-                str(host_server_dir): {
-                    "bind": "/server",
+                str(host_saved_root): {
+                    "bind": "/pal/Package/Pal/Saved",
                     "mode": "rw",
-                }
+                },
+                str(HOST_RUNTIME_HELPER_FILE): {
+                    "bind": "/pal/helper.sh",
+                    "mode": "ro",
+                },
             },
             ports=ports,
         )
@@ -2908,6 +2968,7 @@ def start_server(request: Request):
             "config": str(config_path),
             "port": f"{effective_server_port}/udp",
             "rcon_port": f"{effective_rcon_port}/tcp" if server_config.get("RCONEnabled") else "",
+            "rest_api_port": f"{effective_rest_port}/tcp" if rest_api_enabled else "",
         }
 
     except Exception as e:
@@ -3027,7 +3088,10 @@ def restart_server(request: Request):
 
         container.reload()
 
-        if not server_container_keeps_stdin_open(container):
+        if (
+            not server_container_keeps_stdin_open(container)
+            or not server_container_uses_official_runtime(container)
+        ):
             container.remove(force=True)
             return start_server(request)
 
@@ -3066,6 +3130,13 @@ def server_status(request: Request):
         for container in containers:
             if container.name == PALWORLD_SERVER_CONTAINER:
                 container.reload()
+
+                if not server_container_uses_official_runtime(container):
+                    return {
+                        "status": "outdated",
+                        "container": container.name,
+                        "message": "이전 Palworld 런타임 컨테이너입니다. 서버 시작 또는 재시작을 누르면 공식 1.0 이미지로 교체됩니다.",
+                    }
 
                 return {
                     "status": container.status,
