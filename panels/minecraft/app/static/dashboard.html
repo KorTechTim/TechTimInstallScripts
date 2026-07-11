@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>TechTim Minecraft Server Panel</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand"><span class="cube-icon">M</span><div><h1>TechTim Minecraft Server Panel</h1><small>Java Edition</small></div></div>
+      <div class="header-actions">
+        <a class="icon-button" href="https://docker-minecraft-server.readthedocs.io/" target="_blank" title="itzg 공식 문서">i</a>
+        <button class="icon-button logout" id="logout" title="로그아웃">↪</button>
+      </div>
+    </header>
+
+    <section class="statusbar" aria-label="서버 상태">
+      <div class="status-item"><span class="status-icon game">M</span><span><small>게임</small><b>Minecraft Java</b></span></div>
+      <div class="status-item"><span class="status-icon" id="installIcon">×</span><span><small>설치 상태</small><b id="installStatus">미설치</b></span></div>
+      <div class="status-item"><span class="status-icon" id="serverIcon">×</span><span><small>서버 상태</small><b id="serverStatus">생성되지 않음</b></span></div>
+      <div class="status-item"><span class="status-icon version">v</span><span><small>패널 버전</small><b>{{PANEL_VERSION}}</b></span></div>
+    </section>
+
+    <section class="terminal-band">
+      <div class="section-head">
+        <div><h2>실시간 로그</h2><span id="logCaption">설치 로그</span></div>
+        <div class="segmented"><button class="active" data-log="install">설치 로그</button><button data-log="server">서버 로그</button></div>
+      </div>
+      <pre id="terminal" aria-live="polite">로그를 불러오는 중입니다.</pre>
+    </section>
+
+    <section class="control-band">
+      <button class="command install" id="installButton"><span>↓</span>엔진 설치</button>
+      <button class="command start" id="startButton"><span>▶</span>서버 시작</button>
+      <button class="command stop" id="stopButton"><span>■</span>서버 중지</button>
+      <button class="command restart" id="restartButton"><span>↻</span>서버 재시작</button>
+      <button class="command files" id="filesButton"><span>▣</span>서버 디렉터리</button>
+    </section>
+
+    <section class="settings-entry" id="settingsEntry">
+      <button class="settings-launch" id="settingsButton"><span class="gear">⚙</span><b>서버 설정</b><small id="settingsMode">Paper · LATEST · 4G</small></button>
+      <div class="settings-copy"><h2>Minecraft 서버 구성</h2><p>서버 종류, 버전, 월드, 플레이 규칙과 모드팩을 관리합니다.</p></div>
+      <span class="lock-message" id="settingsLock">서버 실행 중</span>
+    </section>
+  </main>
+
+  <dialog id="settingsDialog" class="modal">
+    <form id="settingsForm" method="dialog">
+      <div class="modal-head"><div><small>SERVER CONFIGURATION</small><h2>Minecraft 서버 설정</h2></div><button class="close" type="button" data-close="settingsDialog">×</button></div>
+      <div class="form-scroll">
+        <section class="form-section"><h3>배포 유형</h3><div class="grid cols-3">
+          <label>서버 유형<select id="Type"><option value="VANILLA">Vanilla</option><option value="PAPER">Paper (플러그인 권장)</option><option value="PURPUR">Purpur</option><option value="SPIGOT">Spigot</option><option value="FORGE">Forge</option><option value="NEOFORGE">NeoForge</option><option value="FABRIC">Fabric</option><option value="QUILT">Quilt</option><option value="AUTO_CURSEFORGE">CurseForge 모드팩</option><option value="MODRINTH">Modrinth 모드팩</option></select></label>
+          <label>Minecraft 버전<input id="Version" value="LATEST" placeholder="LATEST 또는 1.21.5"></label>
+          <label>메모리<input id="Memory" value="4G" placeholder="4G"></label>
+        </div></section>
+        <section class="form-section"><h3>서버 및 월드</h3><div class="grid cols-2">
+          <label>서버 이름<input id="ServerName"></label><label>MOTD<input id="Motd"></label>
+          <label>월드 폴더 이름<input id="Level"></label><label>월드 시드<input id="Seed" placeholder="비워두면 무작위"></label>
+          <label>난이도<select id="Difficulty"><option value="peaceful">평화로움</option><option value="easy">쉬움</option><option value="normal">보통</option><option value="hard">어려움</option></select></label>
+          <label>게임 모드<select id="GameMode"><option value="survival">서바이벌</option><option value="creative">크리에이티브</option><option value="adventure">모험</option><option value="spectator">관전자</option></select></label>
+          <label>화이트리스트<input id="Whitelist" placeholder="플레이어명,플레이어명"></label><label>관리자(OP)<input id="Ops" placeholder="플레이어명,플레이어명"></label>
+        </div></section>
+        <section class="form-section"><h3>플레이 규칙</h3><div class="grid cols-3">
+          <label>최대 인원 <output data-for="MaxPlayers"></output><input id="MaxPlayers" type="range" min="1" max="200"></label>
+          <label>시야 거리 <output data-for="ViewDistance"></output><input id="ViewDistance" type="range" min="2" max="32"></label>
+          <label>시뮬레이션 거리 <output data-for="SimulationDistance"></output><input id="SimulationDistance" type="range" min="2" max="32"></label>
+          <label>스폰 보호 범위 <output data-for="SpawnProtection"></output><input id="SpawnProtection" type="range" min="0" max="128"></label>
+        </div><div class="checks"><label><input id="OnlineMode" type="checkbox">정품 인증</label><label><input id="Pvp" type="checkbox">PVP 허용</label><label><input id="AllowFlight" type="checkbox">비행 허용</label><label><input id="EnableCommandBlock" type="checkbox">커맨드 블록</label></div></section>
+        <section class="form-section" id="projectsSection"><h3>모드 및 플러그인 자동 설치</h3><label>Modrinth 프로젝트 목록<textarea id="ModrinthProjects" rows="3" placeholder="fabric-api, lithium 또는 luckperms"></textarea></label></section>
+        <section class="form-section conditional" id="modrinthSection"><h3>Modrinth 모드팩</h3><div class="grid cols-2"><label>모드팩 주소 / slug / ID<input id="ModrinthModpack"></label><label>로더 제한<select id="ModrinthLoader"><option value="">자동</option><option value="forge">Forge</option><option value="fabric">Fabric</option><option value="quilt">Quilt</option></select></label></div></section>
+        <section class="form-section conditional" id="curseforgeSection"><h3>CurseForge 모드팩</h3><div class="grid cols-2"><label>모드팩 페이지 URL<input id="CurseForgePageUrl"></label><label>모드팩 slug<input id="CurseForgeSlug"></label><label class="wide">CurseForge API Key<input id="CurseForgeApiKey" type="password" autocomplete="off" placeholder="기존 키를 유지하려면 비워두세요"></label></div></section>
+        <section class="form-section"><h3>고급 환경 변수</h3><label>추가 환경 변수 (JSON)<textarea id="ExtraEnv" rows="4" placeholder='{"ICON":"https://.../server-icon.png"}'></textarea></label></section>
+        <label class="eula"><input id="EulaAccepted" type="checkbox"><span><a href="https://www.minecraft.net/eula" target="_blank">Mojang Minecraft EULA</a>에 동의합니다.</span></label>
+      </div>
+      <div class="modal-actions"><span class="save-toast" id="saveToast">저장 완료</span><button type="button" class="secondary" data-close="settingsDialog">취소</button><button type="submit" class="primary">설정 저장</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="filesDialog" class="modal file-modal">
+    <div class="modal-head"><div><small>SERVER DATA</small><h2>서버 디렉터리 탐색기</h2></div><button class="close" type="button" data-close="filesDialog">×</button></div>
+    <div class="file-toolbar"><button id="fileUp">↑ 상위 폴더</button><button id="newFolder">＋ 새 폴더</button><label class="upload">⇧ 업로드<input id="fileUpload" type="file" multiple></label><span id="filePath">/data</span></div>
+    <div class="file-list" id="fileList"></div>
+  </dialog>
+
+  <div class="toast" id="toast"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
