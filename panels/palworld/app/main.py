@@ -8,6 +8,7 @@ from typing import Any
 import hashlib
 import json
 import os
+import queue
 import re
 import secrets
 import shutil
@@ -41,6 +42,7 @@ PALWORLD_RUNTIME_IMAGE = os.getenv(
 SERVER_PORT = int(os.getenv("SERVER_PORT", "8211"))
 RCON_PORT = int(os.getenv("RCON_PORT", "25575"))
 SERVER_STOP_GRACE_SECONDS = int(os.getenv("SERVER_STOP_GRACE_SECONDS", "5"))
+DOCKER_PULL_HEARTBEAT_SECONDS = max(1, int(os.getenv("DOCKER_PULL_HEARTBEAT_SECONDS", "10")))
 
 INSTALL_REQUEST_FILE = DATA_DIR / "install-request.txt"
 INSTALL_LOG_FILE = DATA_DIR / "install.log"
@@ -257,18 +259,55 @@ def pull_docker_image_with_progress(client, image: str) -> None:
     tag = tag or "latest"
     layer_statuses: dict[str, str] = {}
     last_progress_log = 0.0
+    pull_started_at = time.monotonic()
+    last_event_at = time.monotonic()
     received_event = False
+    pull_events: queue.Queue = queue.Queue()
 
-    for event in client.api.pull(
-        repository,
-        tag=tag,
-        stream=True,
-        decode=True,
-    ):
+    def consume_pull_events() -> None:
+        try:
+            for event in client.api.pull(
+                repository,
+                tag=tag,
+                stream=True,
+                decode=True,
+            ):
+                pull_events.put(("event", event))
+        except Exception as pull_error:
+            pull_events.put(("error", pull_error))
+        finally:
+            pull_events.put(("done", None))
+
+    pull_thread = threading.Thread(target=consume_pull_events, daemon=True)
+    pull_thread.start()
+
+    while True:
+        try:
+            event_type, payload = pull_events.get(timeout=DOCKER_PULL_HEARTBEAT_SECONDS)
+        except queue.Empty:
+            idle_seconds = int(time.monotonic() - last_event_at)
+            elapsed_seconds = int(time.monotonic() - pull_started_at)
+            elapsed_minutes, elapsed_remainder = divmod(elapsed_seconds, 60)
+            write_log(
+                "[docker] 이미지 다운로드 또는 압축 해제가 계속 진행 중입니다. "
+                f"전체 경과: {elapsed_minutes}분 {elapsed_remainder}초, "
+                f"마지막 Docker 응답: {idle_seconds}초 전"
+            )
+            continue
+
+        if event_type == "error":
+            raise payload
+
+        if event_type == "done":
+            break
+
+        event = payload
+
         if not isinstance(event, dict):
             continue
 
         received_event = True
+        last_event_at = time.monotonic()
         error_detail = event.get("errorDetail") or {}
         error_message = error_detail.get("message") or event.get("error")
 
@@ -296,10 +335,14 @@ def pull_docker_image_with_progress(client, image: str) -> None:
         if status:
             layer_statuses[layer_id] = status
 
+    pull_thread.join(timeout=1)
+
     if not received_event:
         write_log("[docker] 이미지 Pull 명령이 종료되었지만 진행 이벤트가 없었습니다.")
 
+    write_log("[docker] 모든 레이어 처리가 끝났습니다. 로컬 이미지 등록 상태를 확인합니다.")
     client.images.get(image)
+    write_log("[docker] 공식 Palworld 이미지가 Docker Engine에 정상 등록되었습니다.")
 
 
 def write_server_control_log(message: str) -> None:
@@ -1027,8 +1070,21 @@ def install_palworld_job() -> None:
             set_status("failed")
             return
 
+        write_log("공식 이미지 검증이 완료되었습니다.")
+        write_log("공식 런타임 helper 스크립트를 준비합니다.")
         ensure_official_runtime_files()
+        write_log(f"런타임 helper 준비 완료: {RUNTIME_HELPER_FILE}")
+
+        write_log(f"세이브 및 설정 디렉토리를 확인합니다: {SAVED_ROOT_DIR}")
+        config_existed = get_config_path().exists()
         create_default_config()
+
+        if config_existed:
+            write_log("기존 PalWorldSettings.ini를 유지합니다.")
+        else:
+            write_log(f"기본 PalWorldSettings.ini를 생성했습니다: {get_config_path()}")
+
+        write_log("설치 완료 정보를 기록합니다.")
 
         INSTALL_REQUEST_FILE.write_text(
             "TechTim Palworld Dedicated Server install completed.\n"
