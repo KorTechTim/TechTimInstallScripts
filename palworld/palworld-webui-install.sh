@@ -51,6 +51,41 @@ configure_timezone() {
   echo "Current time: $(date)"
 }
 
+allow_iptables_port() {
+  local chain="$1"
+  local protocol="$2"
+  local port="$3"
+
+  if ! iptables -nL "$chain" >/dev/null 2>&1; then
+    return
+  fi
+
+  if iptables -C "$chain" -p "$protocol" --dport "$port" -j ACCEPT >/dev/null 2>&1; then
+    echo "iptables rule already exists: $chain $protocol/$port"
+    return
+  fi
+
+  iptables -I "$chain" 1 -p "$protocol" --dport "$port" -j ACCEPT
+  echo "iptables rule added: $chain $protocol/$port"
+}
+
+configure_host_firewall() {
+  echo "Configuring host iptables rules for Palworld..."
+
+  if ! command -v iptables >/dev/null 2>&1; then
+    echo "WARNING: iptables command not found. Skipping host firewall rules."
+    return
+  fi
+
+  allow_iptables_port INPUT tcp 8080
+  allow_iptables_port INPUT udp 8211
+  allow_iptables_port INPUT tcp 25575
+
+  allow_iptables_port DOCKER-USER tcp 8080
+  allow_iptables_port DOCKER-USER udp 8211
+  allow_iptables_port DOCKER-USER tcp 25575
+}
+
 configure_timezone
 
 echo "======================================"
@@ -107,6 +142,7 @@ echo \
 apt-get update -y
 apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 systemctl enable --now docker
+configure_host_firewall
 
 echo "Docker installed."
 cd "$INSTALL_DIR"
