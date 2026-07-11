@@ -11,6 +11,7 @@ import os
 import re
 import secrets
 import shutil
+import threading
 import time
 import zipfile
 
@@ -55,6 +56,8 @@ SAVE_EXPORT_DIR = DATA_DIR / "uploads"
 AUTH_FILE = DATA_DIR / "auth.json"
 SESSIONS_FILE = DATA_DIR / "sessions.json"
 SESSION_COOKIE_NAME = "techtim_session"
+INSTALL_JOB_LOCK = threading.Lock()
+INSTALL_JOB_ACTIVE = False
 
 
 class LoginRequest(BaseModel):
@@ -247,6 +250,56 @@ def write_log(message: str) -> None:
 
     with INSTALL_LOG_FILE.open("a", encoding="utf-8") as f:
         f.write(f"[{now}] {clean_message}\n")
+
+
+def pull_docker_image_with_progress(client, image: str) -> None:
+    repository, tag = docker.utils.parse_repository_tag(image)
+    tag = tag or "latest"
+    layer_statuses: dict[str, str] = {}
+    last_progress_log = 0.0
+    received_event = False
+
+    for event in client.api.pull(
+        repository,
+        tag=tag,
+        stream=True,
+        decode=True,
+    ):
+        if not isinstance(event, dict):
+            continue
+
+        received_event = True
+        error_detail = event.get("errorDetail") or {}
+        error_message = error_detail.get("message") or event.get("error")
+
+        if error_message:
+            raise RuntimeError(str(error_message))
+
+        status = sanitize_log_text(event.get("status", "")).strip()
+        layer_id = str(event.get("id") or "image")
+        progress = sanitize_log_text(event.get("progress", "")).strip()
+        now = time.monotonic()
+        status_changed = bool(status) and layer_statuses.get(layer_id) != status
+        progress_due = bool(progress) and now - last_progress_log >= 5
+
+        if status_changed or progress_due:
+            message = f"[docker] {layer_id}: {status}" if status else f"[docker] {layer_id}"
+
+            if progress:
+                message += f" {progress}"
+
+            write_log(message)
+
+            if progress:
+                last_progress_log = now
+
+        if status:
+            layer_statuses[layer_id] = status
+
+    if not received_event:
+        write_log("[docker] 이미지 Pull 명령이 종료되었지만 진행 이벤트가 없었습니다.")
+
+    client.images.get(image)
 
 
 def write_server_control_log(message: str) -> None:
@@ -932,6 +985,11 @@ def require_server_stopped_for_file_write() -> None:
 
 
 def install_palworld_job() -> None:
+    global INSTALL_JOB_ACTIVE
+
+    with INSTALL_JOB_LOCK:
+        INSTALL_JOB_ACTIVE = True
+
     ensure_data_dirs()
 
     INSTALL_LOG_FILE.write_text("", encoding="utf-8")
@@ -950,9 +1008,10 @@ def install_palworld_job() -> None:
 
         for attempt in range(1, max_attempts + 1):
             write_log(f"공식 이미지 다운로드 시도 {attempt}/{max_attempts}")
+            write_log("최초 설치는 공식 서버 이미지 용량에 따라 수 분 이상 걸릴 수 있습니다.")
 
             try:
-                client.images.pull(PALWORLD_RUNTIME_IMAGE)
+                pull_docker_image_with_progress(client, PALWORLD_RUNTIME_IMAGE)
                 image_ready = True
                 write_log(f"공식 이미지 다운로드 시도 {attempt}/{max_attempts} 성공")
                 break
@@ -989,6 +1048,9 @@ def install_palworld_job() -> None:
     except Exception as e:
         write_log(f"ERROR: 설치 작업 중 예외 발생: {e}")
         set_status("failed")
+    finally:
+        with INSTALL_JOB_LOCK:
+            INSTALL_JOB_ACTIVE = False
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -2722,15 +2784,18 @@ def dashboard(request: Request):
 
 @app.post("/api/install")
 def request_install(request: Request, background_tasks: BackgroundTasks):
+    global INSTALL_JOB_ACTIVE
+
     require_auth(request)
 
-    current_status = get_status()
+    with INSTALL_JOB_LOCK:
+        if INSTALL_JOB_ACTIVE:
+            return {
+                "status": "running",
+                "message": "이미 설치 작업이 실행 중입니다.",
+            }
 
-    if current_status == "running":
-        return {
-            "status": "running",
-            "message": "이미 설치 작업이 실행 중입니다.",
-        }
+        INSTALL_JOB_ACTIVE = True
 
     background_tasks.add_task(install_palworld_job)
 
