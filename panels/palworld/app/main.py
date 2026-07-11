@@ -2882,10 +2882,10 @@ def start_server(request: Request):
 
         container = client.containers.run(
             PALWORLD_RUNTIME_IMAGE,
+            entrypoint=["/bin/bash"],
             command=[
-                "bash",
                 "-lc",
-                f"./PalServer.sh -port={effective_server_port} -useperfthreads -NoAsyncLoadingThread -UseMultithreadForDS",
+                f"exec ./PalServer.sh -port={effective_server_port} -useperfthreads -NoAsyncLoadingThread -UseMultithreadForDS",
             ],
             name=PALWORLD_SERVER_CONTAINER,
             working_dir="/server",
