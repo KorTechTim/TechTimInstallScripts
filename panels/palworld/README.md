@@ -25,7 +25,8 @@ ghcr.io/pocketpairjp/palserver:v1.0.0.100427
 
 자동 재시작 예약은 `/opt/techtim/palworld/data/restart-schedule.json`에
 저장됩니다. 예약 시각에 게임 서버가 중지 상태라면 서버를 자동으로
-시작하지 않고 해당 실행을 건너뜁니다.
+시작하지 않고 해당 실행을 건너뜁니다. 예약 설정은 게임 서버가 중지된
+상태에서만 변경할 수 있습니다.
 
 ## Local Docker Build
 

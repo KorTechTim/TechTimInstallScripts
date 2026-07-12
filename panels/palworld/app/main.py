@@ -1604,7 +1604,7 @@ def dashboard(request: Request):
     .config-body { transition: filter 0.2s ease, opacity 0.2s ease; }
     .config.locked { background: rgba(255, 255, 255, 0.66); }
     .config.locked .config-body { filter: blur(1.4px); opacity: 0.58; pointer-events: none; user-select: none; }
-    .config.locked .settings-hub-pane:first-child { filter: blur(1.2px); opacity: 0.58; pointer-events: none; user-select: none; }
+    .config.locked .settings-hub-pane { filter: blur(1.2px); opacity: 0.58; pointer-events: none; user-select: none; }
     .config h2 { margin: 0 0 16px; font-size: 22px; }
     .config-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
     .advanced-card { position: relative; margin-top: 18px; min-height: 152px; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,0.66); background: linear-gradient(90deg, rgba(8, 38, 48, 0.92), rgba(20, 81, 71, 0.48)), url("/static/palworld-settings-bg.png") center / cover no-repeat; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); color: #ffffff; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.12), 0 16px 34px rgba(7, 18, 26, 0.16); }
@@ -2220,7 +2220,8 @@ def dashboard(request: Request):
         "cfgRconPort",
         "configSaveBtn",
         "advancedSettingsBtn",
-        "advancedSaveBtn"
+        "advancedSaveBtn",
+        "restartSettingsBtn"
       ].forEach(function (id) {
         const element = document.getElementById(id);
         if (element) {
@@ -2235,6 +2236,10 @@ def dashboard(request: Request):
       document.querySelectorAll("[data-advanced-range]").forEach(function (element) {
         element.disabled = locked;
       });
+
+      if (locked) {
+        closeRestartScheduleSettings();
+      }
     }
 
     async function requestInstall() {
@@ -3339,6 +3344,12 @@ def get_restart_schedule(request: Request):
 @app.post("/api/restart-schedule")
 def save_restart_schedule(payload: RestartScheduleRequest, request: Request):
     require_auth(request)
+
+    if is_server_container_running():
+        raise HTTPException(
+            status_code=409,
+            detail="서버 실행 중에는 자동 재시작 예약을 변경할 수 없습니다. 서버를 중지한 뒤 다시 시도해주세요.",
+        )
 
     try:
         with RESTART_SCHEDULE_LOCK:
