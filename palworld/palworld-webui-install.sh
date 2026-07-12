@@ -155,6 +155,9 @@ server {
     server_name _;
 
     client_max_body_size 4096M;
+    client_body_timeout 3600s;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
 
     location / {
         proxy_pass http://palworld-panel:8080;

@@ -1,4 +1,4 @@
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -1205,6 +1205,30 @@ def validate_entry_name(name: str) -> str:
     return cleaned
 
 
+def resolve_folder_upload_target(target_dir: Path, relative_path: str) -> Path:
+    cleaned = str(relative_path or "").strip().replace("\\", "/")
+    parts = cleaned.split("/")
+
+    if (
+        not cleaned
+        or cleaned.startswith("/")
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
+        raise HTTPException(status_code=400, detail="폴더 업로드에 허용되지 않는 상대 경로가 포함되어 있습니다.")
+
+    try:
+        target_root = target_dir.resolve()
+        target = target_root.joinpath(*parts).resolve()
+    except (OSError, ValueError):
+        raise HTTPException(status_code=400, detail="폴더 업로드 경로를 처리할 수 없습니다.")
+
+    if target == target_root or not str(target).startswith(str(target_root) + os.sep):
+        raise HTTPException(status_code=400, detail="폴더 업로드 경로가 현재 폴더 밖을 가리킵니다.")
+
+    resolve_saved_path(saved_relative_path(target))
+    return target
+
+
 def file_entry(path: Path) -> dict:
     stat = path.stat()
 
@@ -1933,6 +1957,7 @@ def dashboard(request: Request):
       <button class="secondary" onclick="loadLog()">설치 로그 보기</button>
       <button class="secondary" onclick="openFileExplorer()">서버 디렉토리 탐색기</button>
       <input id="fileExplorerUploadInput" type="file" onchange="uploadExplorerFile()" style="display:none">
+      <input id="fileExplorerFolderUploadInput" type="file" webkitdirectory directory multiple onchange="uploadExplorerFolder()" style="display:none">
     </div>
 
     <div id="fileExplorerModal" class="modal-backdrop" aria-hidden="true">
@@ -1949,6 +1974,7 @@ def dashboard(request: Request):
               <button id="fileExplorerUpBtn" class="secondary" type="button" onclick="goFileExplorerParent()">상위 폴더</button>
               <button id="fileExplorerNewDirBtn" class="secondary" type="button" onclick="createExplorerDirectory()">폴더 생성</button>
               <button id="fileExplorerUploadBtn" type="button" onclick="triggerExplorerUpload()">파일 업로드</button>
+              <button id="fileExplorerFolderUploadBtn" type="button" onclick="triggerExplorerFolderUpload()">폴더 업로드</button>
             </div>
           </div>
           <table class="explorer-table">
@@ -2399,7 +2425,7 @@ def dashboard(request: Request):
 
     function setFileExplorerWriteLocked(locked) {
       fileExplorerLocked = locked;
-      ["fileExplorerNewDirBtn", "fileExplorerUploadBtn"].forEach(function (id) {
+      ["fileExplorerNewDirBtn", "fileExplorerUploadBtn", "fileExplorerFolderUploadBtn"].forEach(function (id) {
         const element = document.getElementById(id);
         if (element) {
           element.disabled = locked;
@@ -2410,7 +2436,7 @@ def dashboard(request: Request):
       if (note) {
         note.innerText = locked
           ? "서버 실행 중에는 안전을 위해 업로드, 삭제, 폴더 생성을 막습니다. 다운로드와 탐색은 가능합니다."
-          : "Saved 폴더 안에서만 탐색, 업로드, 다운로드, 삭제가 가능합니다.";
+          : "Saved 폴더 안에서 파일 또는 폴더 구조 전체를 업로드할 수 있습니다.";
       }
     }
 
@@ -2539,6 +2565,14 @@ def dashboard(request: Request):
       document.getElementById("fileExplorerUploadInput").click();
     }
 
+    function triggerExplorerFolderUpload() {
+      if (fileExplorerLocked) {
+        return;
+      }
+
+      document.getElementById("fileExplorerFolderUploadInput").click();
+    }
+
     async function uploadExplorerFile() {
       const input = document.getElementById("fileExplorerUploadInput");
 
@@ -2566,6 +2600,47 @@ def dashboard(request: Request):
         alert("파일 업로드 실패: " + err);
       } finally {
         input.value = "";
+      }
+    }
+
+    async function uploadExplorerFolder() {
+      const input = document.getElementById("fileExplorerFolderUploadInput");
+      const button = document.getElementById("fileExplorerFolderUploadBtn");
+      const note = document.getElementById("fileExplorerNote");
+
+      if (!input.files || input.files.length === 0) {
+        return;
+      }
+
+      const formData = new FormData();
+
+      Array.from(input.files).forEach(function (file) {
+        formData.append("files", file, file.name);
+        formData.append("relative_paths", file.webkitRelativePath || file.name);
+      });
+
+      button.disabled = true;
+      note.innerText = input.files.length + "개 파일이 포함된 폴더를 업로드하는 중입니다...";
+
+      try {
+        const response = await fetch("/api/files/upload-folder?path=" + encodeURIComponent(fileExplorerPath || ""), {
+          method: "POST",
+          body: formData
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+          alert(data.detail || "폴더 업로드 실패");
+          return;
+        }
+
+        note.innerText = data.message || "폴더 업로드가 완료되었습니다.";
+        await loadFileExplorer(fileExplorerPath);
+      } catch (err) {
+        alert("폴더 업로드 실패: " + err);
+      } finally {
+        input.value = "";
+        button.disabled = fileExplorerLocked;
       }
     }
 
@@ -3830,6 +3905,54 @@ async def upload_file(request: Request, path: str = "", file: UploadFile = File(
         "message": "파일 업로드가 완료되었습니다.",
         "path": saved_relative_path(target),
         "filename": filename,
+    }
+
+
+@app.post("/api/files/upload-folder")
+async def upload_folder(
+    request: Request,
+    path: str = "",
+    files: list[UploadFile] = File(...),
+    relative_paths: list[str] = Form(...),
+):
+    require_auth(request)
+    require_server_stopped_for_file_write()
+
+    target_dir = resolve_saved_path(path)
+
+    if not target_dir.exists() or not target_dir.is_dir():
+        raise HTTPException(status_code=404, detail="업로드할 폴더를 찾을 수 없습니다.")
+
+    if not files or len(files) != len(relative_paths):
+        raise HTTPException(status_code=400, detail="업로드 파일과 상대 경로 정보가 일치하지 않습니다.")
+
+    upload_targets: list[tuple[UploadFile, Path]] = []
+    seen_targets: set[Path] = set()
+
+    for upload, relative_path in zip(files, relative_paths):
+        target = resolve_folder_upload_target(target_dir, relative_path)
+
+        if target in seen_targets:
+            raise HTTPException(status_code=400, detail="폴더 업로드에 중복된 파일 경로가 포함되어 있습니다.")
+
+        seen_targets.add(target)
+        upload_targets.append((upload, target))
+
+    uploaded_paths = []
+
+    for upload, target in upload_targets:
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        with target.open("wb") as buffer:
+            shutil.copyfileobj(upload.file, buffer)
+
+        uploaded_paths.append(saved_relative_path(target))
+
+    return {
+        "status": "ok",
+        "message": f"폴더 업로드가 완료되었습니다. 파일 {len(uploaded_paths)}개",
+        "uploaded_count": len(uploaded_paths),
+        "paths": uploaded_paths,
     }
 
 
