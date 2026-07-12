@@ -1470,6 +1470,14 @@ def require_server_stopped_for_file_write() -> None:
         )
 
 
+def require_server_stopped_for_file_access() -> None:
+    if is_server_container_running():
+        raise HTTPException(
+            status_code=409,
+            detail="서버 실행 중에는 서버 디렉토리 탐색기를 사용할 수 없습니다. 서버를 중지한 뒤 다시 시도해주세요.",
+        )
+
+
 def install_palworld_job() -> None:
     global INSTALL_JOB_ACTIVE
 
@@ -1928,6 +1936,7 @@ def dashboard(request: Request):
     .panel-update-icon { display: grid; place-items: center; flex: 0 0 auto; width: 52px; height: 52px; border-radius: 10px; background: #e6f4ef; color: #0f766e; border: 1px solid #b7ddd1; }
     .panel-update-icon svg { width: 28px; height: 28px; }
     .panel-update-warning { display: block; min-width: 0; color: #b91c1c; font-size: 15px; font-weight: 800; line-height: 1.5; }
+    .panel-update-warning span { display: block; }
     .panel-update-status { min-height: 48px; padding: 14px 16px; border: 1px solid #dbe4ea; border-radius: 10px; background: #ffffff; color: #475569; font-size: 13px; line-height: 1.55; }
     .panel-update-status[data-status="completed"], .panel-update-status[data-status="not_required"] { border-color: #a7d8c7; background: #ecfdf5; color: #166534; }
     .panel-update-status[data-status="failed"] { border-color: #fecaca; background: #fef2f2; color: #b91c1c; }
@@ -2176,7 +2185,10 @@ def dashboard(request: Request):
                 <path d="M15 22H4a2 2 0 0 1-2-2V9" />
               </svg>
             </div>
-            <strong class="panel-update-warning">테크팀 웹패널 업그레이드 기능으로, 팰월드 서버 엔진 업데이트를 포함하지는 않습니다.</strong>
+            <strong class="panel-update-warning">
+              <span>테크팀 웹패널 업그레이드 기능으로,</span>
+              <span>팰월드 서버 엔진 업데이트를 포함하지는 않습니다.</span>
+            </strong>
           </div>
           <div id="panelUpdateStatus" class="panel-update-status" data-status="idle" role="status" aria-live="polite">업데이트 상태를 확인하고 있습니다.</div>
           <div class="panel-update-actions">
@@ -2255,7 +2267,7 @@ def dashboard(request: Request):
       <button class="secondary" onclick="restartServer()">서버 재시작</button>
       <button class="secondary" onclick="loadServerLog()">서버 로그 보기</button>
       <button class="secondary" onclick="loadLog()">설치 로그 보기</button>
-      <button class="secondary" onclick="openFileExplorer()">서버 디렉토리 탐색기</button>
+      <button id="fileExplorerBtn" class="secondary" onclick="openFileExplorer()">서버 디렉토리 탐색기</button>
       <input id="fileExplorerUploadInput" type="file" onchange="uploadExplorerFile()" style="display:none">
       <input id="fileExplorerFolderUploadInput" type="file" webkitdirectory directory multiple onchange="uploadExplorerFolder()" style="display:none">
     </div>
@@ -2743,6 +2755,12 @@ def dashboard(request: Request):
 
     function setFileExplorerWriteLocked(locked) {
       fileExplorerLocked = locked;
+      const explorerButton = document.getElementById("fileExplorerBtn");
+
+      if (explorerButton) {
+        explorerButton.disabled = locked;
+      }
+
       ["fileExplorerNewDirBtn", "fileExplorerUploadBtn", "fileExplorerFolderUploadBtn"].forEach(function (id) {
         const element = document.getElementById(id);
         if (element) {
@@ -2753,12 +2771,21 @@ def dashboard(request: Request):
       const note = document.getElementById("fileExplorerNote");
       if (note) {
         note.innerText = locked
-          ? "서버 실행 중에는 안전을 위해 업로드, 삭제, 폴더 생성을 막습니다. 다운로드와 탐색은 가능합니다."
+          ? "서버 실행 중에는 서버 디렉토리 탐색기를 사용할 수 없습니다."
           : "Saved 폴더 안에서 파일 또는 폴더 구조 전체를 업로드할 수 있습니다.";
+      }
+
+      if (locked) {
+        closeFileExplorer();
       }
     }
 
     async function openFileExplorer() {
+      if (fileExplorerLocked) {
+        alert("서버 실행 중에는 서버 디렉토리 탐색기를 사용할 수 없습니다.");
+        return;
+      }
+
       const modal = document.getElementById("fileExplorerModal");
       modal.classList.add("show");
       modal.setAttribute("aria-hidden", "false");
@@ -2968,6 +2995,19 @@ def dashboard(request: Request):
       document.getElementById("fileExplorerFolderUploadInput").click();
     }
 
+    async function applyUploadedConfig(data) {
+      if (!data || !data.config_updated) {
+        return;
+      }
+
+      fillConfig(data.config || {});
+      await loadWorlds();
+
+      const note = document.getElementById("fileExplorerNote");
+      note.innerText = "업로드한 PalWorldSettings.ini 설정을 화면에 반영했습니다.";
+      alert("업로드한 PalWorldSettings.ini 설정을 서버 설정에 반영했습니다.");
+    }
+
     async function uploadExplorerFile() {
       const input = document.getElementById("fileExplorerUploadInput");
 
@@ -2991,6 +3031,7 @@ def dashboard(request: Request):
         }
 
         await loadFileExplorer(fileExplorerPath);
+        await applyUploadedConfig(data);
       } catch (err) {
         alert("파일 업로드 실패: " + err);
       } finally {
@@ -3029,8 +3070,12 @@ def dashboard(request: Request):
           return;
         }
 
-        note.innerText = data.message || "폴더 업로드가 완료되었습니다.";
         await loadFileExplorer(fileExplorerPath);
+        await applyUploadedConfig(data);
+
+        if (!data.config_updated) {
+          note.innerText = data.message || "폴더 업로드가 완료되었습니다.";
+        }
       } catch (err) {
         alert("폴더 업로드 실패: " + err);
       } finally {
@@ -4430,6 +4475,7 @@ def server_log(request: Request):
 @app.get("/api/files")
 def list_files(request: Request, path: str = ""):
     require_auth(request)
+    require_server_stopped_for_file_access()
 
     target = resolve_saved_path(path)
 
@@ -4462,6 +4508,7 @@ def list_files(request: Request, path: str = ""):
 @app.get("/api/files/download")
 def download_file(request: Request, path: str):
     require_auth(request)
+    require_server_stopped_for_file_access()
 
     target = resolve_saved_path(path)
 
@@ -4477,6 +4524,7 @@ def download_file(request: Request, path: str):
 @app.post("/api/files/download-folders")
 def download_folders(payload: FileExplorerFolderDownloadRequest, request: Request):
     require_auth(request)
+    require_server_stopped_for_file_access()
 
     if not payload.paths:
         raise HTTPException(status_code=400, detail="다운로드할 폴더를 선택해주세요.")
@@ -4531,12 +4579,20 @@ async def upload_file(request: Request, path: str = "", file: UploadFile = File(
     with target.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    return {
+    config_updated = target == get_config_path().resolve()
+    response = {
         "status": "ok",
         "message": "파일 업로드가 완료되었습니다.",
         "path": saved_relative_path(target),
         "filename": filename,
+        "config_updated": config_updated,
     }
+
+    if config_updated:
+        response["message"] = "PalWorldSettings.ini 업로드 및 화면 반영이 완료되었습니다."
+        response["config"] = read_config()
+
+    return response
 
 
 @app.post("/api/files/upload-folder")
@@ -4579,12 +4635,20 @@ async def upload_folder(
 
         uploaded_paths.append(saved_relative_path(target))
 
-    return {
+    config_updated = any(target == get_config_path().resolve() for _, target in upload_targets)
+    response = {
         "status": "ok",
         "message": f"폴더 업로드가 완료되었습니다. 파일 {len(uploaded_paths)}개",
         "uploaded_count": len(uploaded_paths),
         "paths": uploaded_paths,
+        "config_updated": config_updated,
     }
+
+    if config_updated:
+        response["message"] = f"폴더 업로드 및 PalWorldSettings.ini 화면 반영이 완료되었습니다. 파일 {len(uploaded_paths)}개"
+        response["config"] = read_config()
+
+    return response
 
 
 @app.post("/api/files/mkdir")
