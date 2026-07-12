@@ -9,6 +9,7 @@ Palworld Dedicated Server를 GCP VM에서 관리하기 위한 TechTim Web UI 패
 - Pocketpair 공식 Palworld 1.0 Docker 이미지 기반 엔진 설치
 - PalWorldSettings.ini 조회/저장
 - 서버 시작/중지/재시작/상태/로그 조회
+- 매일 지정한 KST 시각에 실행 중인 게임 서버 컨테이너 자동 재시작
 - 설치 로그와 서버 로그 자동 갱신 및 자동 스크롤
 - Pal/Saved 서버 디렉토리 탐색기
 
@@ -21,6 +22,10 @@ ghcr.io/pocketpairjp/palserver:v1.0.0.100427
 설정과 세이브는 호스트의
 `/opt/techtim/palworld/data/server/Pal/Saved`에 유지되며, 공식 컨테이너의
 `/pal/Package/Pal/Saved`에 마운트됩니다.
+
+자동 재시작 예약은 `/opt/techtim/palworld/data/restart-schedule.json`에
+저장됩니다. 예약 시각에 게임 서버가 중지 상태라면 서버를 자동으로
+시작하지 않고 해당 실행을 건너뜁니다.
 
 ## Local Docker Build
 

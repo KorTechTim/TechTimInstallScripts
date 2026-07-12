@@ -2,7 +2,7 @@ from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, Resp
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 import hashlib
@@ -48,6 +48,7 @@ INSTALL_REQUEST_FILE = DATA_DIR / "install-request.txt"
 INSTALL_LOG_FILE = DATA_DIR / "install.log"
 INSTALL_STATUS_FILE = DATA_DIR / "install-status.txt"
 SERVER_CONTROL_LOG_FILE = DATA_DIR / "server-control.log"
+RESTART_SCHEDULE_FILE = DATA_DIR / "restart-schedule.json"
 RUNTIME_HELPER_FILE = DATA_DIR / "palworld-runtime-helper.sh"
 HOST_RUNTIME_HELPER_FILE = HOST_DATA_DIR / "palworld-runtime-helper.sh"
 
@@ -60,6 +61,10 @@ SESSIONS_FILE = DATA_DIR / "sessions.json"
 SESSION_COOKIE_NAME = "techtim_session"
 INSTALL_JOB_LOCK = threading.Lock()
 INSTALL_JOB_ACTIVE = False
+RESTART_SCHEDULE_LOCK = threading.RLock()
+RESTART_SCHEDULER_STOP = threading.Event()
+RESTART_SCHEDULER_THREAD: threading.Thread | None = None
+KST = timezone(timedelta(hours=9), name="KST")
 
 
 class LoginRequest(BaseModel):
@@ -81,6 +86,11 @@ class ConfigRequest(BaseModel):
     RCONEnabled: bool = False
     RCONPort: int = RCON_PORT
     AdvancedOptions: dict[str, Any] = Field(default_factory=dict)
+
+
+class RestartScheduleRequest(BaseModel):
+    enabled: bool = False
+    restart_time: str = "04:00"
 
 
 class FileExplorerCreateDirRequest(BaseModel):
@@ -375,6 +385,180 @@ def clear_server_control_log() -> None:
         SERVER_CONTROL_LOG_FILE.write_text("", encoding="utf-8")
     except OSError:
         pass
+
+
+def default_restart_schedule() -> dict:
+    return {
+        "enabled": False,
+        "restart_time": "04:00",
+        "last_run_date": "",
+        "last_run_at": "",
+        "last_result": "not_run",
+        "last_message": "",
+    }
+
+
+def normalize_restart_time(value: str) -> str:
+    normalized = str(value or "").strip()
+
+    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", normalized):
+        raise ValueError("재시작 시간은 HH:MM 형식으로 입력해주세요.")
+
+    return normalized
+
+
+def load_restart_schedule() -> dict:
+    ensure_data_dirs()
+
+    with RESTART_SCHEDULE_LOCK:
+        schedule = default_restart_schedule()
+
+        if RESTART_SCHEDULE_FILE.exists():
+            try:
+                stored = json.loads(RESTART_SCHEDULE_FILE.read_text(encoding="utf-8"))
+                if isinstance(stored, dict):
+                    schedule.update(stored)
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        try:
+            schedule["restart_time"] = normalize_restart_time(schedule.get("restart_time", "04:00"))
+        except ValueError:
+            schedule["restart_time"] = "04:00"
+
+        schedule["enabled"] = bool(schedule.get("enabled", False))
+        return schedule
+
+
+def persist_restart_schedule(schedule: dict) -> dict:
+    ensure_data_dirs()
+    normalized = default_restart_schedule()
+    normalized.update(schedule)
+    normalized["enabled"] = bool(normalized.get("enabled", False))
+    normalized["restart_time"] = normalize_restart_time(normalized.get("restart_time", "04:00"))
+
+    with RESTART_SCHEDULE_LOCK:
+        temporary_path = RESTART_SCHEDULE_FILE.with_suffix(".tmp")
+        temporary_path.write_text(
+            json.dumps(normalized, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        temporary_path.replace(RESTART_SCHEDULE_FILE)
+
+    return normalized
+
+
+def restart_schedule_response(schedule: dict | None = None) -> dict:
+    current = schedule or load_restart_schedule()
+    next_run = ""
+
+    if current.get("enabled"):
+        hour, minute = (int(part) for part in current["restart_time"].split(":"))
+        now = datetime.now(KST)
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+        is_due_minute = now.strftime("%H:%M") == current["restart_time"]
+        has_run_today = current.get("last_run_date") == now.date().isoformat()
+
+        if target <= now and (not is_due_minute or has_run_today):
+            target += timedelta(days=1)
+
+        next_run = target.isoformat(timespec="minutes")
+
+    return {
+        **current,
+        "timezone": "Asia/Seoul",
+        "next_run_at": next_run,
+    }
+
+
+def update_restart_schedule_result(result: str, message: str) -> None:
+    with RESTART_SCHEDULE_LOCK:
+        schedule = load_restart_schedule()
+        schedule["last_result"] = result
+        schedule["last_message"] = message
+        persist_restart_schedule(schedule)
+
+
+def run_scheduled_restart_if_due() -> None:
+    now = datetime.now(KST)
+
+    with RESTART_SCHEDULE_LOCK:
+        schedule = load_restart_schedule()
+
+        if not schedule.get("enabled") or now.strftime("%H:%M") != schedule["restart_time"]:
+            return
+
+        today = now.date().isoformat()
+
+        if schedule.get("last_run_date") == today:
+            return
+
+        schedule["last_run_date"] = today
+        schedule["last_run_at"] = now.isoformat(timespec="seconds")
+        schedule["last_result"] = "running"
+        schedule["last_message"] = "예약 재시작을 처리하는 중입니다."
+        persist_restart_schedule(schedule)
+
+    try:
+        client = docker.from_env()
+
+        try:
+            container = client.containers.get(PALWORLD_SERVER_CONTAINER)
+        except docker.errors.NotFound:
+            message = "예약 시간이 되었지만 게임 서버 컨테이너가 없어 재시작을 건너뛰었습니다."
+            write_server_control_log(message)
+            update_restart_schedule_result("skipped", message)
+            return
+
+        container.reload()
+
+        if container.status != "running" or not server_container_uses_official_runtime(container):
+            message = "예약 시간이 되었지만 게임 서버가 실행 중이 아니어서 재시작을 건너뛰었습니다."
+            write_server_control_log(message)
+            update_restart_schedule_result("skipped", message)
+            return
+
+        write_server_control_log(
+            f"KST {schedule['restart_time']} 예약에 따라 Palworld 게임 서버 컨테이너를 재시작합니다."
+        )
+        container.restart(timeout=15)
+        message = "예약된 Palworld 게임 서버 컨테이너 재시작이 완료되었습니다."
+        write_server_control_log(message)
+        update_restart_schedule_result("success", message)
+    except Exception as error:
+        message = f"예약 재시작 중 오류가 발생했습니다: {error}"
+        write_server_control_log(message)
+        update_restart_schedule_result("error", message)
+
+
+def restart_scheduler_loop() -> None:
+    while not RESTART_SCHEDULER_STOP.wait(5):
+        run_scheduled_restart_if_due()
+
+
+@app.on_event("startup")
+def start_restart_scheduler() -> None:
+    global RESTART_SCHEDULER_THREAD
+
+    if RESTART_SCHEDULER_THREAD and RESTART_SCHEDULER_THREAD.is_alive():
+        return
+
+    RESTART_SCHEDULER_STOP.clear()
+    RESTART_SCHEDULER_THREAD = threading.Thread(
+        target=restart_scheduler_loop,
+        name="palworld-restart-scheduler",
+        daemon=True,
+    )
+    RESTART_SCHEDULER_THREAD.start()
+
+
+@app.on_event("shutdown")
+def stop_restart_scheduler() -> None:
+    RESTART_SCHEDULER_STOP.set()
+
+    if RESTART_SCHEDULER_THREAD and RESTART_SCHEDULER_THREAD.is_alive():
+        RESTART_SCHEDULER_THREAD.join(timeout=6)
 
 
 def set_status(status: str) -> None:
@@ -1420,10 +1604,13 @@ def dashboard(request: Request):
     .config-body { transition: filter 0.2s ease, opacity 0.2s ease; }
     .config.locked { background: rgba(255, 255, 255, 0.66); }
     .config.locked .config-body { filter: blur(1.4px); opacity: 0.58; pointer-events: none; user-select: none; }
+    .config.locked .settings-hub-pane:first-child { filter: blur(1.2px); opacity: 0.58; pointer-events: none; user-select: none; }
     .config h2 { margin: 0 0 16px; font-size: 22px; }
     .config-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
-    .advanced-card { position: relative; margin-top: 18px; min-height: 132px; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,0.66); background: linear-gradient(90deg, rgba(8, 38, 48, 0.9), rgba(20, 81, 71, 0.44)), url("/static/palworld-settings-bg.png") center / cover no-repeat; display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; gap: 24px; padding: 22px 28px; color: #ffffff; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.12), 0 16px 34px rgba(7, 18, 26, 0.16); }
+    .advanced-card { position: relative; margin-top: 18px; min-height: 152px; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,0.66); background: linear-gradient(90deg, rgba(8, 38, 48, 0.92), rgba(20, 81, 71, 0.48)), url("/static/palworld-settings-bg.png") center / cover no-repeat; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); color: #ffffff; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.12), 0 16px 34px rgba(7, 18, 26, 0.16); }
     .advanced-card::before { content: ""; position: absolute; inset: 8px; border-radius: 10px; border: 1px solid rgba(125, 211, 252, 0.44); background: linear-gradient(90deg, rgba(34,211,238,0.22), transparent 26%, transparent 76%, rgba(74,222,128,0.28)); pointer-events: none; }
+    .settings-hub-pane { position: relative; z-index: 1; min-width: 0; display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; gap: 20px; padding: 26px 28px; }
+    .settings-hub-pane + .settings-hub-pane { border-left: 1px solid rgba(255,255,255,0.28); background: linear-gradient(90deg, rgba(5,44,47,0.18), rgba(13,71,64,0.32)); }
     .advanced-copy { position: relative; z-index: 1; min-width: 0; padding-left: 22px; }
     .advanced-copy::before { content: ""; position: absolute; left: 0; top: 4px; bottom: 4px; width: 4px; border-radius: 999px; background: linear-gradient(180deg, #67e8f9, #a7f3d0 52%, #fde68a); box-shadow: 0 0 18px rgba(103,232,249,0.58); }
     .advanced-title { font-size: 20px; font-weight: bold; margin-bottom: 6px; }
@@ -1431,7 +1618,9 @@ def dashboard(request: Request):
     .advanced-button { position: relative; z-index: 1; display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; width: 96px; height: 96px; border-radius: 20px; padding: 10px; background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(226,252,247,0.94)); color: #0f766e; border: 1px solid rgba(255,255,255,0.92); box-shadow: 0 18px 38px rgba(0,0,0,0.3), inset 0 0 0 1px rgba(15,118,110,0.2); }
     .advanced-button:hover { transform: translateY(-1px); box-shadow: 0 20px 42px rgba(0,0,0,0.34), inset 0 0 0 1px rgba(15,118,110,0.28); }
     .advanced-button img { width: 46px; height: 46px; display: block; object-fit: cover; border-radius: 12px; }
+    .advanced-button svg { width: 44px; height: 44px; display: block; padding: 8px; border-radius: 12px; background: linear-gradient(145deg, #0f766e, #155e75); color: #ffffff; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.24); }
     .advanced-button-label { color: #0f3f3d; font-size: 12px; font-weight: bold; line-height: 1; }
+    .restart-hub-summary { display: block; margin-top: 7px; color: #a7f3d0; font-size: 12px; font-weight: bold; }
     .modal-backdrop { position: fixed; inset: 0; z-index: 100; display: none; align-items: center; justify-content: center; padding: 24px; background: rgba(10, 18, 28, 0.62); }
     .modal-backdrop.show { display: flex; }
     .modal { width: min(1060px, 100%); max-height: min(86vh, 900px); overflow: hidden; border-radius: 16px; border: 1px solid rgba(255,255,255,0.45); background: rgba(255,255,255,0.96); box-shadow: 0 28px 90px rgba(0,0,0,0.45); display: flex; flex-direction: column; }
@@ -1439,6 +1628,20 @@ def dashboard(request: Request):
     .modal-head h2 { margin: 0; font-size: 22px; }
     .modal-close { width: 40px; height: 40px; border-radius: 50%; padding: 0; background: #111827; color: #fff; }
     .modal-body { overflow: auto; padding: 20px; }
+    .restart-modal { width: min(620px, 100%); }
+    .restart-modal-body { display: grid; gap: 18px; padding: 24px; background: linear-gradient(145deg, rgba(240,253,250,0.98), rgba(239,246,255,0.98)); }
+    .restart-modal-intro { display: grid; grid-template-columns: 54px minmax(0, 1fr); align-items: center; gap: 14px; padding: 16px; border: 1px solid #bae6d3; border-radius: 12px; background: rgba(255,255,255,0.82); }
+    .restart-modal-intro-icon { display: grid; place-items: center; width: 54px; height: 54px; border-radius: 10px; background: #0f766e; color: #ffffff; }
+    .restart-modal-intro-icon svg { width: 30px; height: 30px; }
+    .restart-modal-intro strong { display: block; margin-bottom: 4px; color: #134e4a; }
+    .restart-modal-intro p { margin: 0; color: #64748b; font-size: 13px; line-height: 1.45; }
+    .restart-modal-controls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 1fr); gap: 14px; }
+    .restart-modal-field { min-height: 84px; padding: 14px; border: 1px solid #d1d5db; border-radius: 12px; background: #ffffff; }
+    .restart-toggle { display: flex; align-items: center; gap: 9px; height: 100%; margin: 0; font-size: 15px; }
+    .restart-toggle input { width: 18px; height: 18px; margin: 0; }
+    .restart-time-field input { margin-top: 8px; }
+    .restart-schedule-status { min-height: 20px; padding: 12px 14px; border-radius: 10px; background: #e6f4ef; color: #315f55; font-size: 12px; line-height: 1.5; }
+    .restart-save-wrap { position: relative; display: inline-flex; }
     .explorer-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
     .explorer-path { min-width: 220px; padding: 10px 12px; border-radius: 10px; background: #eef2f7; color: #1f2937; font-family: Consolas, Monaco, monospace; font-size: 13px; }
     .explorer-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
@@ -1490,7 +1693,9 @@ def dashboard(request: Request):
       .topbar { align-items: flex-start; flex-direction: column; }
       .top-links { justify-content: flex-start; }
       .grid, .config-grid { grid-template-columns: 1fr; }
-      .advanced-card { grid-template-columns: 86px minmax(0, 1fr); gap: 16px; padding: 18px; }
+      .advanced-card { grid-template-columns: 1fr; }
+      .settings-hub-pane { grid-template-columns: 86px minmax(0, 1fr); gap: 16px; padding: 22px 20px; }
+      .settings-hub-pane + .settings-hub-pane { border-left: 0; border-top: 1px solid rgba(255,255,255,0.28); }
       .advanced-grid { grid-template-columns: 1fr; }
       button { width: 100%; }
       .advanced-button { width: 86px; height: 86px; }
@@ -1499,6 +1704,9 @@ def dashboard(request: Request):
       .save-bubble { max-width: calc(100% - 24px); white-space: normal; }
       .help::after { right: auto; left: 50%; transform: translate(-50%, 4px); max-width: min(220px, calc(100vw - 48px)); }
       .help:hover::after, .help:focus::after { transform: translate(-50%, 0); }
+      .restart-modal-controls { grid-template-columns: 1fr; }
+      .restart-modal-intro { grid-template-columns: 46px minmax(0, 1fr); }
+      .restart-modal-intro-icon { width: 46px; height: 46px; }
     }
   </style>
 </head>
@@ -1625,17 +1833,34 @@ def dashboard(request: Request):
             <div id="configSaveBubble" class="save-bubble" role="status" aria-live="polite">설정이 저장되었습니다.</div>
           </div>
         </div>
+      </div>
         <div class="advanced-card">
-          <button id="advancedSettingsBtn" class="advanced-button" type="button" onclick="openAdvancedSettings()" title="상세 설정 열기" aria-label="상세 설정 열기">
-            <img src="/static/palworld-settings-icon.png" alt="">
-            <span class="advanced-button-label">설정하기</span>
-          </button>
-          <div class="advanced-copy">
-            <div class="advanced-title">Palworld 상세 서버 설정</div>
-            <div class="advanced-subtitle">경험치, 포획률, 낮/밤 속도, 알 부화 시간, 전투 배율, 월드 규칙을 팝업에서 조정합니다.</div>
+          <div class="settings-hub-pane">
+            <button id="advancedSettingsBtn" class="advanced-button" type="button" onclick="openAdvancedSettings()" title="상세 설정 열기" aria-label="상세 설정 열기">
+              <img src="/static/palworld-settings-icon.png" alt="">
+              <span class="advanced-button-label">설정하기</span>
+            </button>
+            <div class="advanced-copy">
+              <div class="advanced-title">Palworld 상세 서버 설정</div>
+              <div class="advanced-subtitle">경험치, 포획률, 낮/밤 속도, 알 부화 시간, 전투 배율과 월드 규칙을 조정합니다.</div>
+            </div>
+          </div>
+          <div class="settings-hub-pane">
+            <button id="restartSettingsBtn" class="advanced-button" type="button" onclick="openRestartScheduleSettings()" title="자동 재시작 설정 열기" aria-label="자동 재시작 설정 열기">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M20 11a8 8 0 1 0-2.34 5.66" />
+                <path d="M20 5v6h-6" />
+                <path d="M12 7v5l3 2" />
+              </svg>
+              <span class="advanced-button-label">예약설정</span>
+            </button>
+            <div class="advanced-copy">
+              <div class="advanced-title">게임 서버 자동 재시작</div>
+              <div class="advanced-subtitle">매일 지정한 한국표준 시각에 실행 중인 게임 서버 컨테이너만 재시작합니다.</div>
+              <span id="restartScheduleSummary" class="restart-hub-summary">예약 정보 확인 중</span>
+            </div>
           </div>
         </div>
-      </div>
     </div>
 
     <div id="advancedModal" class="modal-backdrop" aria-hidden="true">
@@ -1650,6 +1875,50 @@ def dashboard(request: Request):
           <div class="advanced-save-wrap">
             <button id="advancedSaveBtn" type="button" onclick="saveConfig({ source: 'advanced' })">설정 저장</button>
             <div id="advancedSaveBubble" class="save-bubble" role="status" aria-live="polite">저장완료</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="restartScheduleModal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal restart-modal" role="dialog" aria-modal="true" aria-labelledby="restartScheduleModalTitle">
+        <div class="modal-head">
+          <h2 id="restartScheduleModalTitle">게임 서버 자동 재시작</h2>
+          <button class="modal-close" type="button" onclick="closeRestartScheduleSettings()" title="닫기" aria-label="닫기">×</button>
+        </div>
+        <div class="restart-modal-body">
+          <div class="restart-modal-intro">
+            <div class="restart-modal-intro-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M20 11a8 8 0 1 0-2.34 5.66" />
+                <path d="M20 5v6h-6" />
+                <path d="M12 7v5l3 2" />
+              </svg>
+            </div>
+            <div>
+              <strong>Palworld 게임 컨테이너 예약 관리</strong>
+              <p>서버가 실행 중일 때만 재시작하며, 중지 상태에서는 자동으로 기동하지 않습니다.</p>
+            </div>
+          </div>
+          <div class="restart-modal-controls">
+            <div class="restart-modal-field">
+              <label class="restart-toggle" for="restartScheduleEnabled">
+                <input id="restartScheduleEnabled" type="checkbox">
+                <span>매일 자동 재시작 사용</span>
+              </label>
+            </div>
+            <label class="restart-modal-field restart-time-field">
+              <span>재시작 시각 (KST)</span>
+              <input id="restartScheduleTime" type="time" value="04:00" step="60">
+            </label>
+          </div>
+          <div id="restartScheduleStatus" class="restart-schedule-status">예약 정보를 불러오는 중입니다.</div>
+        </div>
+        <div class="modal-foot">
+          <button class="secondary" type="button" onclick="closeRestartScheduleSettings()">취소</button>
+          <div class="restart-save-wrap">
+            <button id="restartScheduleSaveBtn" type="button" onclick="saveRestartSchedule()">예약 저장</button>
+            <div id="restartScheduleSaveBubble" class="save-bubble" role="status" aria-live="polite">저장완료</div>
           </div>
         </div>
       </div>
@@ -2654,6 +2923,121 @@ def dashboard(request: Request):
       showSaveBubble("advancedSaveBubble", 1000, closeAdvancedSettings);
     }
 
+    let restartScheduleSaveBubbleTimer = null;
+
+    function showRestartScheduleSaveBubble() {
+      const bubble = document.getElementById("restartScheduleSaveBubble");
+
+      window.clearTimeout(restartScheduleSaveBubbleTimer);
+      bubble.classList.add("show");
+      restartScheduleSaveBubbleTimer = window.setTimeout(function () {
+        bubble.classList.remove("show");
+        closeRestartScheduleSettings();
+      }, 1000);
+    }
+
+    async function openRestartScheduleSettings() {
+      await loadRestartSchedule(true);
+      const modal = document.getElementById("restartScheduleModal");
+      modal.classList.add("show");
+      modal.setAttribute("aria-hidden", "false");
+    }
+
+    function closeRestartScheduleSettings() {
+      const modal = document.getElementById("restartScheduleModal");
+      modal.classList.remove("show");
+      modal.setAttribute("aria-hidden", "true");
+    }
+
+    function restartScheduleResultLabel(result) {
+      const labels = {
+        not_run: "실행 기록 없음",
+        running: "처리 중",
+        success: "재시작 완료",
+        skipped: "서버 중지 상태로 건너뜀",
+        error: "재시작 오류"
+      };
+      return labels[result] || result || "실행 기록 없음";
+    }
+
+    function renderRestartSchedule(schedule, fillControls) {
+      const enabled = Boolean(schedule && schedule.enabled);
+      const restartTime = (schedule && schedule.restart_time) || "04:00";
+      const summary = document.getElementById("restartScheduleSummary");
+
+      if (summary) {
+        summary.innerText = enabled ? "매일 " + restartTime + " KST" : "자동 재시작 꺼짐";
+      }
+
+      if (fillControls !== false) {
+        document.getElementById("restartScheduleEnabled").checked = enabled;
+        document.getElementById("restartScheduleTime").value = restartTime;
+      }
+
+      const status = document.getElementById("restartScheduleStatus");
+
+      if (!enabled) {
+        status.innerText = "자동 재시작이 비활성화되어 있습니다.";
+        return;
+      }
+
+      const nextRun = schedule.next_run_at
+        ? schedule.next_run_at.replace("T", " ").slice(0, 16) + " KST"
+        : "계산 중";
+      const lastResult = restartScheduleResultLabel(schedule.last_result);
+      const lastRun = schedule.last_run_at
+        ? schedule.last_run_at.replace("T", " ").slice(0, 19) + " KST"
+        : "없음";
+
+      status.innerText = "다음 재시작: " + nextRun + " · 마지막 결과: " + lastResult + " (" + lastRun + ")";
+    }
+
+    async function loadRestartSchedule(fillControls) {
+      try {
+        const response = await fetch("/api/restart-schedule");
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.detail || "예약 조회 실패");
+        }
+
+        renderRestartSchedule(data.schedule || {}, fillControls);
+      } catch (err) {
+        document.getElementById("restartScheduleStatus").innerText = "예약 조회 실패: " + err;
+        document.getElementById("restartScheduleSummary").innerText = "예약 조회 오류";
+      }
+    }
+
+    async function saveRestartSchedule() {
+      const button = document.getElementById("restartScheduleSaveBtn");
+      const payload = {
+        enabled: document.getElementById("restartScheduleEnabled").checked,
+        restart_time: document.getElementById("restartScheduleTime").value || "04:00"
+      };
+
+      button.disabled = true;
+
+      try {
+        const response = await fetch("/api/restart-schedule", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.detail || "예약 저장 실패");
+        }
+
+        renderRestartSchedule(data.schedule || {}, true);
+        showRestartScheduleSaveBubble();
+      } catch (err) {
+        document.getElementById("restartScheduleStatus").innerText = "예약 저장 실패: " + err;
+      } finally {
+        button.disabled = false;
+      }
+    }
+
     function readConfigForm() {
       return {
         ServerName: document.getElementById("cfgServerName").value.trim() || "TechTim Palworld Server",
@@ -2832,6 +3216,7 @@ def dashboard(request: Request):
 
       currentLogMode = shouldShowServerLog ? "server" : "install";
       await loadConfig();
+      await loadRestartSchedule(true);
 
       if (shouldShowServerLog) {
         await loadServerLog();
@@ -2843,6 +3228,7 @@ def dashboard(request: Request):
     setInterval(loadStatus, 2000);
     setInterval(loadServerStatus, 2000);
     setInterval(refreshCurrentLog, 2000);
+    setInterval(function () { loadRestartSchedule(false); }, 30000);
 
     initializeDashboard();
   </script>
@@ -2939,6 +3325,44 @@ def get_config(request: Request):
         "exists": get_config_path().exists(),
         "config": read_config(),
     }
+
+
+@app.get("/api/restart-schedule")
+def get_restart_schedule(request: Request):
+    require_auth(request)
+    return {
+        "status": "ok",
+        "schedule": restart_schedule_response(),
+    }
+
+
+@app.post("/api/restart-schedule")
+def save_restart_schedule(payload: RestartScheduleRequest, request: Request):
+    require_auth(request)
+
+    try:
+        with RESTART_SCHEDULE_LOCK:
+            schedule = load_restart_schedule()
+            previous_enabled = schedule.get("enabled", False)
+            previous_time = schedule.get("restart_time", "04:00")
+            schedule["enabled"] = payload.enabled
+            schedule["restart_time"] = normalize_restart_time(payload.restart_time)
+
+            if schedule["enabled"] and (
+                not previous_enabled or schedule["restart_time"] != previous_time
+            ):
+                schedule["last_run_date"] = ""
+
+            saved = persist_restart_schedule(schedule)
+
+        state = "활성화" if saved["enabled"] else "비활성화"
+        return {
+            "status": "ok",
+            "message": f"게임 서버 자동 재시작이 {state}되었습니다.",
+            "schedule": restart_schedule_response(saved),
+        }
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
 
 
 @app.get("/api/worlds")
