@@ -181,6 +181,9 @@ services:
       - GAME_CODE=${GAME_CODE}
       - INSTALL_CODE=${INSTALL_CODE}
       - PANEL_VERSION=${PANEL_VERSION}
+      - PANEL_CONTAINER_NAME=palworld-panel
+      - PANEL_PROXY_CONTAINER=palworld-panel-proxy
+      - PANEL_IMAGE=${PANEL_IMAGE}
       - DATA_DIR=/data
       - HOST_DATA_DIR=${INSTALL_DIR}/data
       - PALWORLD_RUNTIME_IMAGE=ghcr.io/pocketpairjp/palserver:latest

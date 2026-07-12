@@ -36,6 +36,9 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 HOST_DATA_DIR = Path(os.getenv("HOST_DATA_DIR", "/opt/techtim/palworld/data"))
 
 PALWORLD_SERVER_CONTAINER = os.getenv("PALWORLD_SERVER_CONTAINER", "palworld-server")
+PANEL_CONTAINER_NAME = os.getenv("PANEL_CONTAINER_NAME", "palworld-panel")
+PANEL_PROXY_CONTAINER = os.getenv("PANEL_PROXY_CONTAINER", "palworld-panel-proxy")
+PANEL_IMAGE = os.getenv("PANEL_IMAGE", "ghcr.io/kortechtim/palworld-panel:latest")
 PALWORLD_RUNTIME_IMAGE = os.getenv(
     "PALWORLD_UPDATE_IMAGE",
     "ghcr.io/pocketpairjp/palserver:latest",
@@ -49,6 +52,7 @@ INSTALL_REQUEST_FILE = DATA_DIR / "install-request.txt"
 INSTALL_LOG_FILE = DATA_DIR / "install.log"
 INSTALL_STATUS_FILE = DATA_DIR / "install-status.txt"
 INSTALL_RESULT_FILE = DATA_DIR / "install-result.txt"
+PANEL_UPDATE_STATUS_FILE = DATA_DIR / "panel-update-status.json"
 SERVER_CONTROL_LOG_FILE = DATA_DIR / "server-control.log"
 RESTART_SCHEDULE_FILE = DATA_DIR / "restart-schedule.json"
 RUNTIME_HELPER_FILE = DATA_DIR / "palworld-runtime-helper.sh"
@@ -63,6 +67,8 @@ SESSIONS_FILE = DATA_DIR / "sessions.json"
 SESSION_COOKIE_NAME = "techtim_session"
 INSTALL_JOB_LOCK = threading.Lock()
 INSTALL_JOB_ACTIVE = False
+PANEL_UPDATE_LOCK = threading.Lock()
+PANEL_UPDATE_ACTIVE = False
 RESTART_SCHEDULE_LOCK = threading.RLock()
 RESTART_SCHEDULER_STOP = threading.Event()
 RESTART_SCHEDULER_THREAD: threading.Thread | None = None
@@ -585,6 +591,146 @@ def get_install_result() -> str:
         return INSTALL_RESULT_FILE.read_text(encoding="utf-8").strip()
     except OSError:
         return ""
+
+
+def default_panel_update_status() -> dict:
+    return {
+        "status": "idle",
+        "message": "TechTim 구동기 업데이트를 확인할 수 있습니다.",
+        "current_image_id": "",
+        "latest_image_id": "",
+        "updated_at": "",
+    }
+
+
+def write_panel_update_status(status: str, message: str, **details) -> dict:
+    ensure_data_dirs()
+    payload = default_panel_update_status()
+    payload.update(details)
+    payload.update({
+        "status": status,
+        "message": message,
+        "updated_at": datetime.now(KST).isoformat(timespec="seconds"),
+    })
+    temporary_path = PANEL_UPDATE_STATUS_FILE.with_suffix(".tmp")
+    temporary_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary_path.replace(PANEL_UPDATE_STATUS_FILE)
+    return payload
+
+
+def read_panel_update_status() -> dict:
+    if not PANEL_UPDATE_STATUS_FILE.exists():
+        return default_panel_update_status()
+
+    try:
+        stored = json.loads(PANEL_UPDATE_STATUS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default_panel_update_status()
+
+    if not isinstance(stored, dict):
+        return default_panel_update_status()
+
+    status = default_panel_update_status()
+    status.update(stored)
+    return status
+
+
+def is_panel_updater_running() -> bool:
+    try:
+        client = docker.from_env()
+        updater = client.containers.get(f"{PANEL_CONTAINER_NAME}-updater")
+        updater.reload()
+        return updater.status in {"created", "running", "restarting"}
+    except docker.errors.NotFound:
+        return False
+    except Exception:
+        return False
+
+
+def panel_update_job() -> None:
+    global PANEL_UPDATE_ACTIVE
+
+    try:
+        write_panel_update_status(
+            "checking",
+            "현재 TechTim 구동기 이미지와 최신 이미지를 비교하고 있습니다.",
+        )
+        client = docker.from_env()
+        current_container = client.containers.get(PANEL_CONTAINER_NAME)
+        current_container.reload()
+        current_image_id = current_container.image.id
+
+        write_panel_update_status(
+            "downloading",
+            "최신 TechTim 구동기 이미지를 확인하고 있습니다. 이미지 다운로드에는 시간이 걸릴 수 있습니다.",
+            current_image_id=current_image_id,
+        )
+        latest_image = client.images.pull(PANEL_IMAGE)
+        latest_image_id = latest_image.id
+
+        if current_image_id == latest_image_id:
+            write_panel_update_status(
+                "not_required",
+                "이미 최신 버전의 TechTim 구동기를 사용하고 있어 업데이트가 필요하지 않습니다.",
+                current_image_id=current_image_id,
+                latest_image_id=latest_image_id,
+            )
+            return
+
+        updater_name = f"{PANEL_CONTAINER_NAME}-updater"
+
+        try:
+            stale_updater = client.containers.get(updater_name)
+            stale_updater.reload()
+
+            if stale_updater.status == "running":
+                raise RuntimeError("이미 TechTim 구동기 교체 작업이 실행 중입니다.")
+
+            stale_updater.remove(force=True)
+        except docker.errors.NotFound:
+            pass
+
+        write_panel_update_status(
+            "restarting",
+            "최신 이미지 다운로드가 완료되었습니다. 패널 컨테이너를 교체하고 있습니다.",
+            current_image_id=current_image_id,
+            latest_image_id=latest_image_id,
+        )
+        client.containers.run(
+            PANEL_IMAGE,
+            command=["python", "-m", "app.self_update"],
+            name=updater_name,
+            detach=True,
+            auto_remove=True,
+            environment={
+                "TARGET_CONTAINER": PANEL_CONTAINER_NAME,
+                "PROXY_CONTAINER": PANEL_PROXY_CONTAINER,
+                "TARGET_IMAGE": PANEL_IMAGE,
+                "PANEL_UPDATE_STATUS_FILE": "/update-data/panel-update-status.json",
+                "PANEL_UPDATE_DELAY_SECONDS": "2",
+            },
+            volumes={
+                "/var/run/docker.sock": {
+                    "bind": "/var/run/docker.sock",
+                    "mode": "rw",
+                },
+                str(HOST_DATA_DIR): {
+                    "bind": "/update-data",
+                    "mode": "rw",
+                },
+            },
+        )
+    except Exception as error:
+        write_panel_update_status(
+            "failed",
+            f"TechTim 구동기 업데이트에 실패했습니다: {error}",
+        )
+    finally:
+        with PANEL_UPDATE_LOCK:
+            PANEL_UPDATE_ACTIVE = False
 
 
 def get_status() -> str:
@@ -1714,6 +1860,8 @@ def dashboard(request: Request):
     .top-link:hover { background: #f3f4f6; border-color: #9ca3af; }
     .top-link img { display: block; width: 20px; height: 20px; opacity: 0.86; }
     .top-link svg { display: block; width: 21px; height: 21px; }
+    .top-update { color: #52606d; }
+    .top-update:hover { color: #0f766e; }
     .top-logout { color: #374151; }
     .top-logout:hover { color: #111827; }
     .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 24px; }
@@ -1775,6 +1923,16 @@ def dashboard(request: Request):
     .restart-time-field input { margin-top: 8px; }
     .restart-schedule-status { min-height: 20px; padding: 12px 14px; border-radius: 10px; background: #e6f4ef; color: #315f55; font-size: 12px; line-height: 1.5; }
     .restart-save-wrap { position: relative; display: inline-flex; }
+    .panel-update-modal { width: min(560px, 100%); }
+    .panel-update-body { display: grid; gap: 18px; padding: 24px; background: #f8fafc; }
+    .panel-update-intro { display: flex; align-items: center; gap: 14px; }
+    .panel-update-icon { display: grid; place-items: center; flex: 0 0 auto; width: 52px; height: 52px; border-radius: 10px; background: #e6f4ef; color: #0f766e; border: 1px solid #b7ddd1; }
+    .panel-update-icon svg { width: 28px; height: 28px; }
+    .panel-update-intro strong { display: block; color: #153e3a; font-size: 16px; }
+    .panel-update-status { min-height: 48px; padding: 14px 16px; border: 1px solid #dbe4ea; border-radius: 10px; background: #ffffff; color: #475569; font-size: 13px; line-height: 1.55; }
+    .panel-update-status[data-status="completed"], .panel-update-status[data-status="not_required"] { border-color: #a7d8c7; background: #ecfdf5; color: #166534; }
+    .panel-update-status[data-status="failed"] { border-color: #fecaca; background: #fef2f2; color: #b91c1c; }
+    .panel-update-actions { display: flex; justify-content: flex-end; gap: 10px; }
     .explorer-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
     .explorer-path { min-width: 220px; padding: 10px 12px; border-radius: 10px; background: #eef2f7; color: #1f2937; font-family: Consolas, Monaco, monospace; font-size: 13px; }
     .explorer-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
@@ -1856,6 +2014,12 @@ def dashboard(request: Request):
         <a class="top-link" href="https://www.youtube.com/@kortechtim" target="_blank" rel="noopener noreferrer" title="유튜브채널 접속" aria-label="유튜브채널 접속">
           <img src="https://cdn.simpleicons.org/youtube/FF0000" alt="">
         </a>
+        <button class="top-link top-update" type="button" onclick="openPanelUpdateModal()" title="TechTim 구동기 업데이트" aria-label="TechTim 구동기 업데이트">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 9 19.37a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.63 15a1.7 1.7 0 0 0-1.55-1H3v-4h.08A1.7 1.7 0 0 0 4.63 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.63h.01A1.7 1.7 0 0 0 10 3.08V3h4v.08a1.7 1.7 0 0 0 1.03 1.55 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.37 9v.01A1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z" />
+          </svg>
+        </button>
         <button class="top-link top-logout" type="button" onclick="logout()" title="로그아웃" aria-label="로그아웃">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M5 21V5a2 2 0 0 1 2-2h7" />
@@ -1998,6 +2162,32 @@ def dashboard(request: Request):
         </div>
     </div>
 
+    <div id="panelUpdateModal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal panel-update-modal" role="dialog" aria-modal="true" aria-labelledby="panelUpdateModalTitle">
+        <div class="modal-head">
+          <h2 id="panelUpdateModalTitle">TechTim 구동기 업데이트</h2>
+          <button class="modal-close" type="button" onclick="closePanelUpdateModal()" title="닫기" aria-label="닫기">×</button>
+        </div>
+        <div class="panel-update-body">
+          <div class="panel-update-intro">
+            <div class="panel-update-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M20 7h-5V2" />
+                <path d="M20 2 9.5 12.5" />
+                <path d="M15 22H4a2 2 0 0 1-2-2V9" />
+              </svg>
+            </div>
+            <strong>TechTim Palworld Server Panel</strong>
+          </div>
+          <div id="panelUpdateStatus" class="panel-update-status" data-status="idle" role="status" aria-live="polite">업데이트 상태를 확인하고 있습니다.</div>
+          <div class="panel-update-actions">
+            <button class="secondary" type="button" onclick="closePanelUpdateModal()">닫기</button>
+            <button id="panelUpdateBtn" type="button" onclick="requestPanelUpdate()">업데이트 확인 및 설치</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div id="advancedModal" class="modal-backdrop" aria-hidden="true">
       <div class="modal" role="dialog" aria-modal="true" aria-labelledby="advancedModalTitle">
         <div class="modal-head">
@@ -2115,6 +2305,9 @@ def dashboard(request: Request):
     let advancedOptions = {};
     let gameServerIsRunning = false;
     let pendingUpdateResult = false;
+    let panelUpdateRequested = false;
+    let panelUpdatePollTimer = null;
+    let panelUpdateReloadScheduled = false;
 
     const advancedOptionGroups = [
       {
@@ -3498,6 +3691,114 @@ def dashboard(request: Request):
       }
     }
 
+    function openPanelUpdateModal() {
+      const modal = document.getElementById("panelUpdateModal");
+      modal.classList.add("show");
+      modal.setAttribute("aria-hidden", "false");
+      loadPanelUpdateStatus();
+    }
+
+    function closePanelUpdateModal() {
+      const modal = document.getElementById("panelUpdateModal");
+      modal.classList.remove("show");
+      modal.setAttribute("aria-hidden", "true");
+    }
+
+    function schedulePanelUpdateStatus(delay) {
+      if (panelUpdatePollTimer) {
+        window.clearTimeout(panelUpdatePollTimer);
+      }
+
+      panelUpdatePollTimer = window.setTimeout(loadPanelUpdateStatus, delay || 2000);
+    }
+
+    async function loadPanelUpdateStatus() {
+      const statusBox = document.getElementById("panelUpdateStatus");
+      const updateButton = document.getElementById("panelUpdateBtn");
+
+      try {
+        const response = await fetch("/api/panel/update/status", { cache: "no-store" });
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.detail || "업데이트 상태 조회 실패");
+        }
+
+        const status = (data.status || "idle").toLowerCase();
+        const active = ["checking", "downloading", "restarting", "running", "started"].includes(status);
+        statusBox.dataset.status = status;
+        statusBox.innerText = data.message || "업데이트 상태를 확인할 수 없습니다.";
+        updateButton.disabled = active;
+        updateButton.innerText = active ? "업데이트 진행 중" : "업데이트 확인 및 설치";
+
+        if (panelUpdateRequested && status === "not_required") {
+          panelUpdateRequested = false;
+          alert("이미 최신 버전의 TechTim 구동기를 사용하고 있어 업데이트가 필요하지 않습니다.");
+        } else if (panelUpdateRequested && status === "failed") {
+          panelUpdateRequested = false;
+          alert(data.message || "TechTim 구동기 업데이트에 실패했습니다.");
+        }
+
+        if (panelUpdateRequested && status === "completed" && !panelUpdateReloadScheduled) {
+          panelUpdateRequested = false;
+          panelUpdateReloadScheduled = true;
+          statusBox.innerText = "TechTim 구동기 업데이트가 완료되었습니다. 화면을 새로고침합니다.";
+          window.setTimeout(function () { window.location.reload(); }, 1800);
+          return;
+        }
+
+        if (active) {
+          schedulePanelUpdateStatus(2000);
+        }
+      } catch (err) {
+        if (panelUpdateRequested) {
+          statusBox.dataset.status = "restarting";
+          statusBox.innerText = "패널 컨테이너를 교체하고 있습니다. 잠시 후 자동으로 다시 연결합니다.";
+          updateButton.disabled = true;
+          updateButton.innerText = "업데이트 진행 중";
+          schedulePanelUpdateStatus(1800);
+        } else {
+          statusBox.dataset.status = "failed";
+          statusBox.innerText = "업데이트 상태 조회 실패: " + err;
+        }
+      }
+    }
+
+    async function requestPanelUpdate() {
+      const statusBox = document.getElementById("panelUpdateStatus");
+      const updateButton = document.getElementById("panelUpdateBtn");
+
+      if (!window.confirm("TechTim 구동기를 확인하고 필요하면 패널 컨테이너를 업데이트할까요?")) {
+        return;
+      }
+
+      panelUpdateRequested = true;
+      panelUpdateReloadScheduled = false;
+      updateButton.disabled = true;
+      updateButton.innerText = "업데이트 확인 중";
+      statusBox.dataset.status = "checking";
+      statusBox.innerText = "TechTim 구동기 업데이트 확인을 요청하고 있습니다.";
+
+      try {
+        const response = await fetch("/api/panel/update", { method: "POST" });
+        const data = await response.json();
+
+        if (!response.ok) {
+          panelUpdateRequested = false;
+          throw new Error(data.detail || "업데이트 요청 실패");
+        }
+
+        statusBox.innerText = data.message || "업데이트 확인을 시작했습니다.";
+        schedulePanelUpdateStatus(700);
+      } catch (err) {
+        panelUpdateRequested = false;
+        updateButton.disabled = false;
+        updateButton.innerText = "업데이트 확인 및 설치";
+        statusBox.dataset.status = "failed";
+        statusBox.innerText = "TechTim 구동기 업데이트 요청 실패: " + err;
+      }
+    }
+
     async function logout() {
       try {
         await fetch("/api/auth/logout", {
@@ -3598,6 +3899,52 @@ def install_log(request: Request):
         "status": get_status(),
         "log": sanitize_log_text(INSTALL_LOG_FILE.read_text(encoding="utf-8")),
     }
+
+
+@app.post("/api/panel/update")
+def request_panel_update(request: Request, background_tasks: BackgroundTasks):
+    global PANEL_UPDATE_ACTIVE
+
+    require_auth(request)
+    current_status = read_panel_update_status()
+
+    if current_status.get("status") in {"checking", "downloading", "restarting"}:
+        if PANEL_UPDATE_ACTIVE or is_panel_updater_running():
+            return {
+                "status": current_status.get("status"),
+                "message": current_status.get("message"),
+            }
+
+        write_panel_update_status(
+            "failed",
+            "이전에 중단된 구동기 업데이트 작업을 정리했습니다. 업데이트를 다시 시작합니다.",
+        )
+
+    with PANEL_UPDATE_LOCK:
+        if PANEL_UPDATE_ACTIVE:
+            return {
+                "status": "running",
+                "message": "이미 TechTim 구동기 업데이트 작업이 실행 중입니다.",
+            }
+
+        PANEL_UPDATE_ACTIVE = True
+
+    write_panel_update_status(
+        "checking",
+        "TechTim 구동기 업데이트 확인 작업을 시작합니다.",
+    )
+    background_tasks.add_task(panel_update_job)
+
+    return {
+        "status": "started",
+        "message": "TechTim 구동기 업데이트 확인을 시작했습니다.",
+    }
+
+
+@app.get("/api/panel/update/status")
+def panel_update_status(request: Request):
+    require_auth(request)
+    return read_panel_update_status()
 
 
 @app.get("/api/docker/status")
