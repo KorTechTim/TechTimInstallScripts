@@ -120,7 +120,6 @@ def ensure_data_dirs() -> None:
     (DATA_DIR / "backups").mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "uploads").mkdir(parents=True, exist_ok=True)
     SAVED_ROOT_DIR.mkdir(parents=True, exist_ok=True)
-    SAVED_WORLDS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def ensure_official_runtime_files() -> None:
@@ -2874,7 +2873,7 @@ def dashboard(request: Request):
         deleteButton.type = "button";
         deleteButton.innerText = "삭제";
         deleteButton.disabled = fileExplorerLocked;
-        deleteButton.onclick = function () { deleteExplorerEntry(entry.path); };
+        deleteButton.onclick = function () { deleteExplorerEntry(entry.path, entry.type); };
         actionCell.appendChild(deleteButton);
 
         row.appendChild(actionCell);
@@ -3070,8 +3069,12 @@ def dashboard(request: Request):
       }
     }
 
-    async function deleteExplorerEntry(path) {
-      if (fileExplorerLocked || !window.confirm("선택한 항목을 삭제할까요?")) {
+    async function deleteExplorerEntry(path, entryType) {
+      const confirmMessage = entryType === "dir"
+        ? "이 폴더와 모든 하위 폴더 및 파일을 완전히 삭제할까요?"
+        : "이 파일을 완전히 삭제할까요?";
+
+      if (fileExplorerLocked || !window.confirm(confirmMessage)) {
         return;
       }
 
@@ -3088,6 +3091,7 @@ def dashboard(request: Request):
           return;
         }
 
+        alert(data.message || "삭제되었습니다.");
         await loadFileExplorer(fileExplorerPath);
       } catch (err) {
         alert("삭제 실패: " + err);
@@ -4618,17 +4622,19 @@ def delete_file_entry(payload: FileExplorerDeleteRequest, request: Request):
     if not target.exists():
         raise HTTPException(status_code=404, detail="삭제할 항목을 찾을 수 없습니다.")
 
-    if target.is_dir():
-        try:
-            target.rmdir()
-        except OSError:
-            raise HTTPException(status_code=400, detail="비어 있지 않은 폴더는 삭제할 수 없습니다.")
-    else:
-        target.unlink()
+    target_is_directory = target.is_dir()
+
+    try:
+        if target_is_directory:
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+    except OSError as error:
+        raise HTTPException(status_code=500, detail=f"항목 삭제 중 오류가 발생했습니다: {error}")
 
     return {
         "status": "ok",
-        "message": "삭제되었습니다.",
+        "message": "폴더와 하위 항목이 삭제되었습니다." if target_is_directory else "파일이 삭제되었습니다.",
         "path": payload.path,
     }
 
