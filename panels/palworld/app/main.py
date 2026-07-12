@@ -36,8 +36,8 @@ HOST_DATA_DIR = Path(os.getenv("HOST_DATA_DIR", "/opt/techtim/palworld/data"))
 
 PALWORLD_SERVER_CONTAINER = os.getenv("PALWORLD_SERVER_CONTAINER", "palworld-server")
 PALWORLD_RUNTIME_IMAGE = os.getenv(
-    "PALWORLD_RUNTIME_IMAGE",
-    "ghcr.io/pocketpairjp/palserver:v1.0.0.100427",
+    "PALWORLD_UPDATE_IMAGE",
+    "ghcr.io/pocketpairjp/palserver:latest",
 )
 SERVER_PORT = int(os.getenv("SERVER_PORT", "8211"))
 RCON_PORT = int(os.getenv("RCON_PORT", "25575"))
@@ -55,6 +55,7 @@ HOST_RUNTIME_HELPER_FILE = HOST_DATA_DIR / "palworld-runtime-helper.sh"
 SAVED_ROOT_DIR = DATA_DIR / "server" / "Pal" / "Saved"
 SAVED_WORLDS_DIR = SAVED_ROOT_DIR / "SaveGames"
 SAVE_EXPORT_DIR = DATA_DIR / "uploads"
+UPDATE_BACKUP_DIR = DATA_DIR / "backups"
 
 AUTH_FILE = DATA_DIR / "auth.json"
 SESSIONS_FILE = DATA_DIR / "sessions.json"
@@ -588,6 +589,16 @@ def has_official_runtime_install_marker() -> bool:
     )
 
 
+def has_any_official_runtime_install_marker() -> bool:
+    if not INSTALL_REQUEST_FILE.exists():
+        return False
+
+    try:
+        return "distribution=pocketpair-official-docker" in INSTALL_REQUEST_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
 def get_effective_install_status() -> str:
     status = get_status()
 
@@ -1114,7 +1125,7 @@ def is_server_container_running() -> bool:
         client = docker.from_env()
         container = client.containers.get(PALWORLD_SERVER_CONTAINER)
         container.reload()
-        return container.status == "running" and server_container_uses_official_runtime(container)
+        return container.status in {"running", "restarting", "paused"}
     except docker.errors.NotFound:
         return False
     except Exception:
@@ -1249,6 +1260,23 @@ def require_server_stopped_for_file_write() -> None:
         )
 
 
+def create_server_update_backup() -> Path | None:
+    ensure_data_dirs()
+
+    if not SAVED_ROOT_DIR.exists() or not any(SAVED_ROOT_DIR.iterdir()):
+        return None
+
+    UPDATE_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(KST).strftime("%Y%m%d-%H%M%S")
+    archive_base = UPDATE_BACKUP_DIR / f"palworld-before-update-{timestamp}"
+    archive_path = Path(shutil.make_archive(
+        base_name=str(archive_base),
+        format="zip",
+        root_dir=str(SAVED_ROOT_DIR),
+    ))
+    return archive_path
+
+
 def install_palworld_job() -> None:
     global INSTALL_JOB_ACTIVE
 
@@ -1256,24 +1284,48 @@ def install_palworld_job() -> None:
         INSTALL_JOB_ACTIVE = True
 
     ensure_data_dirs()
+    is_update = has_any_official_runtime_install_marker()
 
     INSTALL_LOG_FILE.write_text("", encoding="utf-8")
     set_status("running")
 
-    write_log("Palworld Dedicated Server 설치 작업을 시작합니다.")
-    write_log("Pocketpair 공식 Palworld 1.0 Docker 이미지를 사용합니다.")
+    operation_name = "서버 업데이트" if is_update else "최초 엔진 설치"
+    write_log(f"Palworld Dedicated Server {operation_name} 작업을 시작합니다.")
+    write_log("Pocketpair 공식 Palworld Docker 이미지의 latest 태그를 사용합니다.")
     write_log(f"공식 런타임 이미지: {PALWORLD_RUNTIME_IMAGE}")
 
     try:
+        if is_update and is_server_container_running():
+            write_log("ERROR: 게임 서버 실행 중에는 업데이트할 수 없습니다. 서버를 중지한 뒤 다시 시도해주세요.")
+            set_status("completed")
+            return
+
         client = docker.from_env()
         write_log("Docker Engine 연결 성공.")
+
+        previous_image_id = ""
+
+        try:
+            previous_image_id = client.images.get(PALWORLD_RUNTIME_IMAGE).id
+            write_log(f"현재 latest 이미지 ID: {previous_image_id}")
+        except docker.errors.ImageNotFound:
+            write_log("로컬에 latest 이미지가 없어 새로 다운로드합니다.")
+
+        if is_update:
+            write_log("업데이트 전 Saved 폴더 백업을 시작합니다.")
+            backup_path = create_server_update_backup()
+
+            if backup_path:
+                write_log(f"업데이트 전 백업 완료: {backup_path}")
+            else:
+                write_log("백업할 Saved 데이터가 없어 백업 파일 생성을 건너뜁니다.")
 
         max_attempts = 3
         image_ready = False
 
         for attempt in range(1, max_attempts + 1):
             write_log(f"공식 이미지 다운로드 시도 {attempt}/{max_attempts}")
-            write_log("최초 설치는 공식 서버 이미지 용량에 따라 수 분 이상 걸릴 수 있습니다.")
+            write_log("공식 서버 이미지 용량에 따라 수 분 이상 걸릴 수 있습니다.")
 
             try:
                 pull_docker_image_with_progress(client, PALWORLD_RUNTIME_IMAGE)
@@ -1289,8 +1341,18 @@ def install_palworld_job() -> None:
         if not image_ready:
             write_log(f"ERROR: 공식 Palworld 이미지를 {max_attempts}회 모두 다운로드하지 못했습니다.")
             write_log("GHCR 연결 상태와 Docker Engine 로그를 확인해주세요.")
-            set_status("failed")
+            set_status("completed" if is_update else "failed")
             return
+
+        installed_image = client.images.get(PALWORLD_RUNTIME_IMAGE)
+        installed_image_id = installed_image.id
+
+        if is_update and previous_image_id and previous_image_id == installed_image_id:
+            write_log("현재 서버 엔진이 이미 Pocketpair 공식 최신 버전입니다.")
+        elif is_update:
+            write_log(f"새로운 서버 엔진 이미지로 업데이트되었습니다: {installed_image_id}")
+        else:
+            write_log(f"서버 엔진 이미지 설치 완료: {installed_image_id}")
 
         write_log("공식 이미지 검증이 완료되었습니다.")
         write_log("공식 런타임 helper 스크립트를 준비합니다.")
@@ -1306,26 +1368,27 @@ def install_palworld_job() -> None:
         else:
             write_log(f"기본 PalWorldSettings.ini를 생성했습니다: {get_config_path()}")
 
-        write_log("설치 완료 정보를 기록합니다.")
+        write_log(f"{operation_name} 완료 정보를 기록합니다.")
 
         INSTALL_REQUEST_FILE.write_text(
-            "TechTim Palworld Dedicated Server install completed.\n"
+            "TechTim Palworld Dedicated Server install or update completed.\n"
             f"game={GAME_CODE}\n"
             f"panel_version={PANEL_VERSION}\n"
             "distribution=pocketpair-official-docker\n"
             f"runtime_image={PALWORLD_RUNTIME_IMAGE}\n"
+            f"runtime_image_id={installed_image_id}\n"
             f"completed_at={datetime.now().isoformat(timespec='seconds')}\n",
             encoding="utf-8",
         )
 
-        write_log("Pocketpair 공식 Palworld 1.0 서버 이미지 설치가 완료되었습니다.")
+        write_log(f"Pocketpair 공식 Palworld 서버 {operation_name}가 완료되었습니다.")
         write_log(f"세이브 및 설정 경로: {SAVED_ROOT_DIR}")
-        write_log("이제 Web GUI에서 PalWorldSettings.ini를 저장하고 서버를 시작할 수 있습니다.")
+        write_log("Web GUI에서 서버를 시작하면 최신 이미지로 게임 컨테이너가 생성됩니다.")
         set_status("completed")
 
     except Exception as e:
-        write_log(f"ERROR: 설치 작업 중 예외 발생: {e}")
-        set_status("failed")
+        write_log(f"ERROR: {operation_name} 작업 중 예외 발생: {e}")
+        set_status("completed" if is_update else "failed")
     finally:
         with INSTALL_JOB_LOCK:
             INSTALL_JOB_ACTIVE = False
@@ -2001,6 +2064,7 @@ def dashboard(request: Request):
   <script>
     let currentLogMode = "install";
     let advancedOptions = {};
+    let gameServerIsRunning = false;
 
     const advancedOptionGroups = [
       {
@@ -2190,7 +2254,9 @@ def dashboard(request: Request):
     }
 
     function isRunningStatus(status) {
-      return (status || "").toLowerCase() === "running";
+      return ["running", "restarting", "paused", "starting", "started"].includes(
+        (status || "").toLowerCase()
+      );
     }
 
     function displayInstallStatus(status) {
@@ -2202,7 +2268,7 @@ def dashboard(request: Request):
         running: "설치 중",
         pending: "대기 중",
         not_started: "설치 전",
-        update_required: "1.0 설치 필요",
+        update_required: "업데이트 필요",
         failed: "설치 실패",
         error: "오류"
       };
@@ -2230,6 +2296,7 @@ def dashboard(request: Request):
     }
 
     function setConfigLocked(locked) {
+      gameServerIsRunning = locked;
       const section = document.getElementById("configSection");
       if (section) {
         section.classList.toggle("locked", locked);
@@ -2247,7 +2314,8 @@ def dashboard(request: Request):
         "configSaveBtn",
         "advancedSettingsBtn",
         "advancedSaveBtn",
-        "restartSettingsBtn"
+        "restartSettingsBtn",
+        "installBtn"
       ].forEach(function (id) {
         const element = document.getElementById(id);
         if (element) {
@@ -2271,10 +2339,13 @@ def dashboard(request: Request):
     async function requestInstall() {
       const btn = document.getElementById("installBtn");
       const result = document.getElementById("result");
+      const isUpdate = btn.dataset.operation === "update";
 
       currentLogMode = "install";
       btn.disabled = true;
-      result.innerText = "Palworld 엔진 설치 작업을 시작하는 중입니다...";
+      result.innerText = isUpdate
+        ? "Palworld 서버 엔진 업데이트를 시작하는 중입니다..."
+        : "Palworld 엔진 설치 작업을 시작하는 중입니다...";
 
       try {
         const response = await fetch("/api/install", {
@@ -2284,7 +2355,7 @@ def dashboard(request: Request):
         const data = await response.json();
 
         if (!response.ok) {
-          result.innerText = "오류: " + (data.detail || "설치 요청 실패");
+          result.innerText = "오류: " + (data.detail || (isUpdate ? "업데이트 요청 실패" : "설치 요청 실패"));
           return;
         }
 
@@ -2295,7 +2366,7 @@ def dashboard(request: Request):
       } catch (err) {
         result.innerText = "요청 실패: " + err;
       } finally {
-        btn.disabled = false;
+        await loadStatus();
       }
     }
 
@@ -3245,8 +3316,13 @@ def dashboard(request: Request):
       try {
         const response = await fetch("/api/install/status");
         const data = await response.json();
+        const installButton = document.getElementById("installBtn");
+        const installRunning = ["running", "installing", "started", "pending"].includes((data.status || "").toLowerCase());
         document.getElementById("installStatus").innerText = displayInstallStatus(data.status);
         updateInstallStatusIcon(data.status);
+        installButton.innerText = data.installed ? "서버 업데이트" : "엔진 설치";
+        installButton.dataset.operation = data.installed ? "update" : "install";
+        installButton.disabled = installRunning || gameServerIsRunning;
       } catch (err) {
         document.getElementById("installStatus").innerText = displayInstallStatus("error");
         updateInstallStatusIcon("error");
@@ -3324,6 +3400,14 @@ def request_install(request: Request, background_tasks: BackgroundTasks):
 
     require_auth(request)
 
+    is_update = has_any_official_runtime_install_marker()
+
+    if is_update and is_server_container_running():
+        raise HTTPException(
+            status_code=409,
+            detail="서버 실행 중에는 엔진을 업데이트할 수 없습니다. 서버를 중지한 뒤 다시 시도해주세요.",
+        )
+
     with INSTALL_JOB_LOCK:
         if INSTALL_JOB_ACTIVE:
             return {
@@ -3337,7 +3421,8 @@ def request_install(request: Request, background_tasks: BackgroundTasks):
 
     return {
         "status": "started",
-        "message": "설치 시작",
+        "message": "서버 업데이트 시작" if is_update else "엔진 설치 시작",
+        "operation": "update" if is_update else "install",
     }
 
 
@@ -3347,6 +3432,8 @@ def install_status(request: Request):
 
     return {
         "status": get_effective_install_status(),
+        "installed": has_any_official_runtime_install_marker(),
+        "runtime_image": PALWORLD_RUNTIME_IMAGE,
     }
 
 
@@ -3509,7 +3596,7 @@ def start_server(request: Request):
         if get_effective_install_status() != "completed":
             return {
                 "status": "error",
-                "message": "공식 Palworld 서버 이미지가 설치되지 않았습니다. 먼저 엔진 설치를 진행해주세요.",
+                "message": "공식 Palworld 최신 서버 이미지가 준비되지 않았습니다. 서버 업데이트를 먼저 진행해주세요.",
             }
 
         ensure_official_runtime_files()
@@ -3564,7 +3651,7 @@ def start_server(request: Request):
             write_server_control_log("공식 Palworld 서버 이미지가 없어 시작을 중단했습니다.")
             return {
                 "status": "install_required",
-                "message": "공식 Palworld 1.0 이미지가 없습니다. 엔진 설치를 먼저 진행해주세요.",
+                "message": "공식 Palworld 최신 이미지가 없습니다. 서버 업데이트를 먼저 진행해주세요.",
             }
 
         ports = {
@@ -3777,10 +3864,19 @@ def server_status(request: Request):
                 container.reload()
 
                 if not server_container_uses_official_runtime(container):
+                    if container.status in {"running", "restarting", "paused"}:
+                        return {
+                            "status": "running",
+                            "container": container.name,
+                            "update_available": True,
+                            "message": "이전 버전 서버가 실행 중입니다. 서버를 중지한 뒤 서버 업데이트를 진행해주세요.",
+                        }
+
                     return {
                         "status": "outdated",
                         "container": container.name,
-                        "message": "이전 Palworld 런타임 컨테이너입니다. 서버 시작 또는 재시작을 누르면 공식 1.0 이미지로 교체됩니다.",
+                        "update_available": True,
+                        "message": "이전 Palworld 런타임 컨테이너입니다. 서버 업데이트를 진행해주세요.",
                     }
 
                 return {

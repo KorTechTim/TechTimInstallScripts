@@ -7,16 +7,18 @@ Palworld Dedicated Server를 GCP VM에서 관리하기 위한 TechTim Web UI 패
 - FastAPI 기반 Web UI
 - admin/admin 최초 로그인 및 비밀번호 변경 강제
 - Pocketpair 공식 Palworld 1.0 Docker 이미지 기반 엔진 설치
+- 최초 설치 후 `엔진 설치` 버튼을 `서버 업데이트`로 전환하고 공식 latest 이미지 Pull
+- 업데이트 전 Saved 폴더 자동 ZIP 백업
 - PalWorldSettings.ini 조회/저장
 - 서버 시작/중지/재시작/상태/로그 조회
 - 매일 지정한 KST 시각에 실행 중인 게임 서버 컨테이너 자동 재시작
 - 설치 로그와 서버 로그 자동 갱신 및 자동 스크롤
 - Pal/Saved 서버 디렉토리 탐색기와 파일/폴더 구조 업로드
 
-게임 서버 런타임 이미지는 다음 공식 버전으로 고정합니다.
+게임 서버 런타임 이미지는 Pocketpair 공식 최신 태그를 사용합니다.
 
 ```text
-ghcr.io/pocketpairjp/palserver:v1.0.0.100427
+ghcr.io/pocketpairjp/palserver:latest
 ```
 
 설정과 세이브는 호스트의
