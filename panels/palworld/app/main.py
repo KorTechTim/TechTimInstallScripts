@@ -2903,11 +2903,8 @@ def dashboard(request: Request):
         return;
       }
 
-      const selectedCount = selectedExplorerFolders.size;
-      button.disabled = selectedCount === 0;
-      button.innerText = selectedCount > 0
-        ? "폴더 다운로드 (" + selectedCount + ")"
-        : "폴더 다운로드";
+      button.disabled = selectedExplorerFolders.size === 0;
+      button.innerText = "폴더 다운로드";
     }
 
     async function downloadSelectedExplorerFolders() {
