@@ -2,6 +2,7 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -101,6 +102,10 @@ class FileExplorerCreateDirRequest(BaseModel):
 
 class FileExplorerDeleteRequest(BaseModel):
     path: str
+
+
+class FileExplorerFolderDownloadRequest(BaseModel):
+    paths: list[str]
 
 
 def ensure_data_dirs() -> None:
@@ -1267,6 +1272,51 @@ def file_entry(path: Path) -> dict:
     }
 
 
+def create_folder_download_archive(targets: list[Path]) -> tuple[Path, str]:
+    ensure_data_dirs()
+    SAVE_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    root = saved_root()
+    timestamp = datetime.now(KST).strftime("%Y%m%d-%H%M%S")
+    download_name = f"palworld-folders-{timestamp}.zip"
+    archive_path = SAVE_EXPORT_DIR / f".{download_name}.{secrets.token_hex(6)}.tmp"
+
+    try:
+        with zipfile.ZipFile(
+            archive_path,
+            mode="w",
+            compression=zipfile.ZIP_DEFLATED,
+            allowZip64=True,
+        ) as archive:
+            for target in targets:
+                for current_dir, dirnames, filenames in os.walk(target, followlinks=False):
+                    current = Path(current_dir)
+                    dirnames[:] = [
+                        dirname
+                        for dirname in dirnames
+                        if not (current / dirname).is_symlink()
+                    ]
+                    relative_dir = current.relative_to(root).as_posix().rstrip("/")
+                    archive.writestr(f"{relative_dir}/", b"")
+
+                    for filename in filenames:
+                        source = current / filename
+
+                        if source.is_symlink() or not source.is_file():
+                            continue
+
+                        resolved = source.resolve()
+
+                        if not str(resolved).startswith(str(root) + os.sep):
+                            raise ValueError("Saved 폴더 밖의 파일은 다운로드할 수 없습니다.")
+
+                        archive.write(source, arcname=source.relative_to(root).as_posix())
+
+        return archive_path, download_name
+    except Exception:
+        archive_path.unlink(missing_ok=True)
+        raise
+
+
 def require_server_stopped_for_file_write() -> None:
     if is_server_container_running():
         raise HTTPException(
@@ -1732,6 +1782,8 @@ def dashboard(request: Request):
     .explorer-table { width: 100%; border-collapse: collapse; font-size: 13px; }
     .explorer-table th, .explorer-table td { padding: 10px 8px; border-bottom: 1px solid #e5e7eb; text-align: left; vertical-align: middle; }
     .explorer-table th { color: #4b5563; font-size: 12px; background: #f9fafb; }
+    .explorer-name-wrap { display: flex; align-items: center; gap: 9px; min-width: 0; }
+    .explorer-folder-checkbox { flex: 0 0 auto; width: 17px; height: 17px; margin: 0; cursor: pointer; accent-color: #0f766e; }
     .explorer-name { display: inline-flex; align-items: center; gap: 8px; min-width: 0; border: 0; padding: 0; background: transparent; color: #0f766e; font-weight: bold; cursor: pointer; }
     .explorer-name.file { color: #1f2937; cursor: default; }
     .explorer-row-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
@@ -2031,6 +2083,7 @@ def dashboard(request: Request):
             <div class="explorer-actions">
               <button class="secondary" type="button" onclick="loadFileExplorer()">새로고침</button>
               <button id="fileExplorerUpBtn" class="secondary" type="button" onclick="goFileExplorerParent()">상위 폴더</button>
+              <button id="fileExplorerDownloadFoldersBtn" class="secondary" type="button" onclick="downloadSelectedExplorerFolders()" disabled>폴더 다운로드</button>
               <button id="fileExplorerNewDirBtn" class="secondary" type="button" onclick="createExplorerDirectory()">폴더 생성</button>
               <button id="fileExplorerUploadBtn" type="button" onclick="triggerExplorerUpload()">파일 업로드</button>
               <button id="fileExplorerFolderUploadBtn" type="button" onclick="triggerExplorerFolderUpload()">폴더 업로드</button>
@@ -2484,6 +2537,7 @@ def dashboard(request: Request):
 
     let fileExplorerPath = "";
     let fileExplorerLocked = false;
+    let selectedExplorerFolders = new Set();
 
     function formatFileSize(size) {
       const bytes = Number(size || 0);
@@ -2529,6 +2583,8 @@ def dashboard(request: Request):
         fileExplorerPath = path;
       }
 
+      selectedExplorerFolders.clear();
+      updateFolderDownloadButton();
       const body = document.getElementById("fileExplorerBody");
       body.innerHTML = '<tr><td colspan="5">목록을 불러오는 중입니다...</td></tr>';
 
@@ -2563,18 +2619,36 @@ def dashboard(request: Request):
       entries.forEach(function (entry) {
         const row = document.createElement("tr");
         const nameCell = document.createElement("td");
+        const nameWrap = document.createElement("div");
+        nameWrap.className = "explorer-name-wrap";
         const nameButton = document.createElement("button");
         nameButton.className = "explorer-name" + (entry.type === "file" ? " file" : "");
         nameButton.type = "button";
         nameButton.innerText = (entry.type === "dir" ? "📁 " : "📄 ") + entry.name;
 
         if (entry.type === "dir") {
+          const checkbox = document.createElement("input");
+          checkbox.className = "explorer-folder-checkbox";
+          checkbox.type = "checkbox";
+          checkbox.setAttribute("aria-label", entry.name + " 폴더 선택");
+          checkbox.checked = selectedExplorerFolders.has(entry.path);
+          checkbox.onchange = function () {
+            if (checkbox.checked) {
+              selectedExplorerFolders.add(entry.path);
+            } else {
+              selectedExplorerFolders.delete(entry.path);
+            }
+
+            updateFolderDownloadButton();
+          };
+          nameWrap.appendChild(checkbox);
           nameButton.onclick = function () { loadFileExplorer(entry.path); };
         } else {
           nameButton.disabled = true;
         }
 
-        nameCell.appendChild(nameButton);
+        nameWrap.appendChild(nameButton);
+        nameCell.appendChild(nameWrap);
         row.appendChild(nameCell);
 
         const typeCell = document.createElement("td");
@@ -2626,6 +2700,66 @@ def dashboard(request: Request):
 
     function downloadExplorerFile(path) {
       window.location.href = "/api/files/download?path=" + encodeURIComponent(path);
+    }
+
+    function updateFolderDownloadButton() {
+      const button = document.getElementById("fileExplorerDownloadFoldersBtn");
+
+      if (!button) {
+        return;
+      }
+
+      const selectedCount = selectedExplorerFolders.size;
+      button.disabled = selectedCount === 0;
+      button.innerText = selectedCount > 0
+        ? "폴더 다운로드 (" + selectedCount + ")"
+        : "폴더 다운로드";
+    }
+
+    async function downloadSelectedExplorerFolders() {
+      const paths = Array.from(selectedExplorerFolders);
+      const button = document.getElementById("fileExplorerDownloadFoldersBtn");
+      const note = document.getElementById("fileExplorerNote");
+
+      if (!paths.length) {
+        alert("다운로드할 폴더를 선택해주세요.");
+        return;
+      }
+
+      button.disabled = true;
+      note.innerText = "선택한 폴더의 하위 파일을 ZIP으로 준비하는 중입니다...";
+
+      try {
+        const response = await fetch("/api/files/download-folders", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ paths: paths })
+        });
+
+        if (!response.ok) {
+          const data = await response.json();
+          alert(data.detail || "폴더 다운로드 실패");
+          return;
+        }
+
+        const blob = await response.blob();
+        const contentDisposition = response.headers.get("Content-Disposition") || "";
+        const filenameMatch = contentDisposition.match(/filename="?([^";]+)"?/i);
+        const filename = filenameMatch ? filenameMatch[1] : "palworld-folders.zip";
+        const downloadUrl = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = downloadUrl;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(downloadUrl);
+        note.innerText = paths.length + "개 폴더 다운로드가 준비되었습니다.";
+      } catch (err) {
+        alert("폴더 다운로드 실패: " + err);
+      } finally {
+        updateFolderDownloadButton();
+      }
     }
 
     function triggerExplorerUpload() {
@@ -3988,6 +4122,46 @@ def download_file(request: Request, path: str):
     return FileResponse(
         path=str(target),
         filename=target.name,
+    )
+
+
+@app.post("/api/files/download-folders")
+def download_folders(payload: FileExplorerFolderDownloadRequest, request: Request):
+    require_auth(request)
+
+    if not payload.paths:
+        raise HTTPException(status_code=400, detail="다운로드할 폴더를 선택해주세요.")
+
+    if len(payload.paths) > 100:
+        raise HTTPException(status_code=400, detail="한 번에 최대 100개 폴더까지 다운로드할 수 있습니다.")
+
+    root = saved_root()
+    targets: list[Path] = []
+    seen_targets: set[Path] = set()
+
+    for relative_path in payload.paths:
+        target = resolve_saved_path(relative_path)
+
+        if target == root or not target.exists() or not target.is_dir():
+            raise HTTPException(status_code=404, detail=f"다운로드할 폴더를 찾을 수 없습니다: {relative_path}")
+
+        if target.is_symlink():
+            raise HTTPException(status_code=400, detail="심볼릭 링크 폴더는 다운로드할 수 없습니다.")
+
+        if target not in seen_targets:
+            seen_targets.add(target)
+            targets.append(target)
+
+    try:
+        archive_path, download_name = create_folder_download_archive(targets)
+    except (OSError, ValueError, zipfile.BadZipFile) as error:
+        raise HTTPException(status_code=500, detail=f"폴더 ZIP 생성 중 오류가 발생했습니다: {error}")
+
+    return FileResponse(
+        path=str(archive_path),
+        filename=download_name,
+        media_type="application/zip",
+        background=BackgroundTask(archive_path.unlink, missing_ok=True),
     )
 
 
