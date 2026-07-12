@@ -1941,6 +1941,17 @@ def dashboard(request: Request):
     .panel-update-status[data-status="completed"], .panel-update-status[data-status="not_required"] { border-color: #a7d8c7; background: #ecfdf5; color: #166534; }
     .panel-update-status[data-status="failed"] { border-color: #fecaca; background: #fef2f2; color: #b91c1c; }
     .panel-update-actions { display: flex; justify-content: flex-end; gap: 10px; }
+    .server-stop-backdrop { background: rgba(10, 18, 28, 0.56); backdrop-filter: blur(7px); -webkit-backdrop-filter: blur(7px); }
+    .server-stop-modal { width: min(470px, 100%); }
+    .server-stop-body { display: grid; justify-items: center; gap: 16px; padding: 30px 26px 24px; text-align: center; background: #f8fafc; }
+    .server-stop-indicator { display: grid; place-items: center; width: 62px; height: 62px; border-radius: 50%; background: #e6f4ef; color: #0f766e; border: 1px solid #b7ddd1; }
+    .server-stop-indicator svg { width: 32px; height: 32px; }
+    .server-stop-indicator[data-state="stopping"] svg { animation: server-stop-spin 1s linear infinite; }
+    .server-stop-indicator[data-state="failed"] { background: #fef2f2; color: #b91c1c; border-color: #fecaca; }
+    .server-stop-title { margin: 0; color: #1f2937; font-size: 22px; }
+    .server-stop-message { min-height: 22px; margin: 0; color: #64748b; font-size: 14px; line-height: 1.55; }
+    .server-stop-confirm { min-width: 120px; }
+    @keyframes server-stop-spin { to { transform: rotate(360deg); } }
     .explorer-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
     .explorer-path { min-width: 220px; padding: 10px 12px; border-radius: 10px; background: #eef2f7; color: #1f2937; font-family: Consolas, Monaco, monospace; font-size: 13px; }
     .explorer-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
@@ -2170,6 +2181,17 @@ def dashboard(request: Request):
         </div>
     </div>
 
+    <div id="serverStopModal" class="modal-backdrop server-stop-backdrop" aria-hidden="true">
+      <div class="modal server-stop-modal" role="dialog" aria-modal="true" aria-labelledby="serverStopTitle">
+        <div class="server-stop-body">
+          <div id="serverStopIndicator" class="server-stop-indicator" data-state="stopping" aria-hidden="true"></div>
+          <h2 id="serverStopTitle" class="server-stop-title">서버 중지 중</h2>
+          <p id="serverStopMessage" class="server-stop-message" role="status" aria-live="assertive">Palworld 서버를 안전하게 종료하고 있습니다.</p>
+          <button id="serverStopConfirmBtn" class="server-stop-confirm" type="button" onclick="confirmServerStopModal()" hidden>확인</button>
+        </div>
+      </div>
+    </div>
+
     <div id="panelUpdateModal" class="modal-backdrop" aria-hidden="true">
       <div class="modal panel-update-modal" role="dialog" aria-modal="true" aria-labelledby="panelUpdateModalTitle">
         <div class="modal-head">
@@ -2263,7 +2285,7 @@ def dashboard(request: Request):
     <div class="actions">
       <button id="installBtn" onclick="requestInstall()">엔진 설치</button>
       <button class="secondary" onclick="startServer()">서버 시작</button>
-      <button class="secondary" onclick="stopServer()">서버 중지</button>
+      <button id="serverStopBtn" class="secondary" onclick="stopServer()">서버 중지</button>
       <button class="secondary" onclick="restartServer()">서버 재시작</button>
       <button class="secondary" onclick="loadServerLog()">서버 로그 보기</button>
       <button class="secondary" onclick="loadLog()">설치 로그 보기</button>
@@ -2677,9 +2699,55 @@ def dashboard(request: Request):
       }
     }
 
+    function setServerStopModalState(state, message) {
+      const modal = document.getElementById("serverStopModal");
+      const indicator = document.getElementById("serverStopIndicator");
+      const title = document.getElementById("serverStopTitle");
+      const messageBox = document.getElementById("serverStopMessage");
+      const confirmButton = document.getElementById("serverStopConfirmBtn");
+      const stopButton = document.getElementById("serverStopBtn");
+
+      const icons = {
+        stopping: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.64-6.36" /></svg>',
+        completed: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.2 4.2L19 7" /></svg>',
+        failed: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M7 7 17 17" /><path d="m17 7-10 10" /></svg>'
+      };
+
+      indicator.dataset.state = state;
+      indicator.innerHTML = icons[state] || icons.failed;
+      title.innerText = state === "stopping"
+        ? "서버 중지 중"
+        : (state === "completed" ? "서버 종료 완료" : "서버 중지 실패");
+      messageBox.innerText = message || "";
+      confirmButton.hidden = state === "stopping";
+      stopButton.disabled = true;
+      modal.classList.add("show");
+      modal.setAttribute("aria-hidden", "false");
+      document.body.style.overflow = "hidden";
+
+      if (state !== "stopping") {
+        window.setTimeout(function () { confirmButton.focus(); }, 0);
+      }
+    }
+
+    function confirmServerStopModal() {
+      const indicator = document.getElementById("serverStopIndicator");
+
+      if (indicator.dataset.state === "stopping") {
+        return;
+      }
+
+      const modal = document.getElementById("serverStopModal");
+      modal.classList.remove("show");
+      modal.setAttribute("aria-hidden", "true");
+      document.getElementById("serverStopBtn").disabled = false;
+      document.body.style.overflow = "";
+    }
+
     async function stopServer() {
       const result = document.getElementById("result");
 
+      setServerStopModalState("stopping", "Palworld 서버를 안전하게 종료하고 있습니다.");
       result.innerText = "Palworld 서버를 중지하는 중입니다...";
       currentLogMode = "server";
       document.getElementById("serverStatus").innerText = displayServerStatus("stopping");
@@ -2692,6 +2760,10 @@ def dashboard(request: Request):
         });
 
         const data = await response.json();
+
+        if (!response.ok || data.status === "error") {
+          throw new Error(data.message || data.detail || data.error || "서버 중지 실패");
+        }
 
         result.innerText =
           "서버 중지 요청 결과\\n" +
@@ -2707,9 +2779,15 @@ def dashboard(request: Request):
         }
         await loadServerStatus();
         setLogText(data.log || ("[패널] " + (data.message || "Palworld 서버가 종료되었습니다.")));
+        setServerStopModalState(
+          "completed",
+          data.status === "not_created" ? "Palworld 서버가 이미 종료되어 있습니다." : "Palworld 서버 종료가 완료되었습니다."
+        );
 
       } catch (err) {
-        result.innerText = "서버 중지 요청 실패: " + err;
+        const errorMessage = err && err.message ? err.message : String(err);
+        result.innerText = "서버 중지 요청 실패: " + errorMessage;
+        setServerStopModalState("failed", errorMessage);
       }
     }
 
