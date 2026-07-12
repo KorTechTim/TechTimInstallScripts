@@ -2182,6 +2182,7 @@ def dashboard(request: Request):
           { key: "PalStomachDecreaceRate", label: "팰 포만감 감소", type: "number", step: "0.1", min: "0", max: "5" },
           { key: "PalStaminaDecreaceRate", label: "팰 스태미나 감소", type: "number", step: "0.1", min: "0", max: "5" },
           { key: "ItemWeightRate", label: "아이템 무게 배율", type: "number", step: "0.1", min: "0", max: "10" },
+          { key: "EquipmentDurabilityDamageRate", label: "장비 내구도 감소 배율", type: "number", step: "0.1", min: "0", max: "10" },
           { key: "bEnableFastTravel", label: "빠른 이동 허용", type: "checkbox" },
           { key: "bEnableFastTravelOnlyBaseCamp", label: "거점 빠른 이동만 허용", type: "checkbox" },
           { key: "EnablePredatorBossPal", label: "프레데터 보스 팰", type: "checkbox" },
