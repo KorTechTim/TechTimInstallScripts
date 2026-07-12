@@ -47,6 +47,7 @@ DOCKER_PULL_HEARTBEAT_SECONDS = max(1, int(os.getenv("DOCKER_PULL_HEARTBEAT_SECO
 INSTALL_REQUEST_FILE = DATA_DIR / "install-request.txt"
 INSTALL_LOG_FILE = DATA_DIR / "install.log"
 INSTALL_STATUS_FILE = DATA_DIR / "install-status.txt"
+INSTALL_RESULT_FILE = DATA_DIR / "install-result.txt"
 SERVER_CONTROL_LOG_FILE = DATA_DIR / "server-control.log"
 RESTART_SCHEDULE_FILE = DATA_DIR / "restart-schedule.json"
 RUNTIME_HELPER_FILE = DATA_DIR / "palworld-runtime-helper.sh"
@@ -564,6 +565,21 @@ def stop_restart_scheduler() -> None:
 def set_status(status: str) -> None:
     ensure_data_dirs()
     INSTALL_STATUS_FILE.write_text(status, encoding="utf-8")
+
+
+def set_install_result(result: str) -> None:
+    ensure_data_dirs()
+    INSTALL_RESULT_FILE.write_text(result, encoding="utf-8")
+
+
+def get_install_result() -> str:
+    if not INSTALL_RESULT_FILE.exists():
+        return ""
+
+    try:
+        return INSTALL_RESULT_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 def get_status() -> str:
@@ -1270,6 +1286,7 @@ def install_palworld_job() -> None:
 
     INSTALL_LOG_FILE.write_text("", encoding="utf-8")
     set_status("running")
+    set_install_result("update_running" if is_update else "install_running")
 
     operation_name = "서버 업데이트" if is_update else "최초 엔진 설치"
     write_log(f"Palworld Dedicated Server {operation_name} 작업을 시작합니다.")
@@ -1279,6 +1296,7 @@ def install_palworld_job() -> None:
     try:
         if is_update and is_server_container_running():
             write_log("ERROR: 게임 서버 실행 중에는 업데이트할 수 없습니다. 서버를 중지한 뒤 다시 시도해주세요.")
+            set_install_result("update_failed")
             set_status("completed")
             return
 
@@ -1314,6 +1332,7 @@ def install_palworld_job() -> None:
         if not image_ready:
             write_log(f"ERROR: 공식 Palworld 이미지를 {max_attempts}회 모두 다운로드하지 못했습니다.")
             write_log("GHCR 연결 상태와 Docker Engine 로그를 확인해주세요.")
+            set_install_result("update_failed" if is_update else "install_failed")
             set_status("completed" if is_update else "failed")
             return
 
@@ -1322,10 +1341,13 @@ def install_palworld_job() -> None:
 
         if is_update and previous_image_id and previous_image_id == installed_image_id:
             write_log("이미 최신버전이므로 업데이트가 필요하지 않습니다.")
+            set_install_result("not_required")
         elif is_update:
             write_log(f"새로운 서버 엔진 이미지로 업데이트되었습니다: {installed_image_id}")
+            set_install_result("updated")
         else:
             write_log(f"서버 엔진 이미지 설치 완료: {installed_image_id}")
+            set_install_result("installed")
 
         write_log("공식 이미지 검증이 완료되었습니다.")
         write_log("공식 런타임 helper 스크립트를 준비합니다.")
@@ -1361,6 +1383,7 @@ def install_palworld_job() -> None:
 
     except Exception as e:
         write_log(f"ERROR: {operation_name} 작업 중 예외 발생: {e}")
+        set_install_result("update_failed" if is_update else "install_failed")
         set_status("completed" if is_update else "failed")
     finally:
         with INSTALL_JOB_LOCK:
@@ -2038,6 +2061,7 @@ def dashboard(request: Request):
     let currentLogMode = "install";
     let advancedOptions = {};
     let gameServerIsRunning = false;
+    let pendingUpdateResult = false;
 
     const advancedOptionGroups = [
       {
@@ -2328,15 +2352,18 @@ def dashboard(request: Request):
         const data = await response.json();
 
         if (!response.ok) {
+          pendingUpdateResult = false;
           result.innerText = "오류: " + (data.detail || (isUpdate ? "업데이트 요청 실패" : "설치 요청 실패"));
           return;
         }
 
+        pendingUpdateResult = data.operation === "update";
         result.innerText = "";
 
         await loadStatus();
         await loadLog();
       } catch (err) {
+        pendingUpdateResult = false;
         result.innerText = "요청 실패: " + err;
       } finally {
         await loadStatus();
@@ -3296,6 +3323,16 @@ def dashboard(request: Request):
         installButton.innerText = data.installed ? "서버 업데이트" : "엔진 설치";
         installButton.dataset.operation = data.installed ? "update" : "install";
         installButton.disabled = installRunning || gameServerIsRunning;
+
+        if (pendingUpdateResult && !installRunning) {
+          if (data.operation_result === "not_required") {
+            alert("이미 최신버전이므로 업데이트가 필요하지 않습니다.");
+          }
+
+          if (["not_required", "updated", "update_failed"].includes(data.operation_result)) {
+            pendingUpdateResult = false;
+          }
+        }
       } catch (err) {
         document.getElementById("installStatus").innerText = displayInstallStatus("error");
         updateInstallStatusIcon("error");
@@ -3390,6 +3427,7 @@ def request_install(request: Request, background_tasks: BackgroundTasks):
 
         INSTALL_JOB_ACTIVE = True
 
+    set_install_result("update_running" if is_update else "install_running")
     background_tasks.add_task(install_palworld_job)
 
     return {
@@ -3407,6 +3445,7 @@ def install_status(request: Request):
         "status": get_effective_install_status(),
         "installed": has_any_official_runtime_install_marker(),
         "runtime_image": PALWORLD_RUNTIME_IMAGE,
+        "operation_result": get_install_result(),
     }
 
 
