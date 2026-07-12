@@ -55,7 +55,6 @@ HOST_RUNTIME_HELPER_FILE = HOST_DATA_DIR / "palworld-runtime-helper.sh"
 SAVED_ROOT_DIR = DATA_DIR / "server" / "Pal" / "Saved"
 SAVED_WORLDS_DIR = SAVED_ROOT_DIR / "SaveGames"
 SAVE_EXPORT_DIR = DATA_DIR / "uploads"
-UPDATE_BACKUP_DIR = DATA_DIR / "backups"
 
 AUTH_FILE = DATA_DIR / "auth.json"
 SESSIONS_FILE = DATA_DIR / "sessions.json"
@@ -1260,23 +1259,6 @@ def require_server_stopped_for_file_write() -> None:
         )
 
 
-def create_server_update_backup() -> Path | None:
-    ensure_data_dirs()
-
-    if not SAVED_ROOT_DIR.exists() or not any(SAVED_ROOT_DIR.iterdir()):
-        return None
-
-    UPDATE_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(KST).strftime("%Y%m%d-%H%M%S")
-    archive_base = UPDATE_BACKUP_DIR / f"palworld-before-update-{timestamp}"
-    archive_path = Path(shutil.make_archive(
-        base_name=str(archive_base),
-        format="zip",
-        root_dir=str(SAVED_ROOT_DIR),
-    ))
-    return archive_path
-
-
 def install_palworld_job() -> None:
     global INSTALL_JOB_ACTIVE
 
@@ -1311,15 +1293,6 @@ def install_palworld_job() -> None:
         except docker.errors.ImageNotFound:
             write_log("로컬에 latest 이미지가 없어 새로 다운로드합니다.")
 
-        if is_update:
-            write_log("업데이트 전 Saved 폴더 백업을 시작합니다.")
-            backup_path = create_server_update_backup()
-
-            if backup_path:
-                write_log(f"업데이트 전 백업 완료: {backup_path}")
-            else:
-                write_log("백업할 Saved 데이터가 없어 백업 파일 생성을 건너뜁니다.")
-
         max_attempts = 3
         image_ready = False
 
@@ -1348,7 +1321,7 @@ def install_palworld_job() -> None:
         installed_image_id = installed_image.id
 
         if is_update and previous_image_id and previous_image_id == installed_image_id:
-            write_log("현재 서버 엔진이 이미 Pocketpair 공식 최신 버전입니다.")
+            write_log("이미 최신버전이므로 업데이트가 필요하지 않습니다.")
         elif is_update:
             write_log(f"새로운 서버 엔진 이미지로 업데이트되었습니다: {installed_image_id}")
         else:
@@ -2392,7 +2365,7 @@ def dashboard(request: Request):
 
         const data = await response.json();
 
-        if (isRunningStatus(data.status)) {
+        if ((data.status || "").toLowerCase() === "running") {
           alert("이미 서버가 동작중입니다.");
         }
 
