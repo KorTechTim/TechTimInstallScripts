@@ -1927,7 +1927,7 @@ def dashboard(request: Request):
     .panel-update-intro { display: flex; align-items: center; gap: 14px; }
     .panel-update-icon { display: grid; place-items: center; flex: 0 0 auto; width: 52px; height: 52px; border-radius: 10px; background: #e6f4ef; color: #0f766e; border: 1px solid #b7ddd1; }
     .panel-update-icon svg { width: 28px; height: 28px; }
-    .panel-update-intro strong { display: block; color: #153e3a; font-size: 16px; }
+    .panel-update-warning { display: block; min-width: 0; color: #b91c1c; font-size: 15px; font-weight: 800; line-height: 1.5; }
     .panel-update-status { min-height: 48px; padding: 14px 16px; border: 1px solid #dbe4ea; border-radius: 10px; background: #ffffff; color: #475569; font-size: 13px; line-height: 1.55; }
     .panel-update-status[data-status="completed"], .panel-update-status[data-status="not_required"] { border-color: #a7d8c7; background: #ecfdf5; color: #166534; }
     .panel-update-status[data-status="failed"] { border-color: #fecaca; background: #fef2f2; color: #b91c1c; }
@@ -2176,7 +2176,7 @@ def dashboard(request: Request):
                 <path d="M15 22H4a2 2 0 0 1-2-2V9" />
               </svg>
             </div>
-            <strong>TechTim Palworld Server Panel</strong>
+            <strong class="panel-update-warning">테크팀 웹패널 업그레이드 기능으로, 팰월드 서버 엔진 업데이트를 포함하지는 않습니다.</strong>
           </div>
           <div id="panelUpdateStatus" class="panel-update-status" data-status="idle" role="status" aria-live="polite">업데이트 상태를 확인하고 있습니다.</div>
           <div class="panel-update-actions">
