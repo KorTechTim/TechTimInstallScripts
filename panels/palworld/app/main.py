@@ -2073,10 +2073,11 @@ def dashboard(request: Request):
     .checkline { display: inline-flex; align-items: center; gap: 8px; width: fit-content; margin-top: 28px; }
     .checkline input { width: auto; margin: 0; }
     .check-text { display: inline-flex; align-items: center; width: auto; margin: 0; line-height: 1.35; cursor: pointer; }
-    .server-mode-line { width: 100%; min-width: 0; gap: 7px; white-space: nowrap; }
+    .server-mode-line { display: grid; grid-template-columns: minmax(0, 1fr) 1px minmax(0, 1fr); align-items: center; width: 100%; min-width: 0; gap: 10px; white-space: nowrap; }
     .server-mode-line .help::after { white-space: normal; }
-    .server-mode-divider { align-self: stretch; width: 1px; min-height: 28px; margin: 0 1px; background: #d1d5db; }
-    .community-toggle { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+    .rcon-toggle { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+    .server-mode-divider { align-self: stretch; width: 1px; min-height: 28px; background: #d1d5db; }
+    .community-toggle { display: inline-flex; align-items: center; justify-content: flex-start; gap: 6px; min-width: 0; }
     .community-switch { position: relative; display: inline-flex; width: 78px; height: 30px; margin: 0; cursor: pointer; }
     .community-switch .community-switch-input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
     .community-switch-track { position: relative; display: block; width: 78px; height: 30px; border: 1px solid #9ca3af; border-radius: 999px; background: #e5e7eb; color: #4b5563; box-shadow: inset 0 1px 3px rgba(17,24,39,0.12); transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease; }
@@ -2244,9 +2245,11 @@ def dashboard(request: Request):
             <input id="cfgRconPort" type="number" min="1" max="65535" step="1">
           </label>
           <div class="checkline server-mode-line">
-            <input id="cfgRconEnabled" type="checkbox">
-            <label class="check-text" for="cfgRconEnabled">RCON 사용</label>
-            <span class="help" tabindex="0" data-tip="외부 관리 도구에서 서버를 제어할 때 사용합니다. 필요할 때만 켜세요.">?</span>
+            <div class="rcon-toggle">
+              <input id="cfgRconEnabled" type="checkbox">
+              <label class="check-text" for="cfgRconEnabled">RCON 사용</label>
+              <span class="help" tabindex="0" data-tip="외부 관리 도구에서 서버를 제어할 때 사용합니다. 필요할 때만 켜세요.">?</span>
+            </div>
             <span class="server-mode-divider" aria-hidden="true"></span>
             <div class="community-toggle">
               <label class="community-switch" for="cfgCommunityServer" title="커뮤니티 서버 공개 설정">
