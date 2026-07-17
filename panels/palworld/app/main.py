@@ -2074,6 +2074,7 @@ def dashboard(request: Request):
     .checkline input { width: auto; margin: 0; }
     .check-text { display: inline-flex; align-items: center; width: auto; margin: 0; line-height: 1.35; cursor: pointer; }
     .server-mode-line { width: 100%; min-width: 0; gap: 7px; white-space: nowrap; }
+    .server-mode-line .help::after { white-space: normal; }
     .server-mode-divider { align-self: stretch; width: 1px; min-height: 28px; margin: 0 1px; background: #d1d5db; }
     .community-toggle { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
     .community-switch { position: relative; display: inline-flex; width: 78px; height: 30px; margin: 0; cursor: pointer; }
@@ -2253,7 +2254,7 @@ def dashboard(request: Request):
                 <span class="community-switch-track" aria-hidden="true"></span>
                 <span class="community-switch-label">커뮤니티 서버로 공개</span>
               </label>
-              <span class="help" tabindex="0" data-tip="활성화하면 게임 내 커뮤니티 서버 목록에 등록됩니다. Xbox·PS5에서 서버를 검색해 접속하려면 이 설정이 필요합니다. 서버 목록 노출을 위해 UDP 8211과 공인 IP 연결이 정상이어야 합니다.">?</span>
+              <span class="help" tabindex="0" data-tip="Xbox, PS5 검색 허용">?</span>
             </div>
           </div>
           <div class="config-save-wrap">
