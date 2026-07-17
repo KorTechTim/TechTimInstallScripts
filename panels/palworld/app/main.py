@@ -55,6 +55,7 @@ INSTALL_RESULT_FILE = DATA_DIR / "install-result.txt"
 PANEL_UPDATE_STATUS_FILE = DATA_DIR / "panel-update-status.json"
 SERVER_CONTROL_LOG_FILE = DATA_DIR / "server-control.log"
 RESTART_SCHEDULE_FILE = DATA_DIR / "restart-schedule.json"
+SERVER_LAUNCH_SETTINGS_FILE = DATA_DIR / "server-launch-settings.json"
 RUNTIME_HELPER_FILE = DATA_DIR / "palworld-runtime-helper.sh"
 HOST_RUNTIME_HELPER_FILE = HOST_DATA_DIR / "palworld-runtime-helper.sh"
 
@@ -93,6 +94,7 @@ class ConfigRequest(BaseModel):
     MaxPlayers: int = 32
     RCONEnabled: bool = False
     RCONPort: int = RCON_PORT
+    CommunityServer: bool = False
     AdvancedOptions: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -777,6 +779,71 @@ def get_config_path() -> Path:
     return DATA_DIR / "server" / "Pal" / "Saved" / "Config" / "LinuxServer" / "PalWorldSettings.ini"
 
 
+def normalize_boolean(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+
+    return default
+
+
+def default_server_launch_settings() -> dict:
+    return {
+        "CommunityServer": False,
+    }
+
+
+def read_server_launch_settings() -> dict:
+    defaults = default_server_launch_settings()
+
+    if not SERVER_LAUNCH_SETTINGS_FILE.exists():
+        return defaults
+
+    try:
+        stored = json.loads(SERVER_LAUNCH_SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return defaults
+
+    if not isinstance(stored, dict):
+        return defaults
+
+    return {
+        "CommunityServer": normalize_boolean(stored.get("CommunityServer"), False),
+    }
+
+
+def write_server_launch_settings(settings: dict) -> Path:
+    SERVER_LAUNCH_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    normalized = {
+        "CommunityServer": normalize_boolean(
+            settings.get("CommunityServer") if isinstance(settings, dict) else False,
+            False,
+        ),
+    }
+    temporary_path = SERVER_LAUNCH_SETTINGS_FILE.with_name(
+        f".{SERVER_LAUNCH_SETTINGS_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+
+    try:
+        temporary_path.write_text(
+            json.dumps(normalized, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary_path.replace(SERVER_LAUNCH_SETTINGS_FILE)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+    return SERVER_LAUNCH_SETTINGS_FILE
+
+
 def default_config() -> dict:
     return {
         "ServerName": "TechTim Palworld Server",
@@ -787,6 +854,7 @@ def default_config() -> dict:
         "MaxPlayers": 32,
         "RCONEnabled": False,
         "RCONPort": RCON_PORT,
+        "CommunityServer": False,
     }
 
 
@@ -802,6 +870,7 @@ def normalize_config(config: dict) -> dict:
     merged["MaxPlayers"] = max(1, min(100, int(merged.get("MaxPlayers") or 32)))
     merged["RCONEnabled"] = bool(merged.get("RCONEnabled"))
     merged["RCONPort"] = max(1, min(65535, int(merged.get("RCONPort") or RCON_PORT)))
+    merged["CommunityServer"] = normalize_boolean(merged.get("CommunityServer"), False)
 
     return merged
 
@@ -1182,6 +1251,7 @@ def palworld_option_value(key: str, value) -> str:
 
 def read_config() -> dict:
     options = read_palworld_options()
+    launch_settings = read_server_launch_settings()
     config = normalize_config({
         "ServerName": options.get("ServerName"),
         "ServerDescription": options.get("ServerDescription"),
@@ -1191,6 +1261,7 @@ def read_config() -> dict:
         "MaxPlayers": options.get("ServerPlayerMaxNum"),
         "RCONEnabled": options.get("RCONEnabled"),
         "RCONPort": options.get("RCONPort"),
+        "CommunityServer": launch_settings.get("CommunityServer", False),
     })
     config["AdvancedOptions"] = {
         key: options.get(key, PALWORLD_OPTION_DEFAULTS.get(key))
@@ -1199,6 +1270,21 @@ def read_config() -> dict:
     }
 
     return config
+
+
+def build_server_command(config: dict) -> list[str]:
+    effective_server_port = int(config.get("PublicPort", SERVER_PORT))
+    command = [
+        f"-port={effective_server_port}",
+        "-useperfthreads",
+        "-NoAsyncLoadingThread",
+        "-UseMultithreadForDS",
+    ]
+
+    if normalize_boolean(config.get("CommunityServer"), False):
+        command.append("-publiclobby")
+
+    return command
 
 
 def write_config(config: dict) -> Path:
@@ -1987,6 +2073,20 @@ def dashboard(request: Request):
     .checkline { display: inline-flex; align-items: center; gap: 8px; width: fit-content; margin-top: 28px; }
     .checkline input { width: auto; margin: 0; }
     .check-text { display: inline-flex; align-items: center; width: auto; margin: 0; line-height: 1.35; cursor: pointer; }
+    .server-mode-line { width: 100%; min-width: 0; gap: 7px; white-space: nowrap; }
+    .server-mode-divider { align-self: stretch; width: 1px; min-height: 28px; margin: 0 1px; background: #d1d5db; }
+    .community-toggle { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+    .community-switch { position: relative; display: inline-flex; width: 78px; height: 30px; margin: 0; cursor: pointer; }
+    .community-switch .community-switch-input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
+    .community-switch-track { position: relative; display: block; width: 78px; height: 30px; border: 1px solid #9ca3af; border-radius: 999px; background: #e5e7eb; color: #4b5563; box-shadow: inset 0 1px 3px rgba(17,24,39,0.12); transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease; }
+    .community-switch-track::before { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: #ffffff; box-shadow: 0 2px 6px rgba(17,24,39,0.25); transition: transform 0.18s ease; }
+    .community-switch-track::after { content: "공개 OFF"; position: absolute; top: 50%; right: 7px; font-size: 9px; font-weight: 800; line-height: 1; transform: translateY(-50%); }
+    .community-switch-input:checked + .community-switch-track { border-color: #0f766e; background: #0f766e; color: #ffffff; }
+    .community-switch-input:checked + .community-switch-track::before { transform: translateX(48px); }
+    .community-switch-input:checked + .community-switch-track::after { left: 8px; right: auto; content: "공개 ON"; }
+    .community-switch-input:focus-visible + .community-switch-track { outline: 3px solid rgba(15,118,110,0.24); outline-offset: 2px; }
+    .community-switch-input:disabled + .community-switch-track { cursor: not-allowed; filter: grayscale(0.35); opacity: 0.62; }
+    .community-switch-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
     button { border: 0; border-radius: 10px; padding: 14px 20px; font-weight: bold; cursor: pointer; background: #2563eb; color: white; }
     button.secondary { background: #e5e7eb; color: #1f2937; }
     button.danger { background: #dc2626; color: white; }
@@ -2005,6 +2105,7 @@ def dashboard(request: Request):
       .topbar { align-items: flex-start; flex-direction: column; }
       .top-links { justify-content: flex-start; }
       .grid, .config-grid { grid-template-columns: 1fr; }
+      .server-mode-line { margin-top: 8px; }
       .advanced-card { grid-template-columns: 1fr; }
       .settings-hub-pane { grid-template-columns: 86px minmax(0, 1fr); gap: 16px; padding: 22px 20px; }
       .settings-hub-pane + .settings-hub-pane { border-left: 0; border-top: 1px solid rgba(255,255,255,0.28); }
@@ -2141,10 +2242,19 @@ def dashboard(request: Request):
             <span class="field-title">RCON 포트 <span class="help" tabindex="0" data-tip="RCON을 켰을 때 사용하는 TCP 포트입니다. 기본값은 25575입니다.">?</span></span>
             <input id="cfgRconPort" type="number" min="1" max="65535" step="1">
           </label>
-          <div class="checkline">
+          <div class="checkline server-mode-line">
             <input id="cfgRconEnabled" type="checkbox">
             <label class="check-text" for="cfgRconEnabled">RCON 사용</label>
             <span class="help" tabindex="0" data-tip="외부 관리 도구에서 서버를 제어할 때 사용합니다. 필요할 때만 켜세요.">?</span>
+            <span class="server-mode-divider" aria-hidden="true"></span>
+            <div class="community-toggle">
+              <label class="community-switch" for="cfgCommunityServer" title="커뮤니티 서버 공개 설정">
+                <input id="cfgCommunityServer" class="community-switch-input" type="checkbox" role="switch">
+                <span class="community-switch-track" aria-hidden="true"></span>
+                <span class="community-switch-label">커뮤니티 서버로 공개</span>
+              </label>
+              <span class="help" tabindex="0" data-tip="활성화하면 게임 내 커뮤니티 서버 목록에 등록됩니다. Xbox·PS5에서 서버를 검색해 접속하려면 이 설정이 필요합니다. 서버 목록 노출을 위해 UDP 8211과 공인 IP 연결이 정상이어야 합니다.">?</span>
+            </div>
           </div>
           <div class="config-save-wrap">
             <button id="configSaveBtn" onclick="saveConfig()">설정 저장</button>
@@ -2588,6 +2698,7 @@ def dashboard(request: Request):
         "cfgMaxPlayers",
         "cfgRconEnabled",
         "cfgRconPort",
+        "cfgCommunityServer",
         "configSaveBtn",
         "advancedSettingsBtn",
         "advancedSaveBtn",
@@ -3446,6 +3557,7 @@ def dashboard(request: Request):
       document.getElementById("cfgMaxPlayers").value = config.MaxPlayers || 32;
       document.getElementById("cfgRconEnabled").checked = Boolean(config.RCONEnabled);
       document.getElementById("cfgRconPort").value = config.RCONPort || 25575;
+      document.getElementById("cfgCommunityServer").checked = Boolean(config.CommunityServer);
       fillAdvancedOptions(config.AdvancedOptions || {});
     }
 
@@ -3651,6 +3763,7 @@ def dashboard(request: Request):
         MaxPlayers: Number(document.getElementById("cfgMaxPlayers").value || 10),
         RCONEnabled: document.getElementById("cfgRconEnabled").checked,
         RCONPort: Number(document.getElementById("cfgRconPort").value || 25575),
+        CommunityServer: document.getElementById("cfgCommunityServer").checked,
         AdvancedOptions: readAdvancedOptions()
       };
     }
@@ -4189,20 +4302,25 @@ def save_config(payload: ConfigRequest, request: Request):
             raise HTTPException(status_code=400, detail=validation_error)
 
         config_path = write_config(config)
+        launch_settings_path = write_server_launch_settings({
+            "CommunityServer": config["CommunityServer"],
+        })
+        saved_config = read_config()
 
         return {
             "status": "ok",
-            "message": "PalWorldSettings.ini 저장 완료",
+            "message": "Palworld 서버 설정 저장 완료",
             "path": str(config_path),
-            "config": config,
-            "worlds": list_world_options(config),
+            "launch_settings_path": str(launch_settings_path),
+            "config": saved_config,
+            "worlds": list_world_options(saved_config),
         }
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"PalWorldSettings.ini 저장 중 오류가 발생했습니다: {e}",
+            detail=f"Palworld 서버 설정 저장 중 오류가 발생했습니다: {e}",
         )
 
 
@@ -4240,6 +4358,13 @@ def start_server(request: Request):
         effective_rcon_port = int(server_config.get("RCONPort", RCON_PORT))
         effective_rest_port = int(advanced_options.get("RESTAPIPort", 8212))
         rest_api_enabled = bool(advanced_options.get("RESTAPIEnabled", False))
+        community_server = normalize_boolean(server_config.get("CommunityServer"), False)
+        server_command = build_server_command(server_config)
+        write_server_control_log(
+            "Palworld 서버 실행 모드: Community Server (-publiclobby)"
+            if community_server
+            else "Palworld 서버 실행 모드: Dedicated Server"
+        )
         client = docker.from_env()
 
         existing = client.containers.list(
@@ -4287,12 +4412,7 @@ def start_server(request: Request):
         container = client.containers.run(
             PALWORLD_RUNTIME_IMAGE,
             entrypoint=["/pal/helper.sh"],
-            command=[
-                f"-port={effective_server_port}",
-                "-useperfthreads",
-                "-NoAsyncLoadingThread",
-                "-UseMultithreadForDS",
-            ],
+            command=server_command,
             name=PALWORLD_SERVER_CONTAINER,
             working_dir="/pal/Package",
             detach=True,
@@ -4319,6 +4439,7 @@ def start_server(request: Request):
             "port": f"{effective_server_port}/udp",
             "rcon_port": f"{effective_rcon_port}/tcp" if server_config.get("RCONEnabled") else "",
             "rest_api_port": f"{effective_rest_port}/tcp" if rest_api_enabled else "",
+            "community_server": community_server,
         }
 
     except Exception as e:
