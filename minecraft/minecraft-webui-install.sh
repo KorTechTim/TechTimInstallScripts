@@ -114,6 +114,9 @@ services:
       - HOST_DATA_DIR=${INSTALL_DIR}/data
       - MINECRAFT_RUNTIME_IMAGE=itzg/minecraft-server:latest
       - MINECRAFT_SERVER_CONTAINER=minecraft-server
+      - PANEL_CONTAINER_NAME=minecraft-panel
+      - PANEL_PROXY_CONTAINER=minecraft-panel-proxy
+      - PANEL_IMAGE=${PANEL_IMAGE}
       - SERVER_PORT=25565
     volumes:
       - ${INSTALL_DIR}/data:/data

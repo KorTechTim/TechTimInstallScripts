@@ -11,8 +11,14 @@
     <header class="topbar">
       <div class="brand"><span class="cube-icon">M</span><div><h1>TechTim Minecraft Server Panel</h1><small>Java Edition</small></div></div>
       <div class="header-actions">
-        <a class="icon-button" href="https://docker-minecraft-server.readthedocs.io/" target="_blank" title="itzg 공식 문서">i</a>
-        <button class="icon-button logout" id="logout" title="로그아웃">↪</button>
+        <a class="icon-button" href="https://www.youtube.com/@kortechtim" target="_blank" rel="noopener noreferrer" title="유튜브채널 접속" aria-label="유튜브채널 접속"><img src="https://cdn.simpleicons.org/youtube/FF0000" alt=""></a>
+        <a class="icon-button" href="https://discord.gg/Awy6Uh38KW" target="_blank" rel="noopener noreferrer" title="디스코드 접속" aria-label="디스코드 접속"><img src="https://cdn.simpleicons.org/discord/5865F2" alt=""></a>
+        <button class="icon-button panel-update" id="panelUpdateButton" type="button" title="TechTim 구동기 업데이트" aria-label="TechTim 구동기 업데이트">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 9 19.37a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.63 15a1.7 1.7 0 0 0-1.55-1H3v-4h.08A1.7 1.7 0 0 0 4.63 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.63h.01A1.7 1.7 0 0 0 10 3.08V3h4v.08a1.7 1.7 0 0 0 1.03 1.55 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.37 9v.01A1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z"></path></svg>
+        </button>
+        <button class="icon-button logout" id="logout" type="button" title="로그아웃" aria-label="로그아웃">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 21V5a2 2 0 0 1 2-2h7"></path><path d="M8 21h6"></path><circle cx="11" cy="7.2" r="1.5"></circle><path d="M10.5 9.4 9 12.2l2.4 1.4"></path><path d="M11.7 11.4 14 12.8"></path><path d="M9.1 12.6 7.7 15.5"></path><path d="M11.5 13.8 10.8 17"></path><path d="M16 12h5"></path><path d="m19 9 3 3-3 3"></path></svg>
+        </button>
       </div>
     </header>
 
@@ -82,6 +88,18 @@
     <div class="modal-head"><div><small>SERVER DATA</small><h2>서버 디렉터리 탐색기</h2></div><button class="close" type="button" data-close="filesDialog">×</button></div>
     <div class="file-toolbar"><button id="fileUp">↑ 상위 폴더</button><button id="newFolder">＋ 새 폴더</button><label class="upload">⇧ 업로드<input id="fileUpload" type="file" multiple></label><span id="filePath">/data</span></div>
     <div class="file-list" id="fileList"></div>
+  </dialog>
+
+  <dialog id="panelUpdateDialog" class="modal panel-update-modal">
+    <div class="modal-head"><div><small>PANEL UPDATE</small><h2>TechTim 구동기 업데이트</h2></div><button class="close" type="button" data-close="panelUpdateDialog" aria-label="닫기">×</button></div>
+    <div class="panel-update-body">
+      <div class="panel-update-intro">
+        <div class="panel-update-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-5V2"></path><path d="M20 2 9.5 12.5"></path><path d="M15 22H4a2 2 0 0 1-2-2V9"></path></svg></div>
+        <strong class="panel-update-warning"><span>테크팀 웹패널 업그레이드 기능으로,</span><span>마인크래프트 서버 엔진 업데이트를 포함하지는 않습니다.</span></strong>
+      </div>
+      <div id="panelUpdateStatus" class="panel-update-status" data-status="idle" role="status" aria-live="polite">업데이트 상태를 확인하고 있습니다.</div>
+      <div class="panel-update-actions"><button type="button" data-close="panelUpdateDialog">닫기</button><button id="panelUpdateConfirm" class="primary" type="button">업데이트 확인 및 설치</button></div>
+    </div>
   </dialog>
 
   <div class="toast" id="toast"></div>

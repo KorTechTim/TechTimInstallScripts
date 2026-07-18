@@ -2,10 +2,14 @@ const $ = id => document.getElementById(id);
 const terminal = $('terminal');
 const settingsDialog = $('settingsDialog');
 const filesDialog = $('filesDialog');
+const panelUpdateDialog = $('panelUpdateDialog');
 let logMode = 'install';
 let currentPath = '';
 let currentParent = '';
 let writeLocked = false;
+let panelUpdateRequested = false;
+let panelUpdatePollTimer = null;
+let panelUpdateReloadScheduled = false;
 
 const statusKo = {
   not_started: '미설치', running: '실행 중', completed: '설치 완료', failed: '설치 실패',
@@ -72,6 +76,11 @@ document.querySelectorAll('[data-log]').forEach(button => button.onclick = () =>
 document.querySelectorAll('[data-close]').forEach(button => button.onclick = () => $(button.dataset.close).close());
 
 $('logout').onclick = async () => { await api('/api/auth/logout', {method: 'POST'}); location.href = '/login'; };
+$('panelUpdateButton').onclick = () => {
+  panelUpdateDialog.showModal();
+  loadPanelUpdateStatus();
+};
+$('panelUpdateConfirm').onclick = requestPanelUpdate;
 $('installButton').onclick = async () => {
   try { await api('/api/install', {method: 'POST'}); selectLog('install'); toast('서버 설치를 시작했습니다.'); refreshStatus(); }
   catch (error) { toast(error.message, true); }
@@ -182,6 +191,86 @@ $('fileUpload').onchange = async event => {
     toast('파일 업로드가 완료되었습니다.'); loadFiles(currentPath);
   } catch(error){ toast(error.message,true); } finally { event.target.value=''; }
 };
+
+function schedulePanelUpdateStatus(delay = 2000) {
+  clearTimeout(panelUpdatePollTimer);
+  panelUpdatePollTimer = setTimeout(loadPanelUpdateStatus, delay);
+}
+
+async function loadPanelUpdateStatus() {
+  const statusBox = $('panelUpdateStatus');
+  const updateButton = $('panelUpdateConfirm');
+  try {
+    const response = await fetch('/api/panel/update/status', {cache: 'no-store'});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || '업데이트 상태 조회 실패');
+
+    const status = (data.status || 'idle').toLowerCase();
+    const active = ['checking', 'downloading', 'restarting', 'running', 'started'].includes(status);
+    statusBox.dataset.status = status;
+    statusBox.textContent = data.message || '업데이트 상태를 확인할 수 없습니다.';
+    updateButton.disabled = active;
+    updateButton.textContent = active ? '업데이트 진행 중' : '업데이트 확인 및 설치';
+
+    if (panelUpdateRequested && status === 'not_required') {
+      panelUpdateRequested = false;
+      alert('이미 최신 버전의 TechTim 구동기를 사용하고 있어 업데이트가 필요하지 않습니다.');
+    } else if (panelUpdateRequested && status === 'failed') {
+      panelUpdateRequested = false;
+      alert(data.message || 'TechTim 구동기 업데이트에 실패했습니다.');
+    }
+
+    if (panelUpdateRequested && status === 'completed' && !panelUpdateReloadScheduled) {
+      panelUpdateRequested = false;
+      panelUpdateReloadScheduled = true;
+      statusBox.textContent = 'TechTim 구동기 업데이트가 완료되었습니다. 화면을 새로고침합니다.';
+      setTimeout(() => location.reload(), 1800);
+      return;
+    }
+    if (active) schedulePanelUpdateStatus();
+  } catch (error) {
+    if (panelUpdateRequested) {
+      statusBox.dataset.status = 'restarting';
+      statusBox.textContent = '패널 컨테이너를 교체하고 있습니다. 잠시 후 자동으로 다시 연결합니다.';
+      updateButton.disabled = true;
+      updateButton.textContent = '업데이트 진행 중';
+      schedulePanelUpdateStatus(1800);
+    } else {
+      statusBox.dataset.status = 'failed';
+      statusBox.textContent = `업데이트 상태 조회 실패: ${error.message}`;
+    }
+  }
+}
+
+async function requestPanelUpdate() {
+  if (!confirm('TechTim 구동기를 확인하고 필요하면 패널 컨테이너를 업데이트할까요?')) return;
+
+  const statusBox = $('panelUpdateStatus');
+  const updateButton = $('panelUpdateConfirm');
+  panelUpdateRequested = true;
+  panelUpdateReloadScheduled = false;
+  updateButton.disabled = true;
+  updateButton.textContent = '업데이트 확인 중';
+  statusBox.dataset.status = 'checking';
+  statusBox.textContent = 'TechTim 구동기 업데이트 확인을 요청하고 있습니다.';
+
+  try {
+    const response = await fetch('/api/panel/update', {method: 'POST'});
+    const data = await response.json();
+    if (!response.ok) {
+      panelUpdateRequested = false;
+      throw new Error(data.detail || '업데이트 요청 실패');
+    }
+    statusBox.textContent = data.message || '업데이트 확인을 시작했습니다.';
+    schedulePanelUpdateStatus(700);
+  } catch (error) {
+    panelUpdateRequested = false;
+    updateButton.disabled = false;
+    updateButton.textContent = '업데이트 확인 및 설치';
+    statusBox.dataset.status = 'failed';
+    statusBox.textContent = `TechTim 구동기 업데이트 요청 실패: ${error.message}`;
+  }
+}
 
 async function initialize() {
   await refreshStatus();

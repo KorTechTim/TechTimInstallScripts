@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 import hashlib
@@ -29,6 +29,9 @@ SERVER_DIR = DATA_DIR / "server"
 HOST_SERVER_DIR = HOST_DATA_DIR / "server"
 SERVER_CONTAINER = os.getenv("MINECRAFT_SERVER_CONTAINER", "minecraft-server")
 RUNTIME_IMAGE = os.getenv("MINECRAFT_RUNTIME_IMAGE", "itzg/minecraft-server:latest")
+PANEL_CONTAINER_NAME = os.getenv("PANEL_CONTAINER_NAME", "minecraft-panel")
+PANEL_PROXY_CONTAINER = os.getenv("PANEL_PROXY_CONTAINER", "minecraft-panel-proxy")
+PANEL_IMAGE = os.getenv("PANEL_IMAGE", "ghcr.io/kortechtim/minecraft-panel:latest")
 SERVER_PORT = int(os.getenv("SERVER_PORT", "25565"))
 PULL_HEARTBEAT_SECONDS = max(2, int(os.getenv("DOCKER_PULL_HEARTBEAT_SECONDS", "10")))
 
@@ -39,9 +42,13 @@ INSTALL_LOG_FILE = DATA_DIR / "install.log"
 INSTALL_STATUS_FILE = DATA_DIR / "install-status.txt"
 INSTALL_MARKER_FILE = DATA_DIR / "install-request.txt"
 CONTROL_LOG_FILE = DATA_DIR / "server-control.log"
+PANEL_UPDATE_STATUS_FILE = DATA_DIR / "panel-update-status.json"
 SESSION_COOKIE = "techtim_session"
 INSTALL_LOCK = threading.Lock()
 INSTALL_ACTIVE = False
+PANEL_UPDATE_LOCK = threading.Lock()
+PANEL_UPDATE_ACTIVE = False
+KST = timezone(timedelta(hours=9), name="KST")
 ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 ANSI_FRAGMENT_RE = re.compile(r"(?:\[(?:0|1|2|3|4|5|7|9|10[0-7]|[34][0-7])m)+")
 
@@ -286,6 +293,134 @@ def install_job() -> None:
             INSTALL_ACTIVE = False
 
 
+def default_panel_update_status() -> dict:
+    return {
+        "status": "idle",
+        "message": "TechTim 구동기 업데이트를 확인할 수 있습니다.",
+        "current_image_id": "",
+        "latest_image_id": "",
+        "updated_at": "",
+    }
+
+
+def write_panel_update_status(status: str, message: str, **details) -> dict:
+    ensure_dirs()
+    payload = default_panel_update_status()
+    payload.update(details)
+    payload.update({
+        "status": status,
+        "message": message,
+        "updated_at": datetime.now(KST).isoformat(timespec="seconds"),
+    })
+    temporary_path = PANEL_UPDATE_STATUS_FILE.with_suffix(".tmp")
+    temporary_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary_path.replace(PANEL_UPDATE_STATUS_FILE)
+    return payload
+
+
+def read_panel_update_status() -> dict:
+    stored = read_json(PANEL_UPDATE_STATUS_FILE, {})
+    if not isinstance(stored, dict):
+        return default_panel_update_status()
+    status = default_panel_update_status()
+    status.update(stored)
+    return status
+
+
+def is_panel_updater_running() -> bool:
+    try:
+        updater = docker_client().containers.get(f"{PANEL_CONTAINER_NAME}-updater")
+        updater.reload()
+        return updater.status in {"created", "running", "restarting"}
+    except docker.errors.NotFound:
+        return False
+    except Exception:
+        return False
+
+
+def panel_update_job() -> None:
+    global PANEL_UPDATE_ACTIVE
+
+    try:
+        write_panel_update_status(
+            "checking",
+            "현재 TechTim 구동기 이미지와 최신 이미지를 비교하고 있습니다.",
+        )
+        client = docker_client()
+        current_container = client.containers.get(PANEL_CONTAINER_NAME)
+        current_container.reload()
+        current_image_id = current_container.image.id
+
+        write_panel_update_status(
+            "downloading",
+            "최신 TechTim 구동기 이미지를 확인하고 있습니다. 이미지 다운로드에는 시간이 걸릴 수 있습니다.",
+            current_image_id=current_image_id,
+        )
+        latest_image = client.images.pull(PANEL_IMAGE)
+        latest_image_id = latest_image.id
+
+        if current_image_id == latest_image_id:
+            write_panel_update_status(
+                "not_required",
+                "이미 최신 버전의 TechTim 구동기를 사용하고 있어 업데이트가 필요하지 않습니다.",
+                current_image_id=current_image_id,
+                latest_image_id=latest_image_id,
+            )
+            return
+
+        updater_name = f"{PANEL_CONTAINER_NAME}-updater"
+        try:
+            stale_updater = client.containers.get(updater_name)
+            stale_updater.reload()
+            if stale_updater.status == "running":
+                raise RuntimeError("이미 TechTim 구동기 교체 작업이 실행 중입니다.")
+            stale_updater.remove(force=True)
+        except docker.errors.NotFound:
+            pass
+
+        write_panel_update_status(
+            "restarting",
+            "최신 이미지 다운로드가 완료되었습니다. 패널 컨테이너를 교체하고 있습니다.",
+            current_image_id=current_image_id,
+            latest_image_id=latest_image_id,
+        )
+        client.containers.run(
+            PANEL_IMAGE,
+            command=["python", "-m", "app.self_update"],
+            name=updater_name,
+            detach=True,
+            auto_remove=True,
+            environment={
+                "TARGET_CONTAINER": PANEL_CONTAINER_NAME,
+                "PROXY_CONTAINER": PANEL_PROXY_CONTAINER,
+                "TARGET_IMAGE": PANEL_IMAGE,
+                "PANEL_UPDATE_STATUS_FILE": "/update-data/panel-update-status.json",
+                "PANEL_UPDATE_DELAY_SECONDS": "2",
+            },
+            volumes={
+                "/var/run/docker.sock": {
+                    "bind": "/var/run/docker.sock",
+                    "mode": "rw",
+                },
+                str(HOST_DATA_DIR): {
+                    "bind": "/update-data",
+                    "mode": "rw",
+                },
+            },
+        )
+    except Exception as error:
+        write_panel_update_status(
+            "failed",
+            f"TechTim 구동기 업데이트에 실패했습니다: {error}",
+        )
+    finally:
+        with PANEL_UPDATE_LOCK:
+            PANEL_UPDATE_ACTIVE = False
+
+
 def bool_env(value: Any) -> str:
     return "TRUE" if bool(value) else "FALSE"
 
@@ -367,13 +502,17 @@ def relative_path(path: Path) -> str:
 def login_html(change: bool = False) -> str:
     title = "새 관리자 비밀번호" if change else "관리자 로그인"
     fields = ('<input id="password2" type="password" placeholder="새 비밀번호 확인" required>' if change else '')
+    hint = "" if change else """<div class='hint'>
+      최초 기본 계정은 <b>admin / admin</b> 입니다.<br>
+      첫 로그인 후 반드시 비밀번호를 변경해야 합니다.
+    </div>"""
     script = """
       const path='/api/auth/change-password'; const body={new_password:password.value};
       if(password.value!==password2.value){msg.textContent='비밀번호가 일치하지 않습니다.';return;}
     """ if change else "const path='/api/auth/login'; const body={username:username.value,password:password.value};"
     return f"""<!doctype html><html lang='ko'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width'><title>{title}</title>
-    <style>*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#142116 url('/static/minecraft-panel-background.png') center/cover fixed;font-family:Arial,sans-serif;color:#fff}}form{{width:min(390px,calc(100% - 32px));padding:30px;background:rgba(12,25,18,.88);border:1px solid #7daa69;border-radius:8px;box-shadow:0 20px 60px #0009}}h1{{font-size:23px;margin:0 0 8px}}p{{color:#c9d6ca}}input,button{{width:100%;height:46px;margin-top:12px;border-radius:5px;border:1px solid #607666;padding:0 13px;font-size:15px}}button{{background:#5f8f45;color:#fff;font-weight:700;cursor:pointer}}#msg{{color:#ffcf70;min-height:20px}}</style></head>
-    <body><form id='form'><h1>{title}</h1><p>{'현재 비밀번호 입력 없이 새 비밀번호만 설정합니다.' if change else 'TechTim Minecraft Server Panel'}</p>{'' if change else "<input id='username' value='admin' autocomplete='username' required>"}<input id='password' type='password' placeholder='비밀번호' autocomplete='current-password' required>{fields}<button>확인</button><p id='msg'></p></form>
+    <style>*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#142116 url('/static/minecraft-panel-background.png') center/cover fixed;font-family:Arial,sans-serif;color:#fff}}form{{width:min(390px,calc(100% - 32px));padding:30px;background:rgba(12,25,18,.88);border:1px solid #7daa69;border-radius:8px;box-shadow:0 20px 60px #0009}}h1{{font-size:23px;margin:0 0 8px}}p{{color:#c9d6ca}}input,button{{width:100%;height:46px;margin-top:12px;border-radius:5px;border:1px solid #607666;padding:0 13px;font-size:15px}}button{{background:#5f8f45;color:#fff;font-weight:700;cursor:pointer}}.hint{{margin-top:16px;padding:12px;border:1px solid #607666;border-radius:5px;background:rgba(255,255,255,.08);color:#dfe9df;font-size:13px;line-height:1.55}}.hint b{{color:#fff}}#msg{{color:#ffcf70;min-height:20px}}</style></head>
+    <body><form id='form'><h1>{title}</h1><p>{'현재 비밀번호 입력 없이 새 비밀번호만 설정합니다.' if change else 'TechTim Minecraft Server Panel'}</p>{'' if change else "<input id='username' value='admin' autocomplete='username' required>"}<input id='password' type='password' placeholder='비밀번호' autocomplete='current-password' required>{fields}<button>확인</button>{hint}<p id='msg'></p></form>
     <script>form.addEventListener('submit',async e=>{{e.preventDefault();{script}const r=await fetch(path,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});const d=await r.json();if(!r.ok){{msg.textContent=d.detail||'처리하지 못했습니다.';return}}location.href=d.redirect||'/';}})</script></body></html>"""
 
 
@@ -408,8 +547,8 @@ def login(payload: LoginRequest, response: Response):
 @app.post("/api/auth/change-password")
 def change_password(payload: ChangePasswordRequest, request: Request):
     require_auth(request)
-    if len(payload.new_password) < 8:
-        raise HTTPException(status_code=400, detail="새 비밀번호는 8자 이상이어야 합니다.")
+    if not payload.new_password:
+        raise HTTPException(status_code=400, detail="새 비밀번호를 입력해 주세요.")
     auth = read_json(AUTH_FILE, {})
     salt = secrets.token_hex(16)
     auth.update({"salt": salt, "password_hash": hash_password(payload.new_password, salt), "must_change_password": False})
@@ -424,6 +563,48 @@ def logout(request: Request, response: Response):
     write_json(SESSIONS_FILE, sessions)
     response.delete_cookie(SESSION_COOKIE)
     return {"status": "ok"}
+
+
+@app.post("/api/panel/update")
+def request_panel_update(request: Request, tasks: BackgroundTasks):
+    global PANEL_UPDATE_ACTIVE
+
+    require_auth(request)
+    current_status = read_panel_update_status()
+    if current_status.get("status") in {"checking", "downloading", "restarting"}:
+        if PANEL_UPDATE_ACTIVE or is_panel_updater_running():
+            return {
+                "status": current_status.get("status"),
+                "message": current_status.get("message"),
+            }
+        write_panel_update_status(
+            "failed",
+            "이전에 중단된 구동기 업데이트 작업을 정리했습니다. 업데이트를 다시 시작합니다.",
+        )
+
+    with PANEL_UPDATE_LOCK:
+        if PANEL_UPDATE_ACTIVE:
+            return {
+                "status": "running",
+                "message": "이미 TechTim 구동기 업데이트 작업이 실행 중입니다.",
+            }
+        PANEL_UPDATE_ACTIVE = True
+
+    write_panel_update_status(
+        "checking",
+        "TechTim 구동기 업데이트 확인 작업을 시작합니다.",
+    )
+    tasks.add_task(panel_update_job)
+    return {
+        "status": "started",
+        "message": "TechTim 구동기 업데이트 확인을 시작했습니다.",
+    }
+
+
+@app.get("/api/panel/update/status")
+def panel_update_status(request: Request):
+    require_auth(request)
+    return read_panel_update_status()
 
 
 @app.get("/", response_class=HTMLResponse)
