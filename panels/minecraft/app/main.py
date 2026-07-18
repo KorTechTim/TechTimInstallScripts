@@ -1041,7 +1041,7 @@ def server_log(request: Request):
             logs = f"서버 로그 조회 실패: {exc}"
     control = clean_log(CONTROL_LOG_FILE.read_text(encoding="utf-8")) if CONTROL_LOG_FILE.exists() else ""
     if control:
-        logs = f"{logs.rstrip()}\n\n[패널 제어 로그]\n{control}".strip()
+        logs = f"[패널 제어 로그]\n{control.rstrip()}\n\n{logs.lstrip()}".strip()
     return {"log": logs}
 
 
