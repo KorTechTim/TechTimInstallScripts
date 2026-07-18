@@ -7,10 +7,12 @@
 - `admin/admin` 최초 로그인 후 새 비밀번호 설정
 - Vanilla, Paper, Purpur, Spigot, Forge, NeoForge, Fabric, Quilt 지원
 - Forge, NeoForge, Fabric 서버팩 URL 자동 설치
-- 서버 설치, 시작, 중지, 재시작, 상태 및 실시간 로그
+- 서버 설치, 시작, 중지, 삭제, 상태 및 실시간 로그
+- 게임 컨테이너와 전체 서버 데이터를 초기화한 뒤 엔진 설치부터 다시 시작
 - 서버 실행 중 설정/파일 쓰기 잠금
 - `/data` 전체 서버 디렉터리 탐색기
-- Docker 이미지 Pull 진행 로그 및 VM 재부팅 후 자동 복구
+- CPU, 메모리, 디스크, 네트워크 리소스 5초 주기 모니터링
+- Docker 이미지 Pull 진행 로그, 웹패널 업데이트 진행률 및 VM 재부팅 후 자동 복구
 
 게임 데이터는 호스트의 `/opt/techtim/minecraft/data/server`에 유지되고 게임 컨테이너의 `/data`에 마운트됩니다.
 

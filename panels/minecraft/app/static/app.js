@@ -3,6 +3,7 @@ const terminal = $('terminal');
 const settingsDialog = $('settingsDialog');
 const filesDialog = $('filesDialog');
 const eulaDialog = $('eulaDialog');
+const deleteServerDialog = $('deleteServerDialog');
 const panelUpdateDialog = $('panelUpdateDialog');
 let logMode = 'install';
 let currentPath = '';
@@ -71,7 +72,7 @@ async function refreshStatus() {
     setStatusIcon($('serverIcon'), server.status, ['running']);
     $('startButton').disabled = server.running || !install.installed;
     $('stopButton').disabled = !server.running;
-    $('restartButton').disabled = !server.running;
+    $('deleteServerButton').disabled = install.status === 'running' || (!install.installed && server.status === 'not_created');
     $('installButton').disabled = install.status === 'running';
     $('settingsEntry').classList.toggle('locked', server.running);
     $('settingsButton').disabled = server.running;
@@ -173,7 +174,27 @@ $('eulaAgreeButton').onclick = async event => {
   button.disabled = false;
 };
 $('stopButton').onclick = () => serverAction('stop');
-$('restartButton').onclick = () => serverAction('restart');
+$('deleteServerButton').onclick = () => showDialog(deleteServerDialog);
+$('deleteServerConfirm').onclick = async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  button.textContent = '서버 삭제 중...';
+  try {
+    const data = await api('/api/server/delete', {method: 'POST'});
+    closeDialog(deleteServerDialog);
+    selectLog('install');
+    const config = await api('/api/config');
+    $('settingsMode').textContent = `${config.config.Type} · ${config.config.Version} · ${config.config.Memory}`;
+    await refreshStatus();
+    await refreshLog();
+    toast(data.message || '서버 데이터가 삭제되었습니다.');
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = '모든 서버 데이터 삭제';
+  }
+};
 
 const fields = ['Type','Version','Memory','ServerName','Motd','Level','Seed','Difficulty','GameMode','MaxPlayers','OnlineMode','Pvp','AllowFlight','EnableCommandBlock','ViewDistance','SimulationDistance','SpawnProtection','Whitelist','Ops','ModrinthProjects','ModpackUrl'];
 const checkFields = new Set(['OnlineMode','Pvp','AllowFlight','EnableCommandBlock']);
@@ -308,6 +329,16 @@ function schedulePanelUpdateStatus(delay = 2000) {
   panelUpdatePollTimer = setTimeout(loadPanelUpdateStatus, delay);
 }
 
+function setPanelUpdateProgress(progress, status = 'idle') {
+  const value = Math.max(0, Math.min(100, Math.round(Number(progress) || 0)));
+  const wrapper = $('panelUpdateProgress');
+  const track = wrapper.querySelector('[role="progressbar"]');
+  wrapper.dataset.status = status;
+  $('panelUpdatePercent').textContent = `${value}%`;
+  $('panelUpdateProgressBar').style.width = `${value}%`;
+  track.setAttribute('aria-valuenow', String(value));
+}
+
 async function loadPanelUpdateStatus() {
   const statusBox = $('panelUpdateStatus');
   const updateButton = $('panelUpdateConfirm');
@@ -320,6 +351,9 @@ async function loadPanelUpdateStatus() {
     const active = ['checking', 'downloading', 'restarting', 'running', 'started'].includes(status);
     statusBox.dataset.status = status;
     statusBox.textContent = data.message || '업데이트 상태를 확인할 수 없습니다.';
+    const fallbackProgress = {started: 2, running: 5, checking: 5, downloading: 10, restarting: 90, completed: 100, not_required: 100};
+    const reportedProgress = Number(data.progress);
+    setPanelUpdateProgress(reportedProgress > 0 ? reportedProgress : fallbackProgress[status] ?? 0, status);
     updateButton.disabled = active;
     updateButton.textContent = active ? '업데이트 진행 중' : '업데이트 확인 및 설치';
 
@@ -335,6 +369,7 @@ async function loadPanelUpdateStatus() {
       panelUpdateRequested = false;
       panelUpdateReloadScheduled = true;
       statusBox.textContent = 'TechTim 구동기 업데이트가 완료되었습니다. 화면을 새로고침합니다.';
+      setPanelUpdateProgress(100, 'completed');
       setTimeout(() => location.reload(), 1800);
       return;
     }
@@ -343,12 +378,15 @@ async function loadPanelUpdateStatus() {
     if (panelUpdateRequested) {
       statusBox.dataset.status = 'restarting';
       statusBox.textContent = '패널 컨테이너를 교체하고 있습니다. 잠시 후 자동으로 다시 연결합니다.';
+      const currentProgress = Number($('panelUpdateProgress').querySelector('[role="progressbar"]').getAttribute('aria-valuenow')) || 0;
+      setPanelUpdateProgress(Math.max(currentProgress, 92), 'restarting');
       updateButton.disabled = true;
       updateButton.textContent = '업데이트 진행 중';
       schedulePanelUpdateStatus(1800);
     } else {
       statusBox.dataset.status = 'failed';
       statusBox.textContent = `업데이트 상태 조회 실패: ${error.message}`;
+      setPanelUpdateProgress(0, 'failed');
     }
   }
 }
@@ -364,6 +402,7 @@ async function requestPanelUpdate() {
   updateButton.textContent = '업데이트 확인 중';
   statusBox.dataset.status = 'checking';
   statusBox.textContent = 'TechTim 구동기 업데이트 확인을 요청하고 있습니다.';
+  setPanelUpdateProgress(2, 'checking');
 
   try {
     const response = await fetch('/api/panel/update', {method: 'POST'});
@@ -380,6 +419,45 @@ async function requestPanelUpdate() {
     updateButton.textContent = '업데이트 확인 및 설치';
     statusBox.dataset.status = 'failed';
     statusBox.textContent = `TechTim 구동기 업데이트 요청 실패: ${error.message}`;
+    setPanelUpdateProgress(0, 'failed');
+  }
+}
+
+function formatResourceBytes(value, perSecond = false) {
+  const bytes = Math.max(0, Number(value) || 0);
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let unit = 0;
+  let amount = bytes;
+  while (amount >= 1024 && unit < units.length - 1) {
+    amount /= 1024;
+    unit++;
+  }
+  const digits = unit === 0 || amount >= 100 ? 0 : amount >= 10 ? 1 : 2;
+  return `${amount.toFixed(digits)} ${units[unit]}${perSecond ? '/s' : ''}`;
+}
+
+function setResourceMeter(valueId, barId, percent) {
+  const value = Math.max(0, Math.min(100, Number(percent) || 0));
+  $(valueId).textContent = `${value.toFixed(value % 1 ? 1 : 0)}%`;
+  $(barId).style.width = `${value}%`;
+}
+
+async function refreshResources() {
+  try {
+    const data = await api('/api/server/resources');
+    setResourceMeter('resourceCpu', 'resourceCpuBar', data.cpu_percent);
+    setResourceMeter('resourceMemory', 'resourceMemoryBar', data.memory_percent);
+    setResourceMeter('resourceDisk', 'resourceDiskBar', data.disk_percent);
+    $('resourceMemoryDetail').textContent = data.memory_limit
+      ? `${formatResourceBytes(data.memory_used)} / ${formatResourceBytes(data.memory_limit)}`
+      : '서버 시작 후 표시';
+    $('resourceDiskDetail').textContent = `${formatResourceBytes(data.disk_used)} / ${formatResourceBytes(data.disk_total)}`;
+    $('resourceNetworkDown').textContent = `↓ ${formatResourceBytes(data.network_received_per_second, true)}`;
+    $('resourceNetworkUp').textContent = `↑ ${formatResourceBytes(data.network_sent_per_second, true)}`;
+    $('resourceNetworkState').textContent = data.running ? '활성' : '대기';
+    $('resourceStatus').textContent = data.error ? '일부 조회 실패 · 5초' : data.running ? '실시간 · 5초' : '서버 대기 · 5초';
+  } catch (_) {
+    $('resourceStatus').textContent = '조회 실패 · 5초';
   }
 }
 
@@ -389,7 +467,9 @@ async function initialize() {
   const config = await api('/api/config').catch(() => null);
   if (config) $('settingsMode').textContent = `${config.config.Type} · ${config.config.Version} · ${config.config.Memory}`;
   await refreshLog();
+  await refreshResources();
   setInterval(refreshStatus, 3000);
   setInterval(refreshLog, 2000);
+  setInterval(refreshResources, 5000);
 }
 initialize();

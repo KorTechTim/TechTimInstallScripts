@@ -56,6 +56,13 @@ PANEL_UPDATE_LOCK = threading.Lock()
 PANEL_UPDATE_ACTIVE = False
 VERSION_CACHE_LOCK = threading.Lock()
 VERSION_CACHE: dict[str, Any] = {"expires_at": 0.0, "payload": None}
+RESOURCE_LOCK = threading.Lock()
+RESOURCE_NETWORK_SAMPLE: dict[str, Any] = {
+    "container_id": "",
+    "sampled_at": 0.0,
+    "received": 0,
+    "sent": 0,
+}
 KST = timezone(timedelta(hours=9), name="KST")
 ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 ANSI_FRAGMENT_RE = re.compile(r"(?:\[(?:0|1|2|3|4|5|7|9|10[0-7]|[34][0-7])m)+")
@@ -281,6 +288,54 @@ def server_running() -> bool:
         return False
 
 
+def container_resource_usage(container) -> dict[str, Any]:
+    stats = container.stats(stream=False)
+    cpu_stats = stats.get("cpu_stats") or {}
+    previous_cpu_stats = stats.get("precpu_stats") or {}
+    cpu_usage = cpu_stats.get("cpu_usage") or {}
+    previous_cpu_usage = previous_cpu_stats.get("cpu_usage") or {}
+    cpu_delta = float(cpu_usage.get("total_usage") or 0) - float(previous_cpu_usage.get("total_usage") or 0)
+    system_delta = float(cpu_stats.get("system_cpu_usage") or 0) - float(previous_cpu_stats.get("system_cpu_usage") or 0)
+    cpu_percent = max(0.0, min(100.0, cpu_delta / system_delta * 100)) if system_delta > 0 and cpu_delta >= 0 else 0.0
+
+    memory = stats.get("memory_stats") or {}
+    memory_stats = memory.get("stats") or {}
+    memory_cache = int(memory_stats.get("total_inactive_file") or memory_stats.get("inactive_file") or 0)
+    memory_used = max(0, int(memory.get("usage") or 0) - memory_cache)
+    memory_limit = max(0, int(memory.get("limit") or 0))
+    memory_percent = memory_used / memory_limit * 100 if memory_limit else 0.0
+
+    networks = stats.get("networks") or {}
+    received = sum(max(0, int(item.get("rx_bytes") or 0)) for item in networks.values())
+    sent = sum(max(0, int(item.get("tx_bytes") or 0)) for item in networks.values())
+    sampled_at = time.monotonic()
+    container_id = str(getattr(container, "id", "") or "")
+    with RESOURCE_LOCK:
+        previous_id = str(RESOURCE_NETWORK_SAMPLE.get("container_id") or "")
+        elapsed = sampled_at - float(RESOURCE_NETWORK_SAMPLE.get("sampled_at") or 0)
+        if previous_id == container_id and elapsed > 0:
+            received_per_second = max(0.0, (received - int(RESOURCE_NETWORK_SAMPLE.get("received") or 0)) / elapsed)
+            sent_per_second = max(0.0, (sent - int(RESOURCE_NETWORK_SAMPLE.get("sent") or 0)) / elapsed)
+        else:
+            received_per_second = 0.0
+            sent_per_second = 0.0
+        RESOURCE_NETWORK_SAMPLE.update({
+            "container_id": container_id,
+            "sampled_at": sampled_at,
+            "received": received,
+            "sent": sent,
+        })
+
+    return {
+        "cpu_percent": round(cpu_percent, 1),
+        "memory_percent": round(min(100.0, max(0.0, memory_percent)), 1),
+        "memory_used": memory_used,
+        "memory_limit": memory_limit,
+        "network_received_per_second": round(received_per_second),
+        "network_sent_per_second": round(sent_per_second),
+    }
+
+
 def installed() -> bool:
     if not INSTALL_MARKER_FILE.exists():
         return False
@@ -358,6 +413,7 @@ def default_panel_update_status() -> dict:
     return {
         "status": "idle",
         "message": "TechTim 구동기 업데이트를 확인할 수 있습니다.",
+        "progress": 0,
         "current_image_id": "",
         "latest_image_id": "",
         "updated_at": "",
@@ -402,6 +458,65 @@ def is_panel_updater_running() -> bool:
         return False
 
 
+def panel_pull_event_progress(status: str, progress_detail: dict[str, Any]) -> float | None:
+    normalized = status.strip().lower()
+    current = float(progress_detail.get("current") or 0)
+    total = float(progress_detail.get("total") or 0)
+    ratio = min(1.0, current / total) if total > 0 else 0.0
+    if normalized in {"already exists", "pull complete"}:
+        return 1.0
+    if normalized == "extracting":
+        return 0.7 + ratio * 0.3
+    if normalized in {"download complete", "verifying checksum"}:
+        return 0.7
+    if normalized == "downloading":
+        return ratio * 0.7
+    if normalized in {"pulling fs layer", "waiting"}:
+        return 0.0
+    return None
+
+
+def pull_panel_image_with_progress(client, current_image_id: str):
+    repository, tag = docker.utils.parse_repository_tag(PANEL_IMAGE)
+    tag = tag or "latest"
+    layers: dict[str, float] = {}
+    last_progress = 10
+    for event in client.api.pull(repository, tag=tag, stream=True, decode=True):
+        if not isinstance(event, dict):
+            continue
+        if event.get("error"):
+            raise RuntimeError(str(event["error"]))
+        layer = str(event.get("id") or "").strip()
+        layer_progress = panel_pull_event_progress(
+            clean_log(event.get("status", "")),
+            event.get("progressDetail") if isinstance(event.get("progressDetail"), dict) else {},
+        )
+        if layer and layer_progress is not None:
+            layers[layer] = max(layers.get(layer, 0.0), layer_progress)
+        if not layers:
+            continue
+        progress = min(84, 10 + int(74 * sum(layers.values()) / len(layers)))
+        if progress <= last_progress:
+            continue
+        last_progress = progress
+        write_panel_update_status(
+            "downloading",
+            "최신 TechTim 구동기 이미지를 다운로드하고 있습니다.",
+            progress=progress,
+            current_image_id=current_image_id,
+        )
+
+    image = client.images.get(PANEL_IMAGE)
+    write_panel_update_status(
+        "downloading",
+        "최신 이미지 다운로드가 완료되어 무결성을 확인하고 있습니다.",
+        progress=85,
+        current_image_id=current_image_id,
+        latest_image_id=image.id,
+    )
+    return image
+
+
 def panel_update_job() -> None:
     global PANEL_UPDATE_ACTIVE
 
@@ -409,6 +524,7 @@ def panel_update_job() -> None:
         write_panel_update_status(
             "checking",
             "현재 TechTim 구동기 이미지와 최신 이미지를 비교하고 있습니다.",
+            progress=5,
         )
         client = docker_client()
         current_container = client.containers.get(PANEL_CONTAINER_NAME)
@@ -418,15 +534,17 @@ def panel_update_job() -> None:
         write_panel_update_status(
             "downloading",
             "최신 TechTim 구동기 이미지를 확인하고 있습니다. 이미지 다운로드에는 시간이 걸릴 수 있습니다.",
+            progress=10,
             current_image_id=current_image_id,
         )
-        latest_image = client.images.pull(PANEL_IMAGE)
+        latest_image = pull_panel_image_with_progress(client, current_image_id)
         latest_image_id = latest_image.id
 
         if current_image_id == latest_image_id:
             write_panel_update_status(
                 "not_required",
                 "이미 최신 버전의 TechTim 구동기를 사용하고 있어 업데이트가 필요하지 않습니다.",
+                progress=100,
                 current_image_id=current_image_id,
                 latest_image_id=latest_image_id,
             )
@@ -445,6 +563,7 @@ def panel_update_job() -> None:
         write_panel_update_status(
             "restarting",
             "최신 이미지 다운로드가 완료되었습니다. 패널 컨테이너를 교체하고 있습니다.",
+            progress=90,
             current_image_id=current_image_id,
             latest_image_id=latest_image_id,
         )
@@ -473,9 +592,11 @@ def panel_update_job() -> None:
             },
         )
     except Exception as error:
+        failed_progress = int(read_panel_update_status().get("progress") or 0)
         write_panel_update_status(
             "failed",
             f"TechTim 구동기 업데이트에 실패했습니다: {error}",
+            progress=failed_progress,
         )
     finally:
         with PANEL_UPDATE_LOCK:
@@ -625,6 +746,7 @@ def request_panel_update(request: Request, tasks: BackgroundTasks):
         write_panel_update_status(
             "failed",
             "이전에 중단된 구동기 업데이트 작업을 정리했습니다. 업데이트를 다시 시작합니다.",
+            progress=int(current_status.get("progress") or 0),
         )
 
     with PANEL_UPDATE_LOCK:
@@ -638,6 +760,7 @@ def request_panel_update(request: Request, tasks: BackgroundTasks):
     write_panel_update_status(
         "checking",
         "TechTim 구동기 업데이트 확인 작업을 시작합니다.",
+        progress=2,
     )
     tasks.add_task(panel_update_job)
     return {
@@ -774,6 +897,50 @@ def restart_server(request: Request):
     return {"status": "restarted"}
 
 
+@app.post("/api/server/delete")
+def delete_server(request: Request):
+    require_auth(request)
+    global INSTALL_ACTIVE
+    with INSTALL_LOCK:
+        if INSTALL_ACTIVE:
+            raise HTTPException(status_code=409, detail="엔진 설치 중에는 서버를 삭제할 수 없습니다.")
+        INSTALL_ACTIVE = True
+
+    try:
+        client = docker_client()
+        try:
+            container = client.containers.get(SERVER_CONTAINER)
+        except docker.errors.NotFound:
+            container = None
+        if container:
+            container.remove(force=True)
+
+        if SERVER_DIR.is_symlink() or SERVER_DIR.is_file():
+            SERVER_DIR.unlink()
+        elif SERVER_DIR.exists():
+            shutil.rmtree(SERVER_DIR)
+        SERVER_DIR.mkdir(parents=True, exist_ok=True)
+
+        for path in (
+            CONFIG_FILE,
+            INSTALL_LOG_FILE,
+            INSTALL_STATUS_FILE,
+            INSTALL_MARKER_FILE,
+            CONTROL_LOG_FILE,
+        ):
+            path.unlink(missing_ok=True)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"서버 데이터 삭제에 실패했습니다: {exc}") from exc
+    finally:
+        with INSTALL_LOCK:
+            INSTALL_ACTIVE = False
+
+    return {
+        "status": "deleted",
+        "message": "서버 데이터가 모두 삭제되었습니다. 엔진 설치부터 다시 진행해주세요.",
+    }
+
+
 @app.get("/api/server/status")
 def server_status(request: Request):
     require_auth(request)
@@ -783,6 +950,38 @@ def server_status(request: Request):
         container.reload()
         status = container.status
     return {"status": status, "running": status == "running", "installed": installed()}
+
+
+@app.get("/api/server/resources")
+def server_resources(request: Request):
+    require_auth(request)
+    ensure_dirs()
+    disk = shutil.disk_usage(SERVER_DIR)
+    resources: dict[str, Any] = {
+        "running": False,
+        "cpu_percent": 0.0,
+        "memory_percent": 0.0,
+        "memory_used": 0,
+        "memory_limit": 0,
+        "disk_percent": round(disk.used / disk.total * 100, 1) if disk.total else 0.0,
+        "disk_used": disk.used,
+        "disk_total": disk.total,
+        "network_received_per_second": 0,
+        "network_sent_per_second": 0,
+        "updated_at": datetime.now(KST).isoformat(timespec="seconds"),
+    }
+    container = get_container()
+    if not container:
+        return resources
+    try:
+        container.reload()
+        if container.status != "running":
+            return resources
+        resources.update(container_resource_usage(container))
+        resources["running"] = True
+    except Exception as error:
+        resources["error"] = clean_log(str(error))
+    return resources
 
 
 @app.get("/api/server/log")
