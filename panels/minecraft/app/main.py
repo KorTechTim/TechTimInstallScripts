@@ -654,6 +654,8 @@ def runtime_environment(config: dict) -> dict[str, str]:
     }
     if config["Type"] in MODPACK_URL_TYPES:
         optional["GENERIC_PACK"] = config["ModpackUrl"]
+    if config["Type"] == "FORGE" and config["ModpackUrl"]:
+        optional["FORGE_VERSION"] = "latest"
     for key, value in optional.items():
         if str(value or "").strip():
             env[key] = str(value).strip()
