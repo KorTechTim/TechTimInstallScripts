@@ -6,7 +6,7 @@
 
 - `admin/admin` 최초 로그인 후 새 비밀번호 설정
 - Vanilla, Paper, Purpur, Spigot, Forge, NeoForge, Fabric, Quilt 지원
-- CurseForge 및 Modrinth 모드팩 자동 설치
+- Forge, NeoForge, Fabric 서버팩 URL 자동 설치
 - 서버 설치, 시작, 중지, 재시작, 상태 및 실시간 로그
 - 서버 실행 중 설정/파일 쓰기 잠금
 - `/data` 전체 서버 디렉터리 탐색기
@@ -26,7 +26,7 @@ docker run --rm -p 8080:8080 \
   minecraft-panel
 ```
 
-초기 계정은 `admin / admin`입니다. Minecraft EULA 동의는 서버 설정 화면에서 사용자가 직접 확인해야 합니다.
+초기 계정은 `admin / admin`입니다. Minecraft EULA는 서버 시작 버튼을 누를 때 공식 약관을 확인한 뒤 동의해야 합니다.
 
 ## GCP 배포
 

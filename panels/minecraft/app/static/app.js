@@ -2,6 +2,7 @@ const $ = id => document.getElementById(id);
 const terminal = $('terminal');
 const settingsDialog = $('settingsDialog');
 const filesDialog = $('filesDialog');
+const eulaDialog = $('eulaDialog');
 const panelUpdateDialog = $('panelUpdateDialog');
 let logMode = 'install';
 let currentPath = '';
@@ -75,7 +76,6 @@ async function refreshStatus() {
     $('settingsEntry').classList.toggle('locked', server.running);
     $('settingsButton').disabled = server.running;
     $('consoleCommandInput').disabled = !server.running || commandSending;
-    $('consoleCommandSend').disabled = !server.running || commandSending;
     if (server.running && logMode !== 'server') selectLog('server');
   } catch (error) { toast(error.message, true); }
 }
@@ -121,7 +121,6 @@ $('consoleCommandForm').onsubmit = async event => {
   if (!command || commandSending) return;
   commandSending = true;
   input.disabled = true;
-  $('consoleCommandSend').disabled = true;
   try {
     const data = await api('/api/server/command', {
       method: 'POST',
@@ -152,25 +151,36 @@ $('installButton').onclick = async () => {
   catch (error) { toast(error.message, true); }
 };
 
-async function serverAction(action) {
+async function serverAction(action, payload = null) {
   try {
-    await api(`/api/server/${action}`, {method: 'POST'});
+    const options = {method: 'POST'};
+    if (payload) {
+      options.headers = {'Content-Type': 'application/json'};
+      options.body = JSON.stringify(payload);
+    }
+    await api(`/api/server/${action}`, options);
     selectLog('server');
     toast({start: '서버 시작을 요청했습니다.', stop: '서버가 종료되었습니다.', restart: '서버를 재시작했습니다.'}[action]);
     await refreshStatus();
   } catch (error) { toast(error.message, true); }
 }
-$('startButton').onclick = () => serverAction('start');
+$('startButton').onclick = () => showDialog(eulaDialog);
+$('eulaAgreeButton').onclick = async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  closeDialog(eulaDialog);
+  await serverAction('start', {eula_accepted: true});
+  button.disabled = false;
+};
 $('stopButton').onclick = () => serverAction('stop');
 $('restartButton').onclick = () => serverAction('restart');
 
-const fields = ['Type','Version','Memory','ServerName','Motd','Level','Seed','Difficulty','GameMode','MaxPlayers','OnlineMode','Pvp','AllowFlight','EnableCommandBlock','ViewDistance','SimulationDistance','SpawnProtection','Whitelist','Ops','ModrinthProjects','ModrinthModpack','ModrinthLoader','CurseForgePageUrl','CurseForgeSlug','CurseForgeApiKey','EulaAccepted'];
-const checkFields = new Set(['OnlineMode','Pvp','AllowFlight','EnableCommandBlock','EulaAccepted']);
+const fields = ['Type','Version','Memory','ServerName','Motd','Level','Seed','Difficulty','GameMode','MaxPlayers','OnlineMode','Pvp','AllowFlight','EnableCommandBlock','ViewDistance','SimulationDistance','SpawnProtection','Whitelist','Ops','ModrinthProjects','ModpackUrl'];
+const checkFields = new Set(['OnlineMode','Pvp','AllowFlight','EnableCommandBlock']);
 const numberFields = new Set(['MaxPlayers','ViewDistance','SimulationDistance','SpawnProtection']);
 
 function updateTypeFields() {
-  $('modrinthSection').classList.toggle('visible', $('Type').value === 'MODRINTH');
-  $('curseforgeSection').classList.toggle('visible', $('Type').value === 'AUTO_CURSEFORGE');
+  $('loaderModpackSection').classList.toggle('visible', ['FORGE', 'NEOFORGE', 'FABRIC'].includes($('Type').value));
 }
 
 function updateRange(input) {
@@ -195,10 +205,9 @@ async function openSettings(targetId = '') {
       if (!input) return;
       if (checkFields.has(key)) input.checked = Boolean(data.config[key]);
       else if (key === 'Memory') input.value = String(data.config[key] || '4G').replace(/G$/i, '');
-      else if (key !== 'CurseForgeApiKey') input.value = data.config[key] ?? '';
+      else input.value = data.config[key] ?? '';
       updateRange(input);
     });
-    $('CurseForgeApiKey').value = '';
     $('ExtraEnv').value = JSON.stringify(data.config.ExtraEnv || {}, null, 2);
     updateTypeFields();
     showDialog(settingsDialog);

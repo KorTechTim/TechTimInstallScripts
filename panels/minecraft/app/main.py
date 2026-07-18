@@ -24,6 +24,10 @@ APP_DIR = Path(__file__).resolve().parent
 app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="static")
 
 PANEL_VERSION = os.getenv("PANEL_VERSION", "1.0.0")
+STATIC_ASSET_VERSION = hashlib.sha256(
+    (APP_DIR / "static" / "app.css").read_bytes()
+    + (APP_DIR / "static" / "app.js").read_bytes()
+).hexdigest()[:12]
 MINECRAFT_VERSION_MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 HOST_DATA_DIR = Path(os.getenv("HOST_DATA_DIR", "/opt/techtim/minecraft/data"))
@@ -58,8 +62,9 @@ ANSI_FRAGMENT_RE = re.compile(r"(?:\[(?:0|1|2|3|4|5|7|9|10[0-7]|[34][0-7])m)+")
 
 SERVER_TYPES = {
     "VANILLA", "PAPER", "PURPUR", "SPIGOT", "FORGE", "NEOFORGE",
-    "FABRIC", "QUILT", "AUTO_CURSEFORGE", "MODRINTH",
+    "FABRIC", "QUILT",
 }
+MODPACK_URL_TYPES = {"FORGE", "NEOFORGE", "FABRIC"}
 
 FALLBACK_MINECRAFT_VERSIONS = [
     "26.2", "26.1.2", "26.1.1", "26.1",
@@ -81,8 +86,11 @@ class ServerCommandRequest(BaseModel):
     command: str = Field(min_length=1, max_length=500)
 
 
+class StartServerRequest(BaseModel):
+    eula_accepted: bool = False
+
+
 class ConfigRequest(BaseModel):
-    EulaAccepted: bool = False
     Type: str = "PAPER"
     Version: str = "LATEST"
     Memory: str = "4G"
@@ -103,11 +111,7 @@ class ConfigRequest(BaseModel):
     Whitelist: str = ""
     Ops: str = ""
     ModrinthProjects: str = ""
-    ModrinthModpack: str = ""
-    ModrinthLoader: str = ""
-    CurseForgePageUrl: str = ""
-    CurseForgeSlug: str = ""
-    CurseForgeApiKey: str = ""
+    ModpackUrl: str = ""
     ExtraEnv: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -238,6 +242,7 @@ def normalize_config(raw: dict) -> dict:
     merged["ViewDistance"] = min(32, max(2, int(merged["ViewDistance"])))
     merged["SimulationDistance"] = min(32, max(2, int(merged["SimulationDistance"])))
     merged["SpawnProtection"] = min(128, max(0, int(merged["SpawnProtection"])))
+    merged["ModpackUrl"] = str(merged.get("ModpackUrl") or "").strip()
     merged["ExtraEnv"] = merged.get("ExtraEnv") if isinstance(merged.get("ExtraEnv"), dict) else {}
     return merged
 
@@ -507,17 +512,8 @@ def runtime_environment(config: dict) -> dict[str, str]:
         "SEED": config["Seed"], "WHITELIST": config["Whitelist"], "OPS": config["Ops"],
         "MODRINTH_PROJECTS": config["ModrinthProjects"],
     }
-    if config["Type"] == "MODRINTH":
-        optional.update({
-            "MODRINTH_MODPACK": config["ModrinthModpack"],
-            "MODRINTH_LOADER": config["ModrinthLoader"],
-        })
-    if config["Type"] == "AUTO_CURSEFORGE":
-        optional.update({
-            "CF_PAGE_URL": config["CurseForgePageUrl"],
-            "CF_SLUG": config["CurseForgeSlug"],
-            "CF_API_KEY": config["CurseForgeApiKey"],
-        })
+    if config["Type"] in MODPACK_URL_TYPES:
+        optional["GENERIC_PACK"] = config["ModpackUrl"]
     for key, value in optional.items():
         if str(value or "").strip():
             env[key] = str(value).strip()
@@ -531,15 +527,8 @@ def runtime_environment(config: dict) -> dict[str, str]:
 
 
 def validate_start(config: dict) -> None:
-    if not config["EulaAccepted"]:
-        raise HTTPException(status_code=400, detail="Minecraft EULA 동의가 필요합니다.")
-    if config["Type"] == "MODRINTH" and not config["ModrinthModpack"].strip():
-        raise HTTPException(status_code=400, detail="Modrinth 모드팩 주소, slug 또는 ID를 입력해주세요.")
-    if config["Type"] == "AUTO_CURSEFORGE":
-        if not config["CurseForgeApiKey"].strip():
-            raise HTTPException(status_code=400, detail="CurseForge API Key를 입력해주세요.")
-        if not (config["CurseForgePageUrl"].strip() or config["CurseForgeSlug"].strip()):
-            raise HTTPException(status_code=400, detail="CurseForge 모드팩 URL 또는 slug를 입력해주세요.")
+    if config["ModpackUrl"] and not re.match(r"^https?://\S+$", config["ModpackUrl"], re.IGNORECASE):
+        raise HTTPException(status_code=400, detail="모드팩 URL은 http:// 또는 https:// 주소로 입력해주세요.")
 
 
 def resolve_path(relative: str = "") -> Path:
@@ -670,7 +659,10 @@ def dashboard(request: Request):
     if read_json(AUTH_FILE, {}).get("must_change_password", True):
         return RedirectResponse("/change-password")
     html = (APP_DIR / "static" / "dashboard.html").read_text(encoding="utf-8")
-    return HTMLResponse(html.replace("{{PANEL_VERSION}}", PANEL_VERSION))
+    return HTMLResponse(
+        html.replace("{{PANEL_VERSION}}", PANEL_VERSION)
+        .replace("{{ASSET_VERSION}}", STATIC_ASSET_VERSION)
+    )
 
 
 @app.post("/api/install")
@@ -702,9 +694,6 @@ def install_log(request: Request):
 def get_config(request: Request):
     require_auth(request)
     config = read_config()
-    if config.get("CurseForgeApiKey"):
-        config["CurseForgeApiKeySet"] = True
-        config["CurseForgeApiKey"] = ""
     return {"config": config, "locked": server_running(), "types": sorted(SERVER_TYPES)}
 
 
@@ -720,15 +709,17 @@ def save_config(payload: ConfigRequest, request: Request):
     if server_running():
         raise HTTPException(status_code=409, detail="서버 실행 중에는 설정을 변경할 수 없습니다.")
     config = normalize_config(payload.model_dump())
-    if config["Type"] == "AUTO_CURSEFORGE" and not config["CurseForgeApiKey"] and CONFIG_FILE.exists():
-        config["CurseForgeApiKey"] = read_config().get("CurseForgeApiKey", "")
+    if config["ModpackUrl"] and not re.match(r"^https?://\S+$", config["ModpackUrl"], re.IGNORECASE):
+        raise HTTPException(status_code=400, detail="모드팩 URL은 http:// 또는 https:// 주소로 입력해주세요.")
     write_config(config)
     return {"status": "ok", "message": "설정이 저장되었습니다."}
 
 
 @app.post("/api/server/start")
-def start_server(request: Request):
+def start_server(payload: StartServerRequest, request: Request):
     require_auth(request)
+    if not payload.eula_accepted:
+        raise HTTPException(status_code=400, detail="Minecraft EULA에 동의해야 서버를 시작할 수 있습니다.")
     if server_running():
         raise HTTPException(status_code=409, detail="이미 서버가 동작 중입니다.")
     if not installed():

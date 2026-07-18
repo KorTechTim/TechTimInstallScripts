@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>TechTim Minecraft Server Panel</title>
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/app.css?v={{ASSET_VERSION}}">
 </head>
 <body>
   <main class="shell">
@@ -38,7 +38,6 @@
       <form class="console-command" id="consoleCommandForm">
         <span class="console-prompt" aria-hidden="true">›</span>
         <input id="consoleCommandInput" type="text" maxlength="500" autocomplete="off" placeholder="Minecraft 명령어 입력 (예: say 안녕하세요)" aria-label="Minecraft 서버 명령어" disabled>
-        <button id="consoleCommandSend" type="submit" title="명령어 전송" disabled>전송</button>
       </form>
     </section>
 
@@ -56,7 +55,7 @@
       <button class="command start" id="startButton"><span>▶</span>서버 시작</button>
       <button class="command stop" id="stopButton"><span>■</span>서버 중지</button>
       <button class="command restart" id="restartButton"><span>↻</span>서버 재시작</button>
-      <button class="command files" id="filesButton"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"></path></svg>서버 디렉토리</button>
+      <button class="command files" id="filesButton"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"></path></svg>서버 디렉토리</button>
     </section>
   </main>
 
@@ -64,8 +63,8 @@
     <form id="settingsForm" method="dialog">
       <div class="modal-head"><div><small>SERVER CONFIGURATION</small><h2>Minecraft 서버 설정</h2></div><button class="close" type="button" data-close="settingsDialog">×</button></div>
       <div class="form-scroll">
-        <section class="form-section"><h3>배포 유형</h3><div class="grid cols-3">
-          <label>서버 유형<select id="Type"><option value="VANILLA">Vanilla</option><option value="PAPER">Paper (플러그인 권장)</option><option value="PURPUR">Purpur</option><option value="SPIGOT">Spigot</option><option value="FORGE">Forge</option><option value="NEOFORGE">NeoForge</option><option value="FABRIC">Fabric</option><option value="QUILT">Quilt</option><option value="AUTO_CURSEFORGE">CurseForge 모드팩</option><option value="MODRINTH">Modrinth 모드팩</option></select></label>
+        <section class="form-section"><h3>배포 유형</h3><div class="grid cols-3 deployment-grid">
+          <label>서버 유형<select id="Type"><option value="VANILLA">Vanilla</option><option value="PAPER">Paper (플러그인 권장)</option><option value="PURPUR">Purpur</option><option value="SPIGOT">Spigot</option><option value="FORGE">Forge</option><option value="NEOFORGE">NeoForge</option><option value="FABRIC">Fabric</option><option value="QUILT">Quilt</option></select></label>
           <label>Minecraft 버전
             <span class="version-picker">
               <input id="Version" value="LATEST" placeholder="직접 입력" autocomplete="off">
@@ -83,6 +82,7 @@
             <span class="input-with-unit"><input id="Memory" value="4" inputmode="numeric" pattern="[1-9][0-9]*" placeholder="4" autocomplete="off" required><span class="input-unit" aria-hidden="true">G</span></span>
           </label>
         </div></section>
+        <section class="form-section conditional" id="loaderModpackSection"><h3>모드팩 자동 설치</h3><label>모드팩 URL<input id="ModpackUrl" type="url" placeholder="https://example.com/server-modpack.zip"><small class="field-help">직접 다운로드 가능한 서버팩 .zip 또는 .tgz 주소를 입력하세요.</small></label></section>
         <section class="form-section" id="serverPropertiesSection"><h3>서버 및 월드 · server.properties</h3><div class="grid cols-2">
           <label>서버 이름<input id="ServerName"></label><label>MOTD<input id="Motd"></label>
           <label>월드 폴더 이름<input id="Level"></label><label>월드 시드<input id="Seed" placeholder="비워두면 무작위"></label>
@@ -97,10 +97,7 @@
           <label>스폰 보호 범위 <output data-for="SpawnProtection"></output><input id="SpawnProtection" type="range" min="0" max="128"></label>
         </div><div class="checks"><label><input id="OnlineMode" type="checkbox">정품 인증</label><label><input id="Pvp" type="checkbox">PVP 허용</label><label><input id="AllowFlight" type="checkbox">비행 허용</label><label><input id="EnableCommandBlock" type="checkbox">커맨드 블록</label></div></section>
         <section class="form-section" id="projectsSection"><h3>모드 및 플러그인 자동 설치</h3><label>Modrinth 프로젝트 목록<textarea id="ModrinthProjects" rows="3" placeholder="fabric-api, lithium 또는 luckperms"></textarea></label></section>
-        <section class="form-section conditional" id="modrinthSection"><h3>Modrinth 모드팩</h3><div class="grid cols-2"><label>모드팩 주소 / slug / ID<input id="ModrinthModpack"></label><label>로더 제한<select id="ModrinthLoader"><option value="">자동</option><option value="forge">Forge</option><option value="fabric">Fabric</option><option value="quilt">Quilt</option></select></label></div></section>
-        <section class="form-section conditional" id="curseforgeSection"><h3>CurseForge 모드팩</h3><div class="grid cols-2"><label>모드팩 페이지 URL<input id="CurseForgePageUrl"></label><label>모드팩 slug<input id="CurseForgeSlug"></label><label class="wide">CurseForge API Key<input id="CurseForgeApiKey" type="password" autocomplete="off" placeholder="기존 키를 유지하려면 비워두세요"></label></div></section>
         <section class="form-section"><h3>고급 환경 변수</h3><label>추가 환경 변수 (JSON)<textarea id="ExtraEnv" rows="4" placeholder='{"ICON":"https://.../server-icon.png"}'></textarea></label></section>
-        <label class="eula"><input id="EulaAccepted" type="checkbox"><span><a href="https://www.minecraft.net/eula" target="_blank">Mojang Minecraft EULA</a>에 동의합니다.</span></label>
       </div>
       <div class="modal-actions"><span class="save-toast" id="saveToast">저장 완료</span><button type="button" class="secondary" data-close="settingsDialog">취소</button><button type="submit" class="primary">설정 저장</button></div>
     </form>
@@ -110,6 +107,15 @@
     <div class="modal-head"><div><small>SERVER DATA</small><h2>서버 디렉토리 탐색기</h2></div><button class="close" type="button" data-close="filesDialog">×</button></div>
     <div class="file-toolbar"><button id="fileUp">↑ 상위 폴더</button><button id="newFolder">＋ 새 폴더</button><label class="upload">⇧ 업로드<input id="fileUpload" type="file" multiple></label><span id="filePath">/data</span></div>
     <div class="file-list" id="fileList"></div>
+  </dialog>
+
+  <dialog id="eulaDialog" class="modal eula-confirm-modal">
+    <div class="modal-head"><div><small>MINECRAFT EULA</small><h2>서버 시작 확인</h2></div><button class="close" type="button" data-close="eulaDialog" aria-label="닫기">×</button></div>
+    <div class="eula-confirm-body">
+      <p>Minecraft 최종 사용자 사용권 계약(EULA)에 동의하시나요?</p>
+      <a href="https://www.minecraft.net/ko-kr/eula" target="_blank" rel="noopener noreferrer">Minecraft EULA 확인</a>
+      <div class="eula-confirm-actions"><button type="button" data-close="eulaDialog">취소</button><button id="eulaAgreeButton" class="primary" type="button">동의하고 서버 시작</button></div>
+    </div>
   </dialog>
 
   <dialog id="panelUpdateDialog" class="modal panel-update-modal">
@@ -125,6 +131,6 @@
   </dialog>
 
   <div class="toast" id="toast"></div>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v={{ASSET_VERSION}}"></script>
 </body>
 </html>
