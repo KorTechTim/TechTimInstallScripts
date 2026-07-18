@@ -9,7 +9,7 @@
 <body>
   <main class="shell">
     <header class="topbar">
-      <div class="brand"><span class="cube-icon">M</span><div><h1>TechTim Minecraft Server Panel</h1><small>Java Edition</small></div></div>
+      <div class="brand"><span class="cube-icon"><img src="/static/techtim-profile.png" alt=""></span><div><h1>TechTim Minecraft Server Panel</h1><small>Java Edition</small></div></div>
       <div class="header-actions">
         <a class="icon-button" href="https://www.youtube.com/@kortechtim" target="_blank" rel="noopener noreferrer" title="유튜브채널 접속" aria-label="유튜브채널 접속"><img src="https://cdn.simpleicons.org/youtube/FF0000" alt=""></a>
         <a class="icon-button" href="https://discord.gg/Awy6Uh38KW" target="_blank" rel="noopener noreferrer" title="디스코드 접속" aria-label="디스코드 접속"><img src="https://cdn.simpleicons.org/discord/5865F2" alt=""></a>
@@ -23,7 +23,7 @@
     </header>
 
     <section class="statusbar" aria-label="서버 상태">
-      <div class="status-item"><span class="status-icon game">M</span><span><small>게임</small><b>Minecraft Java</b></span></div>
+      <div class="status-item"><span class="status-icon game"><img src="/static/minecraft-game-icon.png" alt=""></span><span><small>게임</small><b>Minecraft Java</b></span></div>
       <div class="status-item"><span class="status-icon" id="installIcon">×</span><span><small>설치 상태</small><b id="installStatus">미설치</b></span></div>
       <div class="status-item"><span class="status-icon" id="serverIcon">×</span><span><small>서버 상태</small><b id="serverStatus">생성되지 않음</b></span></div>
       <div class="status-item"><span class="status-icon version">v</span><span><small>패널 버전</small><b>{{PANEL_VERSION}}</b></span></div>
@@ -37,18 +37,37 @@
       <pre id="terminal" aria-live="polite">로그를 불러오는 중입니다.</pre>
     </section>
 
+    <section class="settings-entry" id="settingsEntry">
+      <div class="settings-primary">
+        <button class="settings-launch" id="settingsButton"><span class="gear">⚙</span><b>서버 설정</b></button>
+        <div class="settings-copy"><h2>Minecraft 서버 구성</h2><p>서버 종류, 버전, 월드와 플레이 규칙을 관리합니다.</p><span class="settings-summary" id="settingsMode">PAPER · LATEST · 4G</span></div>
+      </div>
+      <div class="quick-tools">
+        <div class="quick-tools-head"><div><h3>운영 바로가기</h3><p>자주 사용하는 서버 설정</p></div></div>
+        <div class="quick-tools-grid">
+          <button class="quick-tool" type="button" data-settings-target="serverPropertiesSection" title="server.properties 주요 항목 설정">
+            <span class="quick-tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"></path><path d="M14 2v6h6"></path><path d="M8 13h8"></path><path d="M8 17h6"></path></svg></span><span><b>server.properties</b><small>서버 주요 속성</small></span>
+          </button>
+          <button class="quick-tool" type="button" data-settings-target="Whitelist" title="화이트리스트 설정">
+            <span class="quick-tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="m16 11 2 2 4-4"></path></svg></span><span><b>화이트리스트</b><small>접속 허용 사용자</small></span>
+          </button>
+          <button class="quick-tool" type="button" data-settings-target="Ops" title="관리자 OP 설정">
+            <span class="quick-tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"></path><path d="m9 12 2 2 4-4"></path></svg></span><span><b>관리자(OP)</b><small>운영 권한 사용자</small></span>
+          </button>
+          <button class="quick-tool" type="button" data-settings-target="projectsSection" title="모드 및 플러그인 설정">
+            <span class="quick-tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v6"></path><path d="m9 5 3-3 3 3"></path><path d="M5 10h14"></path><rect x="3" y="10" width="18" height="11" rx="2"></rect><path d="M8 15h.01"></path><path d="M16 15h.01"></path></svg></span><span><b>모드·플러그인</b><small>Modrinth 자동 설치</small></span>
+          </button>
+        </div>
+      </div>
+      <span class="lock-message" id="settingsLock">서버 실행 중</span>
+    </section>
+
     <section class="control-band">
       <button class="command install" id="installButton"><span>↓</span>엔진 설치</button>
       <button class="command start" id="startButton"><span>▶</span>서버 시작</button>
       <button class="command stop" id="stopButton"><span>■</span>서버 중지</button>
       <button class="command restart" id="restartButton"><span>↻</span>서버 재시작</button>
       <button class="command files" id="filesButton"><span>▣</span>서버 디렉터리</button>
-    </section>
-
-    <section class="settings-entry" id="settingsEntry">
-      <button class="settings-launch" id="settingsButton"><span class="gear">⚙</span><b>서버 설정</b><small id="settingsMode">Paper · LATEST · 4G</small></button>
-      <div class="settings-copy"><h2>Minecraft 서버 구성</h2><p>서버 종류, 버전, 월드, 플레이 규칙과 모드팩을 관리합니다.</p></div>
-      <span class="lock-message" id="settingsLock">서버 실행 중</span>
     </section>
   </main>
 
@@ -58,10 +77,21 @@
       <div class="form-scroll">
         <section class="form-section"><h3>배포 유형</h3><div class="grid cols-3">
           <label>서버 유형<select id="Type"><option value="VANILLA">Vanilla</option><option value="PAPER">Paper (플러그인 권장)</option><option value="PURPUR">Purpur</option><option value="SPIGOT">Spigot</option><option value="FORGE">Forge</option><option value="NEOFORGE">NeoForge</option><option value="FABRIC">Fabric</option><option value="QUILT">Quilt</option><option value="AUTO_CURSEFORGE">CurseForge 모드팩</option><option value="MODRINTH">Modrinth 모드팩</option></select></label>
-          <label>Minecraft 버전<input id="Version" value="LATEST" placeholder="LATEST 또는 1.21.5"></label>
-          <label>메모리<input id="Memory" value="4G" placeholder="4G"></label>
+          <label>Minecraft 버전
+            <input id="Version" list="minecraftVersionOptions" value="LATEST" placeholder="목록 선택 또는 직접 입력" autocomplete="off">
+            <datalist id="minecraftVersionOptions">
+              <option value="LATEST">최신 정식 버전</option>
+              <option value="26.2"></option><option value="26.1.2"></option><option value="26.1.1"></option><option value="26.1"></option>
+              <option value="1.21.11"></option><option value="1.21.10"></option><option value="1.21.9"></option><option value="1.21.8"></option><option value="1.21.7"></option><option value="1.21.6"></option>
+              <option value="1.21.5"></option><option value="1.21.4"></option><option value="1.21.3"></option><option value="1.21.2"></option><option value="1.21.1"></option><option value="1.21"></option>
+            </datalist>
+            <small class="field-help">목록에서 선택하거나 원하는 버전을 직접 입력할 수 있습니다.</small>
+          </label>
+          <label>메모리
+            <span class="input-with-unit"><input id="Memory" value="4" inputmode="numeric" pattern="[1-9][0-9]*" placeholder="4" autocomplete="off" required><span class="input-unit" aria-hidden="true">G</span></span>
+          </label>
         </div></section>
-        <section class="form-section"><h3>서버 및 월드</h3><div class="grid cols-2">
+        <section class="form-section" id="serverPropertiesSection"><h3>서버 및 월드 · server.properties</h3><div class="grid cols-2">
           <label>서버 이름<input id="ServerName"></label><label>MOTD<input id="Motd"></label>
           <label>월드 폴더 이름<input id="Level"></label><label>월드 시드<input id="Seed" placeholder="비워두면 무작위"></label>
           <label>난이도<select id="Difficulty"><option value="peaceful">평화로움</option><option value="easy">쉬움</option><option value="normal">보통</option><option value="hard">어려움</option></select></label>

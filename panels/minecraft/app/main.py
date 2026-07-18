@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.request import urlopen
 import hashlib
 import json
 import os
@@ -23,6 +24,7 @@ APP_DIR = Path(__file__).resolve().parent
 app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="static")
 
 PANEL_VERSION = os.getenv("PANEL_VERSION", "1.0.0")
+MINECRAFT_VERSION_MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 HOST_DATA_DIR = Path(os.getenv("HOST_DATA_DIR", "/opt/techtim/minecraft/data"))
 SERVER_DIR = DATA_DIR / "server"
@@ -48,6 +50,8 @@ INSTALL_LOCK = threading.Lock()
 INSTALL_ACTIVE = False
 PANEL_UPDATE_LOCK = threading.Lock()
 PANEL_UPDATE_ACTIVE = False
+VERSION_CACHE_LOCK = threading.Lock()
+VERSION_CACHE: dict[str, Any] = {"expires_at": 0.0, "payload": None}
 KST = timezone(timedelta(hours=9), name="KST")
 ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 ANSI_FRAGMENT_RE = re.compile(r"(?:\[(?:0|1|2|3|4|5|7|9|10[0-7]|[34][0-7])m)+")
@@ -56,6 +60,12 @@ SERVER_TYPES = {
     "VANILLA", "PAPER", "PURPUR", "SPIGOT", "FORGE", "NEOFORGE",
     "FABRIC", "QUILT", "AUTO_CURSEFORGE", "MODRINTH",
 }
+
+FALLBACK_MINECRAFT_VERSIONS = [
+    "26.2", "26.1.2", "26.1.1", "26.1",
+    "1.21.11", "1.21.10", "1.21.9", "1.21.8", "1.21.7", "1.21.6",
+    "1.21.5", "1.21.4", "1.21.3", "1.21.2", "1.21.1", "1.21",
+]
 
 
 class LoginRequest(BaseModel):
@@ -166,6 +176,48 @@ def require_auth(request: Request) -> str:
 
 def default_config() -> dict:
     return ConfigRequest().model_dump()
+
+
+def releases_since_1_21(manifest: dict) -> list[str]:
+    releases = []
+    for version in manifest.get("versions") or []:
+        if not isinstance(version, dict) or version.get("type") != "release":
+            continue
+        version_id = str(version.get("id") or "").strip()
+        if not version_id or version_id in releases:
+            continue
+        releases.append(version_id)
+        if version_id == "1.21":
+            return releases
+    return FALLBACK_MINECRAFT_VERSIONS.copy()
+
+
+def minecraft_version_payload() -> dict:
+    now = time.monotonic()
+    with VERSION_CACHE_LOCK:
+        cached = VERSION_CACHE.get("payload")
+        if cached and float(VERSION_CACHE.get("expires_at") or 0) > now:
+            return cached
+
+    source = "mojang"
+    try:
+        with urlopen(MINECRAFT_VERSION_MANIFEST_URL, timeout=5) as response:
+            manifest = json.load(response)
+        releases = releases_since_1_21(manifest)
+        latest = str((manifest.get("latest") or {}).get("release") or releases[0])
+    except (OSError, ValueError, json.JSONDecodeError, TypeError):
+        source = "fallback"
+        releases = FALLBACK_MINECRAFT_VERSIONS.copy()
+        latest = releases[0]
+
+    payload = {
+        "latest": latest,
+        "versions": ["LATEST", *releases],
+        "source": source,
+    }
+    with VERSION_CACHE_LOCK:
+        VERSION_CACHE.update({"expires_at": now + 3600, "payload": payload})
+    return payload
 
 
 def normalize_config(raw: dict) -> dict:
@@ -650,6 +702,12 @@ def get_config(request: Request):
         config["CurseForgeApiKeySet"] = True
         config["CurseForgeApiKey"] = ""
     return {"config": config, "locked": server_running(), "types": sorted(SERVER_TYPES)}
+
+
+@app.get("/api/minecraft/versions")
+def minecraft_versions(request: Request):
+    require_auth(request)
+    return minecraft_version_payload()
 
 
 @app.post("/api/config")

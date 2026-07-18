@@ -32,6 +32,24 @@ async function api(url, options = {}) {
   return data;
 }
 
+async function loadMinecraftVersions() {
+  try {
+    const data = await api('/api/minecraft/versions');
+    const list = $('minecraftVersionOptions');
+    const versions = Array.isArray(data.versions) ? data.versions : [];
+    if (!list || !versions.length) return;
+
+    list.replaceChildren(...versions.map(version => {
+      const option = document.createElement('option');
+      option.value = version;
+      if (version === 'LATEST') option.label = `최신 정식 버전 (${data.latest})`;
+      return option;
+    }));
+  } catch (_) {
+    // The embedded options remain available if Mojang's manifest cannot be reached.
+  }
+}
+
 function setStatusIcon(el, state, goodStates) {
   el.className = 'status-icon';
   if (goodStates.includes(state)) { el.classList.add('ok'); el.textContent = '✓'; }
@@ -52,6 +70,7 @@ async function refreshStatus() {
     $('installButton').disabled = install.status === 'running';
     $('settingsEntry').classList.toggle('locked', server.running);
     $('settingsButton').disabled = server.running;
+    document.querySelectorAll('.quick-tool').forEach(button => button.disabled = server.running);
     if (server.running && logMode !== 'server') selectLog('server');
   } catch (error) { toast(error.message, true); }
 }
@@ -72,12 +91,27 @@ function selectLog(mode) {
   refreshLog();
 }
 
+function syncModalScrollLock() {
+  document.body.classList.toggle('modal-open', Boolean(document.querySelector('dialog[open]')));
+}
+
+function showDialog(dialog) {
+  dialog.showModal();
+  syncModalScrollLock();
+}
+
+function closeDialog(dialog) {
+  dialog.close();
+  syncModalScrollLock();
+}
+
 document.querySelectorAll('[data-log]').forEach(button => button.onclick = () => selectLog(button.dataset.log));
-document.querySelectorAll('[data-close]').forEach(button => button.onclick = () => $(button.dataset.close).close());
+document.querySelectorAll('[data-close]').forEach(button => button.onclick = () => closeDialog($(button.dataset.close)));
+document.querySelectorAll('dialog').forEach(dialog => dialog.addEventListener('close', syncModalScrollLock));
 
 $('logout').onclick = async () => { await api('/api/auth/logout', {method: 'POST'}); location.href = '/login'; };
 $('panelUpdateButton').onclick = () => {
-  panelUpdateDialog.showModal();
+  showDialog(panelUpdateDialog);
   loadPanelUpdateStatus();
 };
 $('panelUpdateConfirm').onclick = requestPanelUpdate;
@@ -112,9 +146,10 @@ function updateRange(input) {
   if (output) output.value = input.value;
 }
 document.querySelectorAll('input[type=range]').forEach(input => input.oninput = () => updateRange(input));
+$('Memory').oninput = event => { event.target.value = event.target.value.replace(/\D/g, ''); };
 $('Type').onchange = updateTypeFields;
 
-async function openSettings() {
+async function openSettings(targetId = '') {
   try {
     const data = await api('/api/config');
     if (data.locked) { toast('서버 실행 중에는 설정을 변경할 수 없습니다.', true); return; }
@@ -122,16 +157,30 @@ async function openSettings() {
       const input = $(key);
       if (!input) return;
       if (checkFields.has(key)) input.checked = Boolean(data.config[key]);
+      else if (key === 'Memory') input.value = String(data.config[key] || '4G').replace(/G$/i, '');
       else if (key !== 'CurseForgeApiKey') input.value = data.config[key] ?? '';
       updateRange(input);
     });
     $('CurseForgeApiKey').value = '';
     $('ExtraEnv').value = JSON.stringify(data.config.ExtraEnv || {}, null, 2);
     updateTypeFields();
-    settingsDialog.showModal();
+    showDialog(settingsDialog);
+    if (targetId) {
+      requestAnimationFrame(() => {
+        const target = $(targetId);
+        if (!target) return;
+        target.scrollIntoView({behavior: 'smooth', block: 'center'});
+        target.classList.add('settings-target-flash');
+        if (target.matches('input,select,textarea')) target.focus({preventScroll: true});
+        setTimeout(() => target.classList.remove('settings-target-flash'), 1400);
+      });
+    }
   } catch (error) { toast(error.message, true); }
 }
-$('settingsButton').onclick = openSettings;
+$('settingsButton').onclick = () => openSettings();
+document.querySelectorAll('.quick-tool').forEach(button => {
+  button.onclick = () => openSettings(button.dataset.settingsTarget);
+});
 
 $('settingsForm').onsubmit = async event => {
   event.preventDefault();
@@ -139,8 +188,9 @@ $('settingsForm').onsubmit = async event => {
     const body = {};
     fields.forEach(key => {
       const input = $(key);
-      body[key] = checkFields.has(key) ? input.checked : numberFields.has(key) ? Number(input.value) : input.value;
+      body[key] = checkFields.has(key) ? input.checked : key === 'Memory' ? `${input.value}G` : numberFields.has(key) ? Number(input.value) : input.value;
     });
+    if (!/^[1-9]\d*$/.test($('Memory').value)) throw new Error('메모리는 1 이상의 숫자로 입력해주세요.');
     try { body.ExtraEnv = JSON.parse($('ExtraEnv').value || '{}'); }
     catch { throw new Error('추가 환경 변수는 올바른 JSON 형식이어야 합니다.'); }
     await api('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
@@ -178,7 +228,7 @@ async function loadFiles(path = '') {
   } catch (error) { toast(error.message, true); }
 }
 
-$('filesButton').onclick = () => { filesDialog.showModal(); loadFiles(''); };
+$('filesButton').onclick = () => { showDialog(filesDialog); loadFiles(''); };
 $('fileUp').onclick = () => loadFiles(currentParent);
 $('newFolder').onclick = async () => {
   const name = prompt('새 폴더 이름'); if (!name) return;
@@ -273,6 +323,7 @@ async function requestPanelUpdate() {
 }
 
 async function initialize() {
+  loadMinecraftVersions();
   await refreshStatus();
   const config = await api('/api/config').catch(() => null);
   if (config) $('settingsMode').textContent = `${config.config.Type} · ${config.config.Version} · ${config.config.Memory}`;
