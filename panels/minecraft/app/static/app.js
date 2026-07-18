@@ -33,6 +33,20 @@ function toast(message, error = false) {
   el.timer = setTimeout(() => el.className = 'toast', 2500);
 }
 
+function showButtonBubble(anchor, message, error = true) {
+  const el = $('actionBubble');
+  const rect = anchor.getBoundingClientRect();
+  const halfWidth = Math.min(170, (window.innerWidth - 24) / 2);
+  const center = Math.max(12 + halfWidth, Math.min(window.innerWidth - 12 - halfWidth, rect.left + rect.width / 2));
+  el.textContent = message;
+  el.classList.toggle('success', !error);
+  el.style.left = `${center}px`;
+  el.style.bottom = `${window.innerHeight - rect.top + 12}px`;
+  el.classList.add('show');
+  clearTimeout(el.timer);
+  el.timer = setTimeout(() => el.classList.remove('show'), 2500);
+}
+
 async function api(url, options = {}) {
   const response = await fetch(url, options);
   const data = await response.json().catch(() => ({}));
@@ -153,8 +167,19 @@ $('panelUpdateButton').onclick = () => {
 };
 $('panelUpdateConfirm').onclick = requestPanelUpdate;
 $('installButton').onclick = async () => {
-  try { await api('/api/install', {method: 'POST'}); selectLog('install'); toast('서버 설치를 시작했습니다.'); refreshStatus(); }
-  catch (error) { toast(error.message, true); }
+  try {
+    const server = await api('/api/server/status');
+    if (server.running) {
+      showButtonBubble($('installButton'), '서버 기동 중에는 엔진을 설치할 수 없습니다.');
+      return;
+    }
+    await api('/api/install', {method: 'POST'});
+    selectLog('install');
+    showButtonBubble($('installButton'), '서버 설치를 시작했습니다.', false);
+    refreshStatus();
+  } catch (error) {
+    toast(error.message, true);
+  }
 };
 
 async function serverAction(action, payload = null) {
@@ -179,7 +204,18 @@ $('eulaAgreeButton').onclick = async event => {
   button.disabled = false;
 };
 $('stopButton').onclick = () => serverAction('stop');
-$('deleteServerButton').onclick = () => showDialog(deleteServerDialog);
+$('deleteServerButton').onclick = async () => {
+  try {
+    const server = await api('/api/server/status');
+    if (server.running) {
+      showButtonBubble($('deleteServerButton'), '서버 기동 중에는 서버를 삭제할 수 없습니다.');
+      return;
+    }
+    showDialog(deleteServerDialog);
+  } catch (error) {
+    toast(error.message, true);
+  }
+};
 $('deleteServerConfirm').onclick = async event => {
   const button = event.currentTarget;
   button.disabled = true;
@@ -319,7 +355,7 @@ $('filesButton').onclick = async () => {
   try {
     const server = await api('/api/server/status');
     if (server.running) {
-      toast('서버 기동 중에는 파일 핸들링이 불가능합니다.', true);
+      showButtonBubble($('filesButton'), '서버 기동 중에는 파일 핸들링이 불가능합니다.');
       return;
     }
     showDialog(filesDialog);

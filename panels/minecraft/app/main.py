@@ -831,6 +831,8 @@ def dashboard(request: Request):
 @app.post("/api/install")
 def request_install(request: Request, tasks: BackgroundTasks):
     require_auth(request)
+    if server_running():
+        raise HTTPException(status_code=409, detail="서버 기동 중에는 엔진을 설치할 수 없습니다.")
     global INSTALL_ACTIVE
     with INSTALL_LOCK:
         if INSTALL_ACTIVE:
@@ -945,6 +947,8 @@ def restart_server(request: Request):
 @app.post("/api/server/delete")
 def delete_server(request: Request):
     require_auth(request)
+    if server_running():
+        raise HTTPException(status_code=409, detail="서버 기동 중에는 서버를 삭제할 수 없습니다.")
     global INSTALL_ACTIVE
     with INSTALL_LOCK:
         if INSTALL_ACTIVE:
