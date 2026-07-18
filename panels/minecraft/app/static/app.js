@@ -315,7 +315,19 @@ async function loadFiles(path = '') {
   } catch (error) { toast(error.message, true); }
 }
 
-$('filesButton').onclick = () => { showDialog(filesDialog); loadFiles(''); };
+$('filesButton').onclick = async () => {
+  try {
+    const server = await api('/api/server/status');
+    if (server.running) {
+      toast('서버 기동 중에는 파일 핸들링이 불가능합니다.', true);
+      return;
+    }
+    showDialog(filesDialog);
+    loadFiles('');
+  } catch (error) {
+    toast(error.message, true);
+  }
+};
 $('fileUp').onclick = () => loadFiles(currentParent);
 $('newFolder').onclick = async () => {
   const name = prompt('새 폴더 이름'); if (!name) return;
