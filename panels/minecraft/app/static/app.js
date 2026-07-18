@@ -10,6 +10,7 @@ let writeLocked = false;
 let panelUpdateRequested = false;
 let panelUpdatePollTimer = null;
 let panelUpdateReloadScheduled = false;
+let commandSending = false;
 
 const statusKo = {
   not_started: '미설치', running: '실행 중', completed: '설치 완료', failed: '설치 실패',
@@ -35,14 +36,17 @@ async function api(url, options = {}) {
 async function loadMinecraftVersions() {
   try {
     const data = await api('/api/minecraft/versions');
-    const list = $('minecraftVersionOptions');
+    const list = $('minecraftVersionSelect');
     const versions = Array.isArray(data.versions) ? data.versions : [];
     if (!list || !versions.length) return;
 
-    list.replaceChildren(...versions.map(version => {
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = '목록 선택';
+    list.replaceChildren(placeholder, ...versions.map(version => {
       const option = document.createElement('option');
       option.value = version;
-      if (version === 'LATEST') option.label = `최신 정식 버전 (${data.latest})`;
+      option.textContent = version === 'LATEST' ? `LATEST (최신 ${data.latest})` : version;
       return option;
     }));
   } catch (_) {
@@ -70,7 +74,8 @@ async function refreshStatus() {
     $('installButton').disabled = install.status === 'running';
     $('settingsEntry').classList.toggle('locked', server.running);
     $('settingsButton').disabled = server.running;
-    document.querySelectorAll('.quick-tool').forEach(button => button.disabled = server.running);
+    $('consoleCommandInput').disabled = !server.running || commandSending;
+    $('consoleCommandSend').disabled = !server.running || commandSending;
     if (server.running && logMode !== 'server') selectLog('server');
   } catch (error) { toast(error.message, true); }
 }
@@ -109,6 +114,33 @@ document.querySelectorAll('[data-log]').forEach(button => button.onclick = () =>
 document.querySelectorAll('[data-close]').forEach(button => button.onclick = () => closeDialog($(button.dataset.close)));
 document.querySelectorAll('dialog').forEach(dialog => dialog.addEventListener('close', syncModalScrollLock));
 
+$('consoleCommandForm').onsubmit = async event => {
+  event.preventDefault();
+  const input = $('consoleCommandInput');
+  const command = input.value.trim();
+  if (!command || commandSending) return;
+  commandSending = true;
+  input.disabled = true;
+  $('consoleCommandSend').disabled = true;
+  try {
+    const data = await api('/api/server/command', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({command})
+    });
+    input.value = '';
+    selectLog('server');
+    toast(data.message || '명령어를 전송했습니다.');
+    await refreshLog();
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    commandSending = false;
+    await refreshStatus();
+    if (!input.disabled) input.focus();
+  }
+};
+
 $('logout').onclick = async () => { await api('/api/auth/logout', {method: 'POST'}); location.href = '/login'; };
 $('panelUpdateButton').onclick = () => {
   showDialog(panelUpdateDialog);
@@ -146,6 +178,11 @@ function updateRange(input) {
   if (output) output.value = input.value;
 }
 document.querySelectorAll('input[type=range]').forEach(input => input.oninput = () => updateRange(input));
+$('minecraftVersionSelect').onchange = event => {
+  if (!event.target.value) return;
+  $('Version').value = event.target.value;
+  event.target.value = '';
+};
 $('Memory').oninput = event => { event.target.value = event.target.value.replace(/\D/g, ''); };
 $('Type').onchange = updateTypeFields;
 
@@ -178,9 +215,6 @@ async function openSettings(targetId = '') {
   } catch (error) { toast(error.message, true); }
 }
 $('settingsButton').onclick = () => openSettings();
-document.querySelectorAll('.quick-tool').forEach(button => {
-  button.onclick = () => openSettings(button.dataset.settingsTarget);
-});
 
 $('settingsForm').onsubmit = async event => {
   event.preventDefault();

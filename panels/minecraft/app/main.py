@@ -77,6 +77,10 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
+class ServerCommandRequest(BaseModel):
+    command: str = Field(min_length=1, max_length=500)
+
+
 class ConfigRequest(BaseModel):
     EulaAccepted: bool = False
     Type: str = "PAPER"
@@ -804,6 +808,35 @@ def server_log(request: Request):
     if control:
         logs = f"{logs.rstrip()}\n\n[패널 제어 로그]\n{control}".strip()
     return {"log": logs}
+
+
+@app.post("/api/server/command")
+def send_server_command(payload: ServerCommandRequest, request: Request):
+    require_auth(request)
+    container = get_container()
+    if not container:
+        raise HTTPException(status_code=404, detail="먼저 서버를 시작해주세요.")
+    container.reload()
+    if container.status != "running":
+        raise HTTPException(status_code=409, detail="서버가 실행 중일 때만 명령어를 전송할 수 있습니다.")
+
+    command = payload.command.strip().lstrip("/").strip()
+    if not command or "\n" in command or "\r" in command or "\0" in command:
+        raise HTTPException(status_code=400, detail="한 줄짜리 Minecraft 명령어를 입력해주세요.")
+
+    try:
+        result = container.exec_run(["rcon-cli", command], stdout=True, stderr=True)
+    except docker.errors.DockerException as error:
+        raise HTTPException(status_code=500, detail=f"명령어 전송에 실패했습니다: {error}") from error
+
+    output = result.output.decode("utf-8", errors="replace") if isinstance(result.output, bytes) else str(result.output or "")
+    output = clean_log(output).strip()
+    append_log(CONTROL_LOG_FILE, f"[콘솔 명령] > {command}")
+    if output:
+        append_log(CONTROL_LOG_FILE, f"[명령 결과] {output[:4000]}")
+    if result.exit_code != 0:
+        raise HTTPException(status_code=500, detail=output or "Minecraft 서버가 명령어를 처리하지 못했습니다.")
+    return {"status": "sent", "message": "명령어를 전송했습니다.", "output": output}
 
 
 @app.get("/api/files")
