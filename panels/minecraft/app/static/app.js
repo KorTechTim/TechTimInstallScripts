@@ -250,6 +250,22 @@ function humanSize(bytes) {
   return `${value.toFixed(unit ? 1 : 0)} ${units[unit]}`;
 }
 
+function createFileIcon(type) {
+  const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  icon.setAttribute('viewBox', '0 0 24 24');
+  icon.setAttribute('fill', 'none');
+  icon.setAttribute('stroke', 'currentColor');
+  icon.setAttribute('stroke-width', '2');
+  icon.setAttribute('stroke-linecap', 'round');
+  icon.setAttribute('stroke-linejoin', 'round');
+  icon.setAttribute('aria-hidden', 'true');
+  icon.classList.add('file-entry-icon', type === 'dir' ? 'folder' : 'document');
+  icon.innerHTML = type === 'dir'
+    ? '<path d="M3 5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"></path>'
+    : '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"></path><path d="M14 2v6h6"></path>';
+  return icon;
+}
+
 async function loadFiles(path = '') {
   try {
     const data = await api(`/api/files?path=${encodeURIComponent(path)}`);
@@ -260,7 +276,9 @@ async function loadFiles(path = '') {
     if (!data.entries.length) { list.innerHTML = '<div class="file-row"><span>폴더가 비어 있습니다.</span></div>'; return; }
     data.entries.forEach(entry => {
       const row = document.createElement('div'); row.className = 'file-row';
-      const name = document.createElement('button'); name.className = 'file-name'; name.textContent = `${entry.type === 'dir' ? '▣' : '▤'}  ${entry.name}`;
+      const name = document.createElement('button'); name.className = 'file-name';
+      const label = document.createElement('span'); label.className = 'file-name-label'; label.textContent = entry.name;
+      name.append(createFileIcon(entry.type), label);
       name.onclick = () => entry.type === 'dir' ? loadFiles(entry.path) : location.href = `/api/files/download?path=${encodeURIComponent(entry.path)}`;
       const size = document.createElement('span'); size.textContent = entry.type === 'dir' ? '폴더' : humanSize(entry.size);
       const modified = document.createElement('span'); modified.className = 'modified'; modified.textContent = entry.modified.replace('T',' ');
