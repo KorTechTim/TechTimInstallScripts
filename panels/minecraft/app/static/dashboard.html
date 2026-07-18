@@ -90,8 +90,8 @@
             </span>
             <small class="field-help">목록에서 선택하거나 원하는 버전을 직접 입력할 수 있습니다.</small>
           </label>
-          <label>Java 버전
-            <select id="JavaVersion">
+          <label><span class="field-label">Java 버전<span class="help-tooltip"><button type="button" class="help-tooltip-trigger" aria-label="Minecraft 버전별 권장 Java 버전" aria-describedby="javaVersionTooltip">?</button><span class="help-tooltip-content" id="javaVersionTooltip" role="tooltip"><strong>Minecraft 권장 Java</strong><span>26.1 이상: Java 25</span><span>1.20.5 ~ 1.21.x: Java 21</span><span>1.18 ~ 1.20.4: Java 17</span><span>1.17.x: Java 16</span><span>1.16.5 이하 Forge: Java 8</span><span>Paper 1.16.5: Java 16 권장</span><small>모드팩이 별도 버전을 요구하면 해당 요구사항을 우선하세요.</small></span></span></span>
+            <select id="JavaVersion" aria-describedby="javaVersionTooltip">
               <option value="AUTO">자동 (itzg 기본)</option>
               <option value="8">Java 8</option>
               <option value="11">Java 11</option>
@@ -106,7 +106,27 @@
             <span class="input-with-unit"><input id="Memory" value="4" inputmode="numeric" pattern="[1-9][0-9]*" placeholder="4" autocomplete="off" required><span class="input-unit" aria-hidden="true">G</span></span>
           </label>
         </div></section>
-        <section class="form-section conditional" id="loaderModpackSection"><h3>모드팩 자동 설치</h3><label>모드팩 URL<input id="ModpackUrl" type="url" placeholder="https://example.com/server-modpack.zip"><small class="field-help">직접 다운로드 가능한 서버팩 .zip 또는 .tgz 주소를 입력하세요.</small></label></section>
+        <section class="form-section conditional" id="loaderModpackSection">
+          <h3>모드팩 자동 설치</h3>
+          <label>모드팩 URL
+            <span class="modpack-url-row"><input id="ModpackUrl" type="url" placeholder="직접 서버팩 URL을 입력하거나 CurseForge에서 검색"><button id="curseforgeBrowseButton" type="button"><span aria-hidden="true">⌕</span> CurseForge 검색</button></span>
+            <small class="field-help">수동 서버팩 주소를 입력하거나 CurseForge의 일반 모드팩 파일을 선택할 수 있습니다.</small>
+          </label>
+          <div class="curseforge-selection" id="curseforgeSelection" hidden>
+            <span class="curseforge-selection-icon" aria-hidden="true">CF</span>
+            <span><strong id="curseforgeSelectionName"></strong><small id="curseforgeSelectionDetail"></small></span>
+            <button id="curseforgeSelectionClear" type="button">선택 해제</button>
+          </div>
+          <input id="ModpackSource" type="hidden" value="manual">
+          <input id="CurseForgeProjectId" type="hidden">
+          <input id="CurseForgeFileId" type="hidden">
+          <input id="CurseForgeSlug" type="hidden">
+          <input id="CurseForgeProjectName" type="hidden">
+          <input id="CurseForgeFileName" type="hidden">
+          <input id="CurseForgePageUrl" type="hidden">
+          <input id="CurseForgeGameVersion" type="hidden">
+          <input id="CurseForgeLoader" type="hidden">
+        </section>
         <section class="form-section" id="serverPropertiesSection"><h3>서버 및 월드 · server.properties</h3><div class="grid cols-2">
           <label>서버 이름<input id="ServerName"></label><label>MOTD<input id="Motd"></label>
           <label>월드 폴더 이름<input id="Level"></label><label>월드 시드<input id="Seed" placeholder="비워두면 무작위"></label>
@@ -125,6 +145,23 @@
       </div>
       <div class="modal-actions"><span class="save-toast" id="saveToast">저장 완료</span><button type="button" class="secondary" data-close="settingsDialog">취소</button><button type="submit" class="primary">설정 저장</button></div>
     </form>
+  </dialog>
+
+  <dialog id="curseforgeDialog" class="modal curseforge-modal">
+    <div class="modal-head"><div><small>CURSEFORGE MODPACKS</small><h2>CurseForge 모드팩 찾기</h2></div><button class="close" type="button" data-close="curseforgeDialog" aria-label="닫기">×</button></div>
+    <div class="curseforge-body">
+      <form id="curseforgeSearchForm" class="curseforge-search">
+        <label>모드팩 이름<input id="curseforgeQuery" type="search" placeholder="예: Better MC, All the Mods"></label>
+        <label>Minecraft 버전<input id="curseforgeGameVersion" placeholder="예: 1.20.1"></label>
+        <label>모드 로더<select id="curseforgeLoader"><option value="">전체</option><option value="1">Forge</option><option value="6">NeoForge</option><option value="4">Fabric</option></select></label>
+        <button id="curseforgeSearchButton" type="submit">검색</button>
+      </form>
+      <div class="curseforge-view-head">
+        <button id="curseforgeBack" type="button" hidden>← 모드팩 목록</button>
+        <div><strong id="curseforgeViewTitle">인기 모드팩</strong><small id="curseforgeViewCaption">설치할 모드팩을 선택하세요.</small></div>
+      </div>
+      <div id="curseforgeResults" class="curseforge-results" aria-live="polite"></div>
+    </div>
   </dialog>
 
   <dialog id="filesDialog" class="modal file-modal">

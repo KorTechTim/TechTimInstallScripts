@@ -110,6 +110,7 @@ services:
       - GAME_CODE=${GAME_CODE}
       - INSTALL_CODE=${INSTALL_CODE}
       - PANEL_VERSION=${PANEL_VERSION}
+      - CURSEFORGE_PROXY_URL=https://www.techtim.kr/api/curseforge
       - DATA_DIR=/data
       - HOST_DATA_DIR=${INSTALL_DIR}/data
       - MINECRAFT_RUNTIME_IMAGE=itzg/minecraft-server:latest
