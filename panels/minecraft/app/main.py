@@ -13,7 +13,7 @@ import threading
 import time
 
 import docker
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -679,6 +679,25 @@ def resolve_path(relative: str = "") -> Path:
     return target
 
 
+def resolve_folder_upload_target(target_dir: Path, upload_path: str) -> Path:
+    cleaned = str(upload_path or "").strip().replace("\\", "/")
+    parts = cleaned.split("/")
+    if not cleaned or cleaned.startswith("/") or any(part in {"", ".", ".."} for part in parts):
+        raise HTTPException(status_code=400, detail="폴더 업로드에 허용되지 않는 상대 경로가 포함되어 있습니다.")
+
+    try:
+        target_root = target_dir.resolve()
+        target = target_root.joinpath(*parts).resolve()
+    except (OSError, ValueError):
+        raise HTTPException(status_code=400, detail="폴더 업로드 경로를 처리할 수 없습니다.")
+
+    if target == target_root or not str(target).startswith(str(target_root) + os.sep):
+        raise HTTPException(status_code=400, detail="폴더 업로드 경로가 현재 폴더 밖을 가리킵니다.")
+
+    resolve_path(relative_path(target))
+    return target
+
+
 def relative_path(path: Path) -> str:
     root = SERVER_DIR.resolve()
     return "" if path.resolve() == root else path.resolve().relative_to(root).as_posix()
@@ -1098,6 +1117,38 @@ async def upload_file(request: Request, path: str = "", file: UploadFile = File(
     with target.open("wb") as output:
         shutil.copyfileobj(file.file, output)
     return {"status": "ok"}
+
+
+@app.post("/api/files/upload-folder")
+async def upload_folder(
+    request: Request,
+    path: str = "",
+    files: list[UploadFile] = File(...),
+    relative_paths: list[str] = Form(...),
+):
+    require_auth(request)
+    require_file_write()
+    parent = resolve_path(path)
+    if not parent.is_dir():
+        raise HTTPException(status_code=404, detail="업로드 폴더를 찾을 수 없습니다.")
+    if not files or len(files) != len(relative_paths):
+        raise HTTPException(status_code=400, detail="업로드 파일과 상대 경로 정보가 일치하지 않습니다.")
+
+    upload_targets: list[tuple[UploadFile, Path]] = []
+    seen_targets: set[Path] = set()
+    for upload, upload_path in zip(files, relative_paths):
+        target = resolve_folder_upload_target(parent, upload_path)
+        if target in seen_targets:
+            raise HTTPException(status_code=400, detail="폴더 업로드에 중복된 파일 경로가 포함되어 있습니다.")
+        seen_targets.add(target)
+        upload_targets.append((upload, target))
+
+    for upload, target in upload_targets:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("wb") as output:
+            shutil.copyfileobj(upload.file, output)
+
+    return {"status": "ok", "uploaded_count": len(upload_targets)}
 
 
 @app.post("/api/files/mkdir")

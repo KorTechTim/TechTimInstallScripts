@@ -297,7 +297,7 @@ async function loadFiles(path = '') {
     const data = await api(`/api/files?path=${encodeURIComponent(path)}`);
     currentPath = data.path; currentParent = data.parent; writeLocked = data.write_locked;
     $('filePath').textContent = `/data${currentPath ? '/' + currentPath : ''}`;
-    $('newFolder').disabled = writeLocked; $('fileUpload').disabled = writeLocked;
+    $('newFolder').disabled = writeLocked; $('fileUpload').disabled = writeLocked; $('folderUpload').disabled = writeLocked;
     const list = $('fileList'); list.textContent = '';
     if (!data.entries.length) { list.innerHTML = '<div class="file-row"><span>폴더가 비어 있습니다.</span></div>'; return; }
     data.entries.forEach(entry => {
@@ -327,6 +327,24 @@ $('fileUpload').onchange = async event => {
     for (const file of event.target.files) { const form = new FormData(); form.append('file',file); await api(`/api/files/upload?path=${encodeURIComponent(currentPath)}`,{method:'POST',body:form}); }
     toast('파일 업로드가 완료되었습니다.'); loadFiles(currentPath);
   } catch(error){ toast(error.message,true); } finally { event.target.value=''; }
+};
+$('folderUpload').onchange = async event => {
+  const files = Array.from(event.target.files || []);
+  if (!files.length) return;
+  try {
+    const form = new FormData();
+    files.forEach(file => {
+      form.append('files', file, file.name);
+      form.append('relative_paths', file.webkitRelativePath || file.name);
+    });
+    const result = await api(`/api/files/upload-folder?path=${encodeURIComponent(currentPath)}`, {method:'POST', body:form});
+    toast(`폴더 업로드가 완료되었습니다. 파일 ${result.uploaded_count}개`);
+    loadFiles(currentPath);
+  } catch(error) {
+    toast(error.message, true);
+  } finally {
+    event.target.value = '';
+  }
 };
 
 function schedulePanelUpdateStatus(delay = 2000) {
