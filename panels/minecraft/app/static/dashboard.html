@@ -44,10 +44,11 @@
     <section class="settings-entry" id="settingsEntry">
       <div class="settings-primary">
         <button class="settings-launch" id="settingsButton"><span class="gear">⚙</span><b>서버 설정</b></button>
-        <div class="settings-copy"><h2>Minecraft 서버 구성</h2><p>서버 종류, 버전, 월드와 플레이 규칙을 관리합니다.</p><span class="settings-summary" id="settingsMode">PAPER · LATEST · 4G</span></div>
+        <div class="settings-copy"><h2>Minecraft 서버 구성</h2><p>서버 종류, 버전, 월드와 플레이 규칙을 관리합니다.</p><span class="settings-summary" id="settingsMode">PAPER · LATEST · JAVA AUTO · 4G</span></div>
+        <span class="lock-message" id="settingsLock">서버 실행 중</span>
       </div>
       <aside class="resource-monitor" aria-label="서버 리소스 모니터링">
-        <div class="resource-monitor-head"><div><h3>서버 리소스</h3><p>게임 컨테이너 및 데이터 디스크</p></div><span id="resourceStatus">5초마다 갱신</span></div>
+        <div class="resource-monitor-head"><div><h3>서버 리소스</h3><p>게임 컨테이너 및 데이터 디스크</p></div><span id="resourceStatus">새로고침 : 5초</span></div>
         <div class="resource-grid">
           <div class="resource-item"><div class="resource-item-head"><span>CPU</span><strong id="resourceCpu">0%</strong></div><div class="resource-meter"><span id="resourceCpuBar"></span></div><small>게임 서버 사용률</small></div>
           <div class="resource-item"><div class="resource-item-head"><span>MEM</span><strong id="resourceMemory">0%</strong></div><div class="resource-meter"><span id="resourceMemoryBar"></span></div><small id="resourceMemoryDetail">0 B / 0 B</small></div>
@@ -55,7 +56,6 @@
           <div class="resource-item network"><div class="resource-item-head"><span>Network</span><strong id="resourceNetworkState">대기</strong></div><div class="network-rates"><span id="resourceNetworkDown">↓ 0 B/s</span><span id="resourceNetworkUp">↑ 0 B/s</span></div><small>게임 서버 수신 / 송신</small></div>
         </div>
       </aside>
-      <span class="lock-message" id="settingsLock">서버 실행 중</span>
     </section>
 
     <section class="control-band">
@@ -71,7 +71,7 @@
     <form id="settingsForm" method="dialog">
       <div class="modal-head"><div><small>SERVER CONFIGURATION</small><h2>Minecraft 서버 설정</h2></div><button class="close" type="button" data-close="settingsDialog">×</button></div>
       <div class="form-scroll">
-        <section class="form-section"><h3>배포 유형</h3><div class="grid cols-3 deployment-grid">
+        <section class="form-section"><h3>배포 유형</h3><div class="grid cols-4 deployment-grid">
           <label>서버 유형<select id="Type"><option value="VANILLA">Vanilla</option><option value="PAPER">Paper (플러그인 권장)</option><option value="PURPUR">Purpur</option><option value="SPIGOT">Spigot</option><option value="FORGE">Forge</option><option value="NEOFORGE">NeoForge</option><option value="FABRIC">Fabric</option><option value="QUILT">Quilt</option></select></label>
           <label>Minecraft 버전
             <span class="version-picker">
@@ -82,9 +82,26 @@
                 <option value="26.2">26.2</option><option value="26.1.2">26.1.2</option><option value="26.1.1">26.1.1</option><option value="26.1">26.1</option>
                 <option value="1.21.11">1.21.11</option><option value="1.21.10">1.21.10</option><option value="1.21.9">1.21.9</option><option value="1.21.8">1.21.8</option><option value="1.21.7">1.21.7</option><option value="1.21.6">1.21.6</option>
                 <option value="1.21.5">1.21.5</option><option value="1.21.4">1.21.4</option><option value="1.21.3">1.21.3</option><option value="1.21.2">1.21.2</option><option value="1.21.1">1.21.1</option><option value="1.21">1.21</option>
+                <option value="1.20.6">1.20.6</option><option value="1.20.5">1.20.5</option><option value="1.20.4">1.20.4</option><option value="1.20.3">1.20.3</option><option value="1.20.2">1.20.2</option><option value="1.20.1">1.20.1</option><option value="1.20">1.20</option>
+                <option value="1.19.4">1.19.4</option><option value="1.19.3">1.19.3</option><option value="1.19.2">1.19.2</option><option value="1.19.1">1.19.1</option><option value="1.19">1.19</option>
+                <option value="1.18.2">1.18.2</option><option value="1.18.1">1.18.1</option><option value="1.18">1.18</option>
+                <option value="1.17.1">1.17.1</option><option value="1.17">1.17</option>
+                <option value="1.16.5">1.16.5</option><option value="1.16.4">1.16.4</option><option value="1.16.3">1.16.3</option><option value="1.16.2">1.16.2</option><option value="1.16.1">1.16.1</option><option value="1.16">1.16</option>
               </select>
             </span>
             <small class="field-help">목록에서 선택하거나 원하는 버전을 직접 입력할 수 있습니다.</small>
+          </label>
+          <label>Java 버전
+            <select id="JavaVersion">
+              <option value="AUTO">자동 (itzg 기본)</option>
+              <option value="8">Java 8</option>
+              <option value="11">Java 11</option>
+              <option value="16">Java 16</option>
+              <option value="17">Java 17</option>
+              <option value="21">Java 21</option>
+              <option value="25">Java 25</option>
+            </select>
+            <small class="field-help">Minecraft 또는 모드팩의 요구 버전에 맞춰 선택하세요.</small>
           </label>
           <label>메모리
             <span class="input-with-unit"><input id="Memory" value="4" inputmode="numeric" pattern="[1-9][0-9]*" placeholder="4" autocomplete="off" required><span class="input-unit" aria-hidden="true">G</span></span>

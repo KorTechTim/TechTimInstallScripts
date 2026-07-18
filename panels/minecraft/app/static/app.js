@@ -20,6 +20,11 @@ const statusKo = {
   not_created: '생성되지 않음', paused: '일시 정지', removing: '삭제 중'
 };
 
+function settingsSummary(config) {
+  const javaVersion = config.JavaVersion === 'AUTO' ? 'JAVA AUTO' : `JAVA ${config.JavaVersion}`;
+  return `${config.Type} · ${config.Version} · ${javaVersion} · ${config.Memory}`;
+}
+
 function toast(message, error = false) {
   const el = $('toast');
   el.textContent = message;
@@ -184,7 +189,7 @@ $('deleteServerConfirm').onclick = async event => {
     closeDialog(deleteServerDialog);
     selectLog('install');
     const config = await api('/api/config');
-    $('settingsMode').textContent = `${config.config.Type} · ${config.config.Version} · ${config.config.Memory}`;
+    $('settingsMode').textContent = settingsSummary(config.config);
     await refreshStatus();
     await refreshLog();
     toast(data.message || '서버 데이터가 삭제되었습니다.');
@@ -196,7 +201,7 @@ $('deleteServerConfirm').onclick = async event => {
   }
 };
 
-const fields = ['Type','Version','Memory','ServerName','Motd','Level','Seed','Difficulty','GameMode','MaxPlayers','OnlineMode','Pvp','AllowFlight','EnableCommandBlock','ViewDistance','SimulationDistance','SpawnProtection','Whitelist','Ops','ModrinthProjects','ModpackUrl'];
+const fields = ['Type','Version','JavaVersion','Memory','ServerName','Motd','Level','Seed','Difficulty','GameMode','MaxPlayers','OnlineMode','Pvp','AllowFlight','EnableCommandBlock','ViewDistance','SimulationDistance','SpawnProtection','Whitelist','Ops','ModrinthProjects','ModpackUrl'];
 const checkFields = new Set(['OnlineMode','Pvp','AllowFlight','EnableCommandBlock']);
 const numberFields = new Set(['MaxPlayers','ViewDistance','SimulationDistance','SpawnProtection']);
 
@@ -258,7 +263,7 @@ $('settingsForm').onsubmit = async event => {
     try { body.ExtraEnv = JSON.parse($('ExtraEnv').value || '{}'); }
     catch { throw new Error('추가 환경 변수는 올바른 JSON 형식이어야 합니다.'); }
     await api('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-    $('settingsMode').textContent = `${body.Type} · ${body.Version} · ${body.Memory}`;
+    $('settingsMode').textContent = settingsSummary(body);
     $('saveToast').classList.add('show');
     setTimeout(() => { $('saveToast').classList.remove('show'); settingsDialog.close(); }, 1000);
   } catch (error) { toast(error.message, true); }
@@ -455,9 +460,9 @@ async function refreshResources() {
     $('resourceNetworkDown').textContent = `↓ ${formatResourceBytes(data.network_received_per_second, true)}`;
     $('resourceNetworkUp').textContent = `↑ ${formatResourceBytes(data.network_sent_per_second, true)}`;
     $('resourceNetworkState').textContent = data.running ? '활성' : '대기';
-    $('resourceStatus').textContent = data.error ? '일부 조회 실패 · 5초' : data.running ? '실시간 · 5초' : '서버 대기 · 5초';
+    $('resourceStatus').textContent = data.error ? '일부 조회 실패 : 5초' : '새로고침 : 5초';
   } catch (_) {
-    $('resourceStatus').textContent = '조회 실패 · 5초';
+    $('resourceStatus').textContent = '조회 실패 : 5초';
   }
 }
 
@@ -465,7 +470,7 @@ async function initialize() {
   loadMinecraftVersions();
   await refreshStatus();
   const config = await api('/api/config').catch(() => null);
-  if (config) $('settingsMode').textContent = `${config.config.Type} · ${config.config.Version} · ${config.config.Memory}`;
+  if (config) $('settingsMode').textContent = settingsSummary(config.config);
   await refreshLog();
   await refreshResources();
   setInterval(refreshStatus, 3000);

@@ -6,6 +6,7 @@
 
 - `admin/admin` 최초 로그인 후 새 비밀번호 설정
 - Vanilla, Paper, Purpur, Spigot, Forge, NeoForge, Fabric, Quilt 지원
+- Java 8, 11, 16, 17, 21, 25 런타임 선택
 - Forge, NeoForge, Fabric 서버팩 URL 자동 설치
 - 서버 설치, 시작, 중지, 삭제, 상태 및 실시간 로그
 - 게임 컨테이너와 전체 서버 데이터를 초기화한 뒤 엔진 설치부터 다시 시작

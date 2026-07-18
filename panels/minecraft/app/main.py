@@ -72,11 +72,17 @@ SERVER_TYPES = {
     "FABRIC", "QUILT",
 }
 MODPACK_URL_TYPES = {"FORGE", "NEOFORGE", "FABRIC"}
+JAVA_VERSIONS = {"AUTO", "8", "11", "16", "17", "21", "25"}
 
 FALLBACK_MINECRAFT_VERSIONS = [
     "26.2", "26.1.2", "26.1.1", "26.1",
     "1.21.11", "1.21.10", "1.21.9", "1.21.8", "1.21.7", "1.21.6",
     "1.21.5", "1.21.4", "1.21.3", "1.21.2", "1.21.1", "1.21",
+    "1.20.6", "1.20.5", "1.20.4", "1.20.3", "1.20.2", "1.20.1", "1.20",
+    "1.19.4", "1.19.3", "1.19.2", "1.19.1", "1.19",
+    "1.18.2", "1.18.1", "1.18",
+    "1.17.1", "1.17",
+    "1.16.5", "1.16.4", "1.16.3", "1.16.2", "1.16.1", "1.16",
 ]
 
 
@@ -100,6 +106,7 @@ class StartServerRequest(BaseModel):
 class ConfigRequest(BaseModel):
     Type: str = "PAPER"
     Version: str = "LATEST"
+    JavaVersion: str = "AUTO"
     Memory: str = "4G"
     ServerName: str = "TechTim Minecraft Server"
     Motd: str = "TechTim Minecraft Server"
@@ -193,7 +200,7 @@ def default_config() -> dict:
     return ConfigRequest().model_dump()
 
 
-def releases_since_1_21(manifest: dict) -> list[str]:
+def releases_since_1_16(manifest: dict) -> list[str]:
     releases = []
     for version in manifest.get("versions") or []:
         if not isinstance(version, dict) or version.get("type") != "release":
@@ -202,7 +209,7 @@ def releases_since_1_21(manifest: dict) -> list[str]:
         if not version_id or version_id in releases:
             continue
         releases.append(version_id)
-        if version_id == "1.21":
+        if version_id == "1.16":
             return releases
     return FALLBACK_MINECRAFT_VERSIONS.copy()
 
@@ -218,7 +225,7 @@ def minecraft_version_payload() -> dict:
     try:
         with urlopen(MINECRAFT_VERSION_MANIFEST_URL, timeout=5) as response:
             manifest = json.load(response)
-        releases = releases_since_1_21(manifest)
+        releases = releases_since_1_16(manifest)
         latest = str((manifest.get("latest") or {}).get("release") or releases[0])
     except (OSError, ValueError, json.JSONDecodeError, TypeError):
         source = "fallback"
@@ -241,6 +248,9 @@ def normalize_config(raw: dict) -> dict:
     if merged["Type"] not in SERVER_TYPES:
         merged["Type"] = "PAPER"
     merged["Version"] = str(merged["Version"] or "LATEST").strip()
+    merged["JavaVersion"] = str(merged.get("JavaVersion") or "AUTO").upper().strip()
+    if merged["JavaVersion"] not in JAVA_VERSIONS:
+        merged["JavaVersion"] = "AUTO"
     memory = str(merged["Memory"] or "4G").upper().strip()
     if not re.fullmatch(r"[1-9]\d*[MG]", memory):
         memory = "4G"
@@ -336,14 +346,23 @@ def container_resource_usage(container) -> dict[str, Any]:
     }
 
 
-def installed() -> bool:
+def runtime_image_for_config(config: dict | None = None) -> str:
+    java_version = str((config or read_config()).get("JavaVersion") or "AUTO").upper()
+    if java_version == "AUTO":
+        return RUNTIME_IMAGE
+    repository, _ = docker.utils.parse_repository_tag(RUNTIME_IMAGE)
+    return f"{repository}:java{java_version}"
+
+
+def installed(config: dict | None = None) -> bool:
     if not INSTALL_MARKER_FILE.exists():
         return False
-    return f"runtime_image={RUNTIME_IMAGE}" in INSTALL_MARKER_FILE.read_text(encoding="utf-8")
+    runtime_image = runtime_image_for_config(config)
+    return f"runtime_image={runtime_image}" in INSTALL_MARKER_FILE.read_text(encoding="utf-8")
 
 
-def pull_image_with_progress(client) -> None:
-    repository, tag = docker.utils.parse_repository_tag(RUNTIME_IMAGE)
+def pull_image_with_progress(client, runtime_image: str) -> None:
+    repository, tag = docker.utils.parse_repository_tag(runtime_image)
     tag = tag or "latest"
     events: queue.Queue = queue.Queue()
 
@@ -380,10 +399,10 @@ def pull_image_with_progress(client) -> None:
         if status and latest_status.get(layer) != status:
             append_log(INSTALL_LOG_FILE, f"[docker] {layer}: {status}{' ' + progress if progress else ''}")
             latest_status[layer] = status
-    client.images.get(RUNTIME_IMAGE)
+    client.images.get(runtime_image)
 
 
-def install_job() -> None:
+def install_job(runtime_image: str) -> None:
     global INSTALL_ACTIVE
     with INSTALL_LOCK:
         INSTALL_ACTIVE = True
@@ -392,10 +411,10 @@ def install_job() -> None:
     INSTALL_STATUS_FILE.write_text("running", encoding="utf-8")
     try:
         append_log(INSTALL_LOG_FILE, "Minecraft Java 서버 설치 작업을 시작합니다.")
-        append_log(INSTALL_LOG_FILE, f"공식 itzg Docker 이미지: {RUNTIME_IMAGE}")
-        pull_image_with_progress(docker_client())
+        append_log(INSTALL_LOG_FILE, f"공식 itzg Docker 이미지: {runtime_image}")
+        pull_image_with_progress(docker_client(), runtime_image)
         INSTALL_MARKER_FILE.write_text(
-            f"distribution=itzg-docker\nruntime_image={RUNTIME_IMAGE}\ninstalled_at={datetime.now().isoformat()}\n",
+            f"distribution=itzg-docker\nruntime_image={runtime_image}\ninstalled_at={datetime.now().isoformat()}\n",
             encoding="utf-8",
         )
         INSTALL_STATUS_FILE.write_text("completed", encoding="utf-8")
@@ -796,7 +815,8 @@ def request_install(request: Request, tasks: BackgroundTasks):
         if INSTALL_ACTIVE:
             raise HTTPException(status_code=409, detail="설치 작업이 이미 진행 중입니다.")
         INSTALL_ACTIVE = True
-    tasks.add_task(install_job)
+    runtime_image = runtime_image_for_config(read_config())
+    tasks.add_task(install_job, runtime_image)
     return {"status": "started"}
 
 
@@ -804,7 +824,10 @@ def request_install(request: Request, tasks: BackgroundTasks):
 def install_status(request: Request):
     require_auth(request)
     status = INSTALL_STATUS_FILE.read_text(encoding="utf-8").strip() if INSTALL_STATUS_FILE.exists() else "not_started"
-    return {"status": status, "installed": installed()}
+    is_installed = installed()
+    if status == "completed" and not is_installed:
+        status = "not_started"
+    return {"status": status, "installed": is_installed}
 
 
 @app.get("/api/install/log")
@@ -845,10 +868,11 @@ def start_server(payload: StartServerRequest, request: Request):
         raise HTTPException(status_code=400, detail="Minecraft EULA에 동의해야 서버를 시작할 수 있습니다.")
     if server_running():
         raise HTTPException(status_code=409, detail="이미 서버가 동작 중입니다.")
-    if not installed():
-        raise HTTPException(status_code=400, detail="먼저 서버 설치를 진행해주세요.")
     config = read_config()
+    if not installed(config):
+        raise HTTPException(status_code=400, detail="먼저 서버 설치를 진행해주세요.")
     validate_start(config)
+    runtime_image = runtime_image_for_config(config)
     client = docker_client()
     old = get_container()
     if old:
@@ -856,7 +880,7 @@ def start_server(payload: StartServerRequest, request: Request):
     ensure_dirs()
     CONTROL_LOG_FILE.write_text("", encoding="utf-8")
     container = client.containers.run(
-        RUNTIME_IMAGE,
+        runtime_image,
         name=SERVER_CONTAINER,
         detach=True,
         environment=runtime_environment(config),
