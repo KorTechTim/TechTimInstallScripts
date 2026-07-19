@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.request import urlopen
+from urllib.request import Request as UrlRequest, urlopen
 import hashlib
 import json
 import os
@@ -65,6 +65,8 @@ RESOURCE_NETWORK_SAMPLE: dict[str, Any] = {
     "received": 0,
     "sent": 0,
 }
+PUBLIC_IP_LOCK = threading.Lock()
+PUBLIC_IP_CACHE: dict[str, Any] = {"expires_at": 0.0, "value": ""}
 KST = timezone(timedelta(hours=9), name="KST")
 ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 ANSI_FRAGMENT_RE = re.compile(r"(?:\[(?:0|1|2|3|4|5|7|9|10[0-7]|[34][0-7])m)+")
@@ -302,6 +304,34 @@ def server_running() -> bool:
         return container.status == "running"
     except Exception:
         return False
+
+
+def public_server_ip() -> str:
+    configured = str(os.getenv("PUBLIC_IP") or "").strip()
+    if configured:
+        return configured
+
+    now = time.monotonic()
+    with PUBLIC_IP_LOCK:
+        if now < float(PUBLIC_IP_CACHE.get("expires_at") or 0):
+            return str(PUBLIC_IP_CACHE.get("value") or "")
+
+        value = ""
+        try:
+            metadata_request = UrlRequest(
+                "http://169.254.169.254/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip",
+                headers={"Metadata-Flavor": "Google"},
+            )
+            with urlopen(metadata_request, timeout=1.5) as response:
+                value = response.read(64).decode("ascii", errors="ignore").strip()
+            if not re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", value):
+                value = ""
+        except Exception:
+            value = ""
+
+        PUBLIC_IP_CACHE["value"] = value
+        PUBLIC_IP_CACHE["expires_at"] = now + (300 if value else 60)
+        return value
 
 
 def container_resource_usage(container) -> dict[str, Any]:
@@ -1083,6 +1113,8 @@ def server_resources(request: Request):
         "disk_total": disk.total,
         "network_received_per_second": 0,
         "network_sent_per_second": 0,
+        "public_ip": public_server_ip(),
+        "server_port": SERVER_PORT,
         "updated_at": datetime.now(KST).isoformat(timespec="seconds"),
     }
     container = get_container()

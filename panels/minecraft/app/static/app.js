@@ -132,6 +132,9 @@ function closeDialog(dialog) {
 
 document.querySelectorAll('[data-log]').forEach(button => button.onclick = () => selectLog(button.dataset.log));
 document.querySelectorAll('[data-close]').forEach(button => button.onclick = () => closeDialog($(button.dataset.close)));
+document.querySelectorAll('[data-placeholder-menu]').forEach(button => {
+  button.onclick = () => showButtonBubble(button, '준비 중인 메뉴입니다.', false);
+});
 document.querySelectorAll('dialog').forEach(dialog => dialog.addEventListener('close', syncModalScrollLock));
 
 $('consoleCommandForm').onsubmit = async event => {
@@ -524,6 +527,44 @@ function setResourceMeter(valueId, barId, percent) {
   $(barId).style.width = `${value}%`;
 }
 
+function publicAddressFallback() {
+  const hostname = location.hostname;
+  if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname)) return '';
+  if (hostname === '127.0.0.1' || hostname.startsWith('10.') || hostname.startsWith('192.168.')) return '';
+  const second = Number(hostname.split('.')[1]);
+  if (hostname.startsWith('172.') && second >= 16 && second <= 31) return '';
+  return `${hostname}:25565`;
+}
+
+async function copyToClipboard(value) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const input = document.createElement('textarea');
+  input.value = value;
+  input.setAttribute('readonly', '');
+  input.style.position = 'fixed';
+  input.style.opacity = '0';
+  document.body.appendChild(input);
+  input.select();
+  const copied = document.execCommand('copy');
+  input.remove();
+  if (!copied) throw new Error('클립보드 복사를 지원하지 않는 브라우저입니다.');
+}
+
+$('resourcePublicAddress').onclick = async event => {
+  const button = event.currentTarget;
+  const address = button.dataset.address || '';
+  if (!address) return;
+  try {
+    await copyToClipboard(address);
+    showButtonBubble(button, '서버 접속 주소가 복사되었습니다.', false);
+  } catch (error) {
+    showButtonBubble(button, error.message);
+  }
+};
+
 async function refreshResources() {
   try {
     const data = await api('/api/server/resources');
@@ -537,6 +578,13 @@ async function refreshResources() {
     $('resourceNetworkDown').textContent = `↓ ${formatResourceBytes(data.network_received_per_second, true)}`;
     $('resourceNetworkUp').textContent = `↑ ${formatResourceBytes(data.network_sent_per_second, true)}`;
     $('resourceNetworkState').textContent = data.running ? '활성' : '대기';
+    const publicAddress = data.public_ip
+      ? `${data.public_ip}:${Number(data.server_port) || 25565}`
+      : publicAddressFallback();
+    const publicAddressButton = $('resourcePublicAddress');
+    publicAddressButton.dataset.address = publicAddress;
+    publicAddressButton.disabled = !publicAddress;
+    $('resourcePublicAddressText').textContent = publicAddress || '확인 불가';
     $('resourceStatus').textContent = data.error ? '일부 조회 실패 : 5초' : '새로고침 : 5초';
   } catch (_) {
     $('resourceStatus').textContent = '조회 실패 : 5초';
