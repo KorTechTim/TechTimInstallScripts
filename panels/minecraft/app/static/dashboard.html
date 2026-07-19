@@ -52,7 +52,7 @@
             <div class="settings-copy"><h2>Minecraft 서버 구성</h2><p>서버 종류, 버전, 월드와 플레이 규칙을 관리합니다.</p><span class="settings-summary" id="settingsMode">PAPER · LATEST · JAVA AUTO · 4G</span></div>
           </div>
           <nav class="management-shortcuts" aria-label="Minecraft 운영 기능">
-            <button class="management-shortcut" type="button" data-placeholder-menu>
+            <button class="management-shortcut" id="playerManagerButton" type="button">
               <span class="management-shortcut-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg></span>
               <span class="management-shortcut-copy"><b>플레이어 관리</b><small>접속자와 권한 관리</small></span>
             </button>
@@ -73,7 +73,7 @@
         <aside class="resource-monitor" aria-label="서버 리소스 모니터링">
           <div class="resource-monitor-head"><div><h3>서버 리소스</h3><p>게임 컨테이너 및 데이터 디스크</p></div><span id="resourceStatus">새로고침 : 5초</span></div>
           <div class="resource-grid">
-            <div class="resource-item"><div class="resource-item-head"><span>CPU</span><strong id="resourceCpu">0%</strong></div><div class="resource-meter"><span id="resourceCpuBar"></span></div><small>게임 서버 사용률</small></div>
+            <div class="resource-item cpu-resource"><div class="resource-item-head"><span>CPU Threads</span><strong id="resourceCpuThreadCount">대기</strong></div><div class="cpu-thread-grid" id="resourceCpuThreads"><span class="cpu-thread-empty">서버 시작 후 표시</span></div><small>논리 CPU별 게임 서버 사용률</small></div>
             <div class="resource-item"><div class="resource-item-head"><span>MEM</span><strong id="resourceMemory">0%</strong></div><div class="resource-meter"><span id="resourceMemoryBar"></span></div><small id="resourceMemoryDetail">0 B / 0 B</small></div>
             <div class="resource-item"><div class="resource-item-head"><span>Disk</span><strong id="resourceDisk">0%</strong></div><div class="resource-meter"><span id="resourceDiskBar"></span></div><small id="resourceDiskDetail">0 B / 0 B</small></div>
             <div class="resource-item network"><div class="resource-item-head"><span>Network</span><strong id="resourceNetworkState">대기</strong></div><div class="network-rates"><span id="resourceNetworkDown">↓ 0 B/s</span><span id="resourceNetworkUp">↑ 0 B/s</span></div><small>게임 서버 수신 / 송신</small><button class="public-address" id="resourcePublicAddress" type="button" title="클릭하여 공인 IP 복사" disabled><span>공인 IP</span><strong id="resourcePublicAddressText">확인 중</strong><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg></button></div>
@@ -154,6 +154,29 @@
       </div>
       <div class="modal-actions"><span class="save-toast" id="saveToast">저장 완료</span><button type="button" class="secondary" data-close="settingsDialog">취소</button><button type="submit" class="primary">설정 저장</button></div>
     </form>
+  </dialog>
+
+  <dialog id="playerManagerDialog" class="modal player-manager-modal">
+    <div class="modal-head"><div><small>PLAYER MANAGEMENT</small><h2>플레이어 관리</h2></div><button class="close" type="button" data-close="playerManagerDialog" aria-label="닫기">×</button></div>
+    <div class="player-manager-body">
+      <div class="player-manager-summary">
+        <div><span class="player-server-state" id="playerServerState">상태 확인 중</span><strong id="playerOnlineSummary">접속자 정보를 불러오고 있습니다.</strong></div>
+        <button class="player-refresh" id="playerRefreshButton" type="button" title="플레이어 목록 새로고침" aria-label="플레이어 목록 새로고침"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5"></path><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"></path></svg></button>
+      </div>
+      <form class="player-action-form" id="playerActionForm">
+        <label>플레이어명<input id="playerActionName" maxlength="16" pattern="[A-Za-z0-9_]{1,16}" placeholder="Minecraft ID" autocomplete="off" required></label>
+        <label>관리 작업<select id="playerActionType"><option value="op">OP 부여</option><option value="deop">OP 해제</option><option value="whitelist_add">화이트리스트 추가</option><option value="whitelist_remove">화이트리스트 제거</option><option value="kick">서버에서 추방</option><option value="ban">접속 차단</option><option value="pardon">차단 해제</option></select></label>
+        <label>사유 (선택)<input id="playerActionReason" maxlength="120" placeholder="추방 또는 차단 사유"></label>
+        <button class="player-action-submit" id="playerActionSubmit" type="submit">적용</button>
+      </form>
+      <div class="player-manager-error" id="playerManagerError" role="status" aria-live="polite"></div>
+      <div class="player-list-grid">
+        <section class="player-list-section"><header><div><h3>온라인 플레이어</h3><small>현재 서버 접속자</small></div><span id="onlinePlayerCount">0</span></header><div class="player-list" id="onlinePlayerList"></div></section>
+        <section class="player-list-section"><header><div><h3>관리자 (OP)</h3><small>서버 운영 권한 보유자</small></div><span id="opPlayerCount">0</span></header><div class="player-list" id="opPlayerList"></div></section>
+        <section class="player-list-section"><header><div><h3>화이트리스트</h3><small>접속 허용 플레이어</small></div><span id="whitelistPlayerCount">0</span></header><div class="player-list" id="whitelistPlayerList"></div></section>
+        <section class="player-list-section"><header><div><h3>차단 목록</h3><small>서버 접속 차단 플레이어</small></div><span id="bannedPlayerCount">0</span></header><div class="player-list" id="bannedPlayerList"></div></section>
+      </div>
+    </div>
   </dialog>
 
   <dialog id="filesDialog" class="modal file-modal">

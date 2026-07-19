@@ -2,6 +2,7 @@ const $ = id => document.getElementById(id);
 const terminal = $('terminal');
 const settingsDialog = $('settingsDialog');
 const filesDialog = $('filesDialog');
+const playerManagerDialog = $('playerManagerDialog');
 const eulaDialog = $('eulaDialog');
 const deleteServerDialog = $('deleteServerDialog');
 const panelUpdateDialog = $('panelUpdateDialog');
@@ -13,6 +14,8 @@ let panelUpdateRequested = false;
 let panelUpdatePollTimer = null;
 let panelUpdateReloadScheduled = false;
 let commandSending = false;
+let stopRequestActive = false;
+let playerManagerBusy = false;
 
 const statusKo = {
   not_started: '미설치', running: '실행 중', completed: '설치 완료', failed: '설치 실패',
@@ -89,12 +92,13 @@ async function refreshStatus() {
     $('serverStatus').textContent = statusKo[server.status] || server.status;
     setStatusIcon($('installIcon'), install.status, ['completed']);
     setStatusIcon($('serverIcon'), server.status, ['running']);
-    $('startButton').disabled = server.running || !install.installed;
-    $('stopButton').disabled = !server.running;
-    $('deleteServerButton').disabled = install.status === 'running' || (!install.installed && server.status === 'not_created');
-    $('installButton').disabled = install.status === 'running' || install.install_locked;
-    $('settingsEntry').classList.toggle('locked', server.running);
-    $('settingsButton').disabled = server.running;
+    const serverActive = Boolean(server.running || server.stoppable);
+    $('startButton').disabled = serverActive || !install.installed;
+    $('stopButton').disabled = !server.stoppable || stopRequestActive;
+    $('deleteServerButton').disabled = serverActive || install.status === 'running' || (!install.installed && server.status === 'not_created');
+    $('installButton').disabled = serverActive || install.status === 'running' || install.install_locked;
+    $('settingsEntry').classList.toggle('locked', serverActive);
+    $('settingsButton').disabled = serverActive;
     $('consoleCommandInput').disabled = !server.running || commandSending;
     if (server.running && logMode !== 'server') selectLog('server');
   } catch (error) { toast(error.message, true); }
@@ -137,6 +141,126 @@ document.querySelectorAll('[data-placeholder-menu]').forEach(button => {
 });
 document.querySelectorAll('dialog').forEach(dialog => dialog.addEventListener('close', syncModalScrollLock));
 
+const playerActionLabels = {
+  op: 'OP 부여', deop: 'OP 해제', whitelist_add: '허용 추가', whitelist_remove: '허용 제거',
+  kick: '추방', ban: '차단', pardon: '차단 해제'
+};
+
+function playerActionButton(action, player, tone = '') {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = `player-row-action${tone ? ` ${tone}` : ''}`;
+  button.textContent = playerActionLabels[action];
+  button.disabled = playerManagerBusy;
+  button.onclick = () => runPlayerAction(action, player);
+  return button;
+}
+
+function renderPlayerList(listId, countId, entries, type, running) {
+  const list = $(listId);
+  const values = Array.isArray(entries) ? entries : [];
+  list.textContent = '';
+  $(countId).textContent = String(values.length);
+  if (!values.length) {
+    const empty = document.createElement('p');
+    empty.className = 'player-list-empty';
+    empty.textContent = type === 'online' && !running ? '서버가 실행 중이 아닙니다.' : '등록된 플레이어가 없습니다.';
+    list.append(empty);
+    return;
+  }
+  values.forEach(entry => {
+    const player = typeof entry === 'string' ? entry : entry.name;
+    const row = document.createElement('div');
+    row.className = 'player-row';
+    const identity = document.createElement('div');
+    identity.className = 'player-row-identity';
+    const avatar = document.createElement('span');
+    avatar.className = 'player-avatar';
+    avatar.textContent = player.slice(0, 1).toUpperCase();
+    const copy = document.createElement('span');
+    const name = document.createElement('strong');
+    name.textContent = player;
+    copy.append(name);
+    if (type === 'banned' && entry.reason) {
+      const reason = document.createElement('small');
+      reason.textContent = entry.reason;
+      copy.append(reason);
+    }
+    identity.append(avatar, copy);
+    const actions = document.createElement('div');
+    actions.className = 'player-row-actions';
+    if (type === 'online') {
+      actions.append(playerActionButton('op', player), playerActionButton('whitelist_add', player), playerActionButton('kick', player, 'warn'), playerActionButton('ban', player, 'danger'));
+    } else if (type === 'ops') {
+      actions.append(playerActionButton('deop', player, 'warn'));
+    } else if (type === 'whitelist') {
+      actions.append(playerActionButton('whitelist_remove', player, 'warn'));
+    } else if (type === 'banned') {
+      actions.append(playerActionButton('pardon', player));
+    }
+    actions.querySelectorAll('button').forEach(button => button.disabled = !running || playerManagerBusy);
+    row.append(identity, actions);
+    list.append(row);
+  });
+}
+
+function renderPlayerManager(data) {
+  const running = Boolean(data.running);
+  const state = $('playerServerState');
+  state.textContent = running ? '서버 실행 중' : '서버 중지됨';
+  state.classList.toggle('online', running);
+  $('playerOnlineSummary').textContent = running
+    ? `${data.online.length} / ${data.max_players}명 접속 중`
+    : '서버를 시작하면 실시간 플레이어 관리가 활성화됩니다.';
+  $('playerManagerError').textContent = data.error || '';
+  renderPlayerList('onlinePlayerList', 'onlinePlayerCount', data.online, 'online', running);
+  renderPlayerList('opPlayerList', 'opPlayerCount', data.ops, 'ops', running);
+  renderPlayerList('whitelistPlayerList', 'whitelistPlayerCount', data.whitelist, 'whitelist', running);
+  renderPlayerList('bannedPlayerList', 'bannedPlayerCount', data.banned, 'banned', running);
+  $('playerActionForm').querySelectorAll('input,select,button').forEach(control => control.disabled = !running || playerManagerBusy);
+}
+
+async function loadPlayerManager() {
+  if (playerManagerBusy) return;
+  $('playerRefreshButton').disabled = true;
+  try {
+    const data = await api('/api/players');
+    renderPlayerManager(data);
+  } catch (error) {
+    $('playerManagerError').textContent = error.message;
+  } finally {
+    $('playerRefreshButton').disabled = false;
+  }
+}
+
+async function runPlayerAction(action, player, reason = '') {
+  if (playerManagerBusy) return;
+  if (['kick', 'ban', 'pardon'].includes(action) && !confirm(`${player} 플레이어에게 '${playerActionLabels[action]}' 작업을 실행할까요?`)) return;
+  playerManagerBusy = true;
+  $('playerActionForm').querySelectorAll('input,select,button').forEach(control => control.disabled = true);
+  try {
+    const data = await api('/api/players/action', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action, player, reason})
+    });
+    toast(data.message || '플레이어 관리 작업이 완료되었습니다.');
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    playerManagerBusy = false;
+    await loadPlayerManager();
+  }
+}
+
+$('playerManagerButton').onclick = () => {
+  showDialog(playerManagerDialog);
+  loadPlayerManager();
+};
+$('playerRefreshButton').onclick = loadPlayerManager;
+$('playerActionForm').onsubmit = event => {
+  event.preventDefault();
+  runPlayerAction($('playerActionType').value, $('playerActionName').value.trim(), $('playerActionReason').value.trim());
+};
+
 $('consoleCommandForm').onsubmit = async event => {
   event.preventDefault();
   const input = $('consoleCommandInput');
@@ -173,7 +297,7 @@ $('panelUpdateConfirm').onclick = requestPanelUpdate;
 $('installButton').onclick = async () => {
   try {
     const server = await api('/api/server/status');
-    if (server.running) {
+    if (server.running || server.stoppable) {
       showButtonBubble($('installButton'), '서버 기동 중에는 엔진을 설치할 수 없습니다.');
       return;
     }
@@ -187,17 +311,28 @@ $('installButton').onclick = async () => {
 };
 
 async function serverAction(action, payload = null) {
+  const stopping = action === 'stop';
+  if (stopping) {
+    if (stopRequestActive) return;
+    stopRequestActive = true;
+    $('stopButton').disabled = true;
+    showButtonBubble($('stopButton'), '서버를 즉시 종료하고 있습니다.', false);
+  }
   try {
     const options = {method: 'POST'};
     if (payload) {
       options.headers = {'Content-Type': 'application/json'};
       options.body = JSON.stringify(payload);
     }
-    await api(`/api/server/${action}`, options);
+    const result = await api(`/api/server/${action}`, options);
     selectLog('server');
-    toast({start: '서버 시작을 요청했습니다.', stop: '서버가 종료되었습니다.', restart: '서버를 재시작했습니다.'}[action]);
+    toast(result.message || {start: '서버 시작을 요청했습니다.', stop: '서버가 즉시 종료되었습니다.', restart: '서버를 재시작했습니다.'}[action]);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    if (stopping) stopRequestActive = false;
     await refreshStatus();
-  } catch (error) { toast(error.message, true); }
+  }
 }
 $('startButton').onclick = () => showDialog(eulaDialog);
 $('eulaAgreeButton').onclick = async event => {
@@ -211,7 +346,7 @@ $('stopButton').onclick = () => serverAction('stop');
 $('deleteServerButton').onclick = async () => {
   try {
     const server = await api('/api/server/status');
-    if (server.running) {
+    if (server.running || server.stoppable) {
       showButtonBubble($('deleteServerButton'), '서버 기동 중에는 서버를 삭제할 수 없습니다.');
       return;
     }
@@ -359,7 +494,7 @@ async function loadFiles(path = '') {
 $('filesButton').onclick = async () => {
   try {
     const server = await api('/api/server/status');
-    if (server.running) {
+    if (server.running || server.stoppable) {
       showButtonBubble($('filesButton'), '서버 기동 중에는 파일 핸들링이 불가능합니다.');
       return;
     }
@@ -527,6 +662,39 @@ function setResourceMeter(valueId, barId, percent) {
   $(barId).style.width = `${value}%`;
 }
 
+function renderCpuThreads(threads, running) {
+  const root = $('resourceCpuThreads');
+  const values = Array.isArray(threads) ? threads : [];
+  root.textContent = '';
+  $('resourceCpuThreadCount').textContent = values.length ? `${values.length} Threads` : (running ? '미지원' : '대기');
+  if (!values.length) {
+    const empty = document.createElement('span');
+    empty.className = 'cpu-thread-empty';
+    empty.textContent = running ? '스레드별 통계를 지원하지 않습니다.' : '서버 시작 후 표시';
+    root.append(empty);
+    return;
+  }
+  values.forEach(item => {
+    const percent = Math.max(0, Math.min(100, Number(item.percent) || 0));
+    const thread = document.createElement('div');
+    thread.className = 'cpu-thread';
+    const heading = document.createElement('div');
+    heading.className = 'cpu-thread-head';
+    const name = document.createElement('span');
+    name.textContent = `T${item.thread}`;
+    const value = document.createElement('strong');
+    value.textContent = `${percent.toFixed(percent % 1 ? 1 : 0)}%`;
+    heading.append(name, value);
+    const meter = document.createElement('div');
+    meter.className = 'cpu-thread-meter';
+    const bar = document.createElement('span');
+    bar.style.width = `${percent}%`;
+    meter.append(bar);
+    thread.append(heading, meter);
+    root.append(thread);
+  });
+}
+
 function publicAddressFallback() {
   const hostname = location.hostname;
   if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname)) return '';
@@ -568,7 +736,7 @@ $('resourcePublicAddress').onclick = async event => {
 async function refreshResources() {
   try {
     const data = await api('/api/server/resources');
-    setResourceMeter('resourceCpu', 'resourceCpuBar', data.cpu_percent);
+    renderCpuThreads(data.cpu_threads, data.running);
     setResourceMeter('resourceMemory', 'resourceMemoryBar', data.memory_percent);
     setResourceMeter('resourceDisk', 'resourceDiskBar', data.disk_percent);
     $('resourceMemoryDetail').textContent = data.memory_limit

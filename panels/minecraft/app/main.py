@@ -77,6 +77,7 @@ SERVER_TYPES = {
 }
 MODPACK_URL_TYPES = {"FORGE", "NEOFORGE", "FABRIC"}
 JAVA_VERSIONS = {"AUTO", "8", "11", "16", "17", "21", "25"}
+STOPPABLE_SERVER_STATUSES = {"running", "restarting", "paused"}
 
 FALLBACK_MINECRAFT_VERSIONS = [
     "26.2", "26.1.2", "26.1.1", "26.1",
@@ -101,6 +102,12 @@ class ChangePasswordRequest(BaseModel):
 
 class ServerCommandRequest(BaseModel):
     command: str = Field(min_length=1, max_length=500)
+
+
+class PlayerActionRequest(BaseModel):
+    action: str = Field(min_length=1, max_length=32)
+    player: str = Field(min_length=1, max_length=16)
+    reason: str = Field(default="", max_length=120)
 
 
 class StartServerRequest(BaseModel):
@@ -282,6 +289,37 @@ def write_config(config: dict) -> None:
     write_json(CONFIG_FILE, normalize_config(config))
 
 
+def player_entries(filename: str) -> list[dict[str, Any]]:
+    entries = read_json(SERVER_DIR / filename, [])
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def player_names(filename: str) -> list[str]:
+    names = {str(entry.get("name") or "").strip() for entry in player_entries(filename)}
+    return sorted((name for name in names if name), key=str.lower)
+
+
+def parse_online_players(output: str) -> list[str]:
+    _, separator, players = clean_log(output).partition(":")
+    if not separator:
+        return []
+    return [name.strip() for name in players.split(",") if name.strip()]
+
+
+def update_config_player_list(key: str, player: str, add: bool) -> None:
+    config = read_config()
+    names = [name.strip() for name in re.split(r"[,\n]", str(config.get(key) or "")) if name.strip()]
+    matching = {name.lower(): name for name in names}
+    if add:
+        matching[player.lower()] = player
+    else:
+        matching.pop(player.lower(), None)
+    config[key] = ",".join(sorted(matching.values(), key=str.lower))
+    write_config(config)
+
+
 def docker_client():
     return docker.from_env()
 
@@ -343,6 +381,15 @@ def container_resource_usage(container) -> dict[str, Any]:
     cpu_delta = float(cpu_usage.get("total_usage") or 0) - float(previous_cpu_usage.get("total_usage") or 0)
     system_delta = float(cpu_stats.get("system_cpu_usage") or 0) - float(previous_cpu_stats.get("system_cpu_usage") or 0)
     cpu_percent = max(0.0, min(100.0, cpu_delta / system_delta * 100)) if system_delta > 0 and cpu_delta >= 0 else 0.0
+    current_per_cpu = cpu_usage.get("percpu_usage") or []
+    previous_per_cpu = previous_cpu_usage.get("percpu_usage") or []
+    online_cpus = max(1, int(cpu_stats.get("online_cpus") or len(current_per_cpu) or os.cpu_count() or 1))
+    cpu_threads = []
+    if system_delta > 0 and len(current_per_cpu) == len(previous_per_cpu):
+        for index, (current, previous) in enumerate(zip(current_per_cpu, previous_per_cpu), start=1):
+            thread_delta = float(current or 0) - float(previous or 0)
+            thread_percent = thread_delta / system_delta * online_cpus * 100 if thread_delta >= 0 else 0.0
+            cpu_threads.append({"thread": index, "percent": round(min(100.0, max(0.0, thread_percent)), 1)})
 
     memory = stats.get("memory_stats") or {}
     memory_stats = memory.get("stats") or {}
@@ -374,6 +421,7 @@ def container_resource_usage(container) -> dict[str, Any]:
 
     return {
         "cpu_percent": round(cpu_percent, 1),
+        "cpu_threads": cpu_threads,
         "memory_percent": round(min(100.0, max(0.0, memory_percent)), 1),
         "memory_used": memory_used,
         "memory_limit": memory_limit,
@@ -1020,12 +1068,22 @@ def stop_server(request: Request):
     if not container:
         raise HTTPException(status_code=404, detail="생성된 서버 컨테이너가 없습니다.")
     container.reload()
-    if container.status != "running":
-        return {"status": "stopped"}
-    append_log(CONTROL_LOG_FILE, "Minecraft 서버 종료를 요청했습니다. 월드 저장 후 종료합니다.")
-    container.stop(timeout=60)
-    append_log(CONTROL_LOG_FILE, "Minecraft 서버가 정상 종료되었습니다.")
-    return {"status": "stopped"}
+    if container.status not in STOPPABLE_SERVER_STATUSES:
+        return {"status": "stopped", "message": "Minecraft 서버가 이미 종료되어 있습니다."}
+    append_log(CONTROL_LOG_FILE, "Minecraft 서버 즉시 종료를 요청했습니다.")
+    try:
+        try:
+            container.stop(timeout=0)
+        except docker.errors.DockerException:
+            pass
+        container.reload()
+        if container.status in STOPPABLE_SERVER_STATUSES:
+            container.update(restart_policy={"Name": "no"})
+            container.kill(signal="SIGKILL")
+    except docker.errors.DockerException as error:
+        raise HTTPException(status_code=500, detail=f"서버 즉시 종료에 실패했습니다: {error}") from error
+    append_log(CONTROL_LOG_FILE, "Minecraft 서버가 즉시 종료되었습니다.")
+    return {"status": "stopped", "message": "Minecraft 서버가 즉시 종료되었습니다."}
 
 
 @app.post("/api/server/restart")
@@ -1094,7 +1152,12 @@ def server_status(request: Request):
     if container:
         container.reload()
         status = container.status
-    return {"status": status, "running": status == "running", "installed": installed()}
+    return {
+        "status": status,
+        "running": status == "running",
+        "stoppable": status in STOPPABLE_SERVER_STATUSES,
+        "installed": installed(),
+    }
 
 
 @app.get("/api/server/resources")
@@ -1105,6 +1168,7 @@ def server_resources(request: Request):
     resources: dict[str, Any] = {
         "running": False,
         "cpu_percent": 0.0,
+        "cpu_threads": [],
         "memory_percent": 0.0,
         "memory_used": 0,
         "memory_limit": 0,
@@ -1174,6 +1238,105 @@ def send_server_command(payload: ServerCommandRequest, request: Request):
     if result.exit_code != 0:
         raise HTTPException(status_code=500, detail=output or "Minecraft 서버가 명령어를 처리하지 못했습니다.")
     return {"status": "sent", "message": "명령어를 전송했습니다.", "output": output}
+
+
+@app.get("/api/players")
+def players_status(request: Request):
+    require_auth(request)
+    config = read_config()
+    container = get_container()
+    running = False
+    online_players: list[str] = []
+    error = ""
+    if container:
+        try:
+            container.reload()
+            running = container.status == "running"
+            if running:
+                result = container.exec_run(["rcon-cli", "list"], stdout=True, stderr=True)
+                output = result.output.decode("utf-8", errors="replace") if isinstance(result.output, bytes) else str(result.output or "")
+                if result.exit_code == 0:
+                    online_players = parse_online_players(output)
+                else:
+                    error = clean_log(output).strip() or "접속자 목록을 불러오지 못했습니다."
+        except docker.errors.DockerException as exc:
+            error = f"접속자 조회 실패: {clean_log(str(exc))}"
+
+    banned_players = []
+    for entry in player_entries("banned-players.json"):
+        name = str(entry.get("name") or "").strip()
+        if name:
+            banned_players.append({"name": name, "reason": str(entry.get("reason") or "").strip()})
+    banned_players.sort(key=lambda entry: entry["name"].lower())
+    return {
+        "running": running,
+        "online": online_players,
+        "max_players": config["MaxPlayers"],
+        "ops": player_names("ops.json"),
+        "whitelist": player_names("whitelist.json"),
+        "banned": banned_players,
+        "error": error,
+    }
+
+
+@app.post("/api/players/action")
+def player_action(payload: PlayerActionRequest, request: Request):
+    require_auth(request)
+    container = get_container()
+    if not container:
+        raise HTTPException(status_code=404, detail="먼저 서버를 시작해주세요.")
+    container.reload()
+    if container.status != "running":
+        raise HTTPException(status_code=409, detail="서버가 실행 중일 때만 플레이어를 관리할 수 있습니다.")
+
+    action = payload.action.strip().lower()
+    player = payload.player.strip()
+    raw_reason = payload.reason.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,16}", player):
+        raise HTTPException(status_code=400, detail="플레이어명은 영문, 숫자, 밑줄을 사용해 16자 이내로 입력해주세요.")
+    if any(character in raw_reason for character in ("\n", "\r", "\0")):
+        raise HTTPException(status_code=400, detail="사유는 한 줄로 입력해주세요.")
+    reason = re.sub(r"\s+", " ", raw_reason)
+
+    commands = {
+        "op": f"op {player}",
+        "deop": f"deop {player}",
+        "whitelist_add": f"whitelist add {player}",
+        "whitelist_remove": f"whitelist remove {player}",
+        "kick": f"kick {player}" + (f" {reason}" if reason else ""),
+        "ban": f"ban {player}" + (f" {reason}" if reason else ""),
+        "pardon": f"pardon {player}",
+    }
+    command = commands.get(action)
+    if not command:
+        raise HTTPException(status_code=400, detail="지원하지 않는 플레이어 관리 작업입니다.")
+
+    try:
+        result = container.exec_run(["rcon-cli", command], stdout=True, stderr=True)
+    except docker.errors.DockerException as error:
+        raise HTTPException(status_code=500, detail=f"플레이어 관리 명령에 실패했습니다: {error}") from error
+    output = result.output.decode("utf-8", errors="replace") if isinstance(result.output, bytes) else str(result.output or "")
+    output = clean_log(output).strip()
+    if result.exit_code != 0:
+        raise HTTPException(status_code=500, detail=output or "Minecraft 서버가 플레이어 관리 명령을 처리하지 못했습니다.")
+
+    if action in {"op", "deop"}:
+        update_config_player_list("Ops", player, action == "op")
+    elif action in {"whitelist_add", "whitelist_remove"}:
+        update_config_player_list("Whitelist", player, action == "whitelist_add")
+    append_log(CONTROL_LOG_FILE, f"[플레이어 관리] {command}")
+    if output:
+        append_log(CONTROL_LOG_FILE, f"[명령 결과] {output[:4000]}")
+    messages = {
+        "op": f"{player} 플레이어에게 OP 권한을 부여했습니다.",
+        "deop": f"{player} 플레이어의 OP 권한을 해제했습니다.",
+        "whitelist_add": f"{player} 플레이어를 화이트리스트에 추가했습니다.",
+        "whitelist_remove": f"{player} 플레이어를 화이트리스트에서 제거했습니다.",
+        "kick": f"{player} 플레이어를 서버에서 추방했습니다.",
+        "ban": f"{player} 플레이어의 접속을 차단했습니다.",
+        "pardon": f"{player} 플레이어의 접속 차단을 해제했습니다.",
+    }
+    return {"status": "completed", "message": messages[action], "output": output}
 
 
 @app.get("/api/files")
