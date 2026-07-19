@@ -21,6 +21,18 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
+from app.game_metrics import (
+    container_uptime_seconds,
+    health_state,
+    parse_forge_tps,
+    parse_paper_mspt,
+    parse_paper_tps,
+    parse_player_counts,
+    parse_spark_tps,
+    parse_tick_query,
+    version_at_least,
+)
+
 
 app = FastAPI(title="TechTim Minecraft Server Panel")
 APP_DIR = Path(__file__).resolve().parent
@@ -92,6 +104,9 @@ PROC_STAT_FILE = Path(os.getenv("PROC_STAT_FILE", "/proc/stat"))
 PROC_MEMINFO_FILE = Path(os.getenv("PROC_MEMINFO_FILE", "/proc/meminfo"))
 PUBLIC_IP_LOCK = threading.Lock()
 PUBLIC_IP_CACHE: dict[str, Any] = {"expires_at": 0.0, "value": ""}
+GAME_METRICS_LOCK = threading.Lock()
+GAME_METRICS_CACHE_SECONDS = max(5, int(os.getenv("GAME_METRICS_CACHE_SECONDS", "5")))
+GAME_METRICS_CACHE: dict[str, Any] = {"container_id": "", "expires_at": 0.0, "payload": None}
 KST = timezone(timedelta(hours=9), name="KST")
 ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 ANSI_FRAGMENT_RE = re.compile(r"(?:\[(?:0|1|2|3|4|5|7|9|10[0-7]|[34][0-7])m)+")
@@ -1028,6 +1043,122 @@ def container_resource_usage(container) -> dict[str, Any]:
         "network_received_per_second": round(received_per_second),
         "network_sent_per_second": round(sent_per_second),
     }
+
+
+def empty_game_metrics(config: dict, status: str = "stopped", message: str = "게임 서버가 중지되어 있습니다.") -> dict[str, Any]:
+    return {
+        "status": status,
+        "supported": False,
+        "source": "",
+        "health": "unknown",
+        "tps": None,
+        "tps_1m": None,
+        "tps_5m": None,
+        "tps_15m": None,
+        "mspt": None,
+        "mspt_min": None,
+        "mspt_p95": None,
+        "mspt_max": None,
+        "players_online": 0,
+        "players_max": int(config.get("MaxPlayers") or 0),
+        "players_available": False,
+        "uptime_seconds": 0,
+        "message": message,
+        "updated_at": datetime.now(KST).isoformat(timespec="seconds"),
+    }
+
+
+def try_rcon_metric_command(container, command: str) -> str:
+    try:
+        return run_rcon_command(container, command)
+    except (docker.errors.DockerException, OSError, RuntimeError):
+        return ""
+
+
+def collect_game_metrics(container, config: dict) -> dict[str, Any]:
+    metrics = empty_game_metrics(config, status="starting", message="Minecraft 명령 인터페이스를 확인하고 있습니다.")
+    state = (getattr(container, "attrs", {}) or {}).get("State") or {}
+    metrics["uptime_seconds"] = container_uptime_seconds(str(state.get("StartedAt") or ""))
+
+    list_output = try_rcon_metric_command(container, "list")
+    if list_output:
+        online, maximum = parse_player_counts(list_output, metrics["players_max"])
+        metrics.update({
+            "players_online": online,
+            "players_max": maximum,
+            "players_available": True,
+        })
+
+    server_type = str(config.get("Type") or "VANILLA").upper()
+    version = str(config.get("Version") or "LATEST")
+    source = ""
+    performance: dict[str, float] = {}
+
+    if server_type in {"PAPER", "PURPUR", "SPIGOT"}:
+        tps_output = try_rcon_metric_command(container, "tps")
+        mspt_output = try_rcon_metric_command(container, "mspt")
+        performance.update(parse_paper_tps(tps_output))
+        performance.update(parse_paper_mspt(mspt_output))
+        if performance:
+            source = "Paper/Spigot"
+    elif server_type == "FORGE":
+        performance.update(parse_forge_tps(try_rcon_metric_command(container, "forge tps")))
+        if performance:
+            source = "Forge"
+    elif server_type == "NEOFORGE":
+        performance.update(parse_forge_tps(try_rcon_metric_command(container, "forge tps")))
+        if not performance:
+            performance.update(parse_forge_tps(try_rcon_metric_command(container, "neoforge tps")))
+        if performance:
+            source = "NeoForge"
+
+    if not performance and server_type in {"FABRIC", "QUILT", "NEOFORGE"}:
+        performance.update(parse_spark_tps(try_rcon_metric_command(container, "spark tps")))
+        if performance:
+            source = "Spark"
+
+    if (performance.get("tps") is None or performance.get("mspt") is None) and version_at_least(version, (1, 20, 3)):
+        tick_metrics = parse_tick_query(try_rcon_metric_command(container, "tick query"))
+        for key, value in tick_metrics.items():
+            performance.setdefault(key, value)
+        if tick_metrics and not source:
+            source = "Minecraft tick"
+
+    metrics.update(performance)
+    metrics["supported"] = metrics["tps"] is not None or metrics["mspt"] is not None
+    metrics["source"] = source
+    metrics["health"] = health_state(metrics)
+    metrics["updated_at"] = datetime.now(KST).isoformat(timespec="seconds")
+    if metrics["supported"]:
+        metrics["status"] = "ready"
+        metrics["message"] = "Minecraft 성능 지표를 정상적으로 수집하고 있습니다."
+    elif list_output:
+        metrics["status"] = "unsupported"
+        metrics["message"] = "현재 서버 유형 또는 버전은 TPS/MSPT 조회 명령을 제공하지 않습니다."
+    else:
+        metrics["status"] = "starting"
+        metrics["message"] = "서버 시작이 완료되면 Minecraft 성능 지표가 표시됩니다."
+    return metrics
+
+
+def cached_game_metrics(container, config: dict) -> dict[str, Any]:
+    container_id = str(getattr(container, "id", "") or "")
+    now = time.monotonic()
+    with GAME_METRICS_LOCK:
+        cached = GAME_METRICS_CACHE.get("payload")
+        if (
+            cached
+            and str(GAME_METRICS_CACHE.get("container_id") or "") == container_id
+            and now < float(GAME_METRICS_CACHE.get("expires_at") or 0)
+        ):
+            return dict(cached)
+        payload = collect_game_metrics(container, config)
+        GAME_METRICS_CACHE.update({
+            "container_id": container_id,
+            "expires_at": time.monotonic() + GAME_METRICS_CACHE_SECONDS,
+            "payload": payload,
+        })
+        return dict(payload)
 
 
 def runtime_image_for_config(config: dict | None = None) -> str:
@@ -1992,11 +2123,35 @@ def server_resources(request: Request):
         container.reload()
         if container.status != "running":
             return resources
-        resources.update(container_resource_usage(container))
         resources["running"] = True
+        resources.update(container_resource_usage(container))
     except Exception as error:
         resources["error"] = clean_log(str(error))
     return resources
+
+
+@app.get("/api/server/game-metrics")
+def server_game_metrics(request: Request):
+    require_auth(request)
+    config = read_config()
+    container = get_container()
+    if not container:
+        return empty_game_metrics(config)
+    try:
+        container.reload()
+        if container.status != "running":
+            return empty_game_metrics(config)
+        return cached_game_metrics(container, config)
+    except Exception as error:
+        payload = empty_game_metrics(
+            config,
+            status="error",
+            message=f"Minecraft 성능 지표 조회 실패: {clean_log(str(error))}",
+        )
+        payload["uptime_seconds"] = container_uptime_seconds(
+            str(((getattr(container, "attrs", {}) or {}).get("State") or {}).get("StartedAt") or "")
+        )
+        return payload
 
 
 def read_server_log() -> str:

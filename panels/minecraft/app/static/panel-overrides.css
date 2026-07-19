@@ -184,6 +184,127 @@
   color: #c6e6af;
 }
 
+.minecraft-game-metrics {
+  display: grid;
+  gap: 13px;
+  padding: 14px 16px 16px;
+  border: 1px solid rgba(198, 224, 190, .24);
+  border-radius: 5px;
+  background: linear-gradient(90deg, rgba(15, 42, 27, .94), rgba(11, 29, 20, .92));
+}
+
+.minecraft-game-metrics > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.minecraft-game-metrics > header > div {
+  min-width: 0;
+}
+
+.minecraft-game-metrics > header small {
+  display: block;
+  margin-bottom: 3px;
+  color: #9dc86b;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.minecraft-game-metrics > header h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.minecraft-game-metrics > header p {
+  margin: 4px 0 0;
+  color: #aebcaf;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.minecraft-metrics-state {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  border-radius: 3px;
+  background: #5f3431;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.minecraft-game-metrics[data-status="healthy"] .minecraft-metrics-state {
+  background: #3f7546;
+}
+
+.minecraft-game-metrics[data-status="warning"] .minecraft-metrics-state {
+  background: #80652f;
+}
+
+.minecraft-game-metrics[data-status="critical"] .minecraft-metrics-state {
+  background: #963f39;
+}
+
+.minecraft-game-metrics[data-status="unsupported"] .minecraft-metrics-state,
+.minecraft-game-metrics[data-status="starting"] .minecraft-metrics-state {
+  background: #53695a;
+}
+
+.minecraft-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.minecraft-metric {
+  min-width: 0;
+  min-height: 82px;
+  display: grid;
+  align-content: center;
+  gap: 5px;
+  padding: 10px 12px;
+  border: 1px solid rgba(177, 210, 180, .2);
+  border-left: 3px solid #60815d;
+  border-radius: 4px;
+  background: rgba(8, 25, 16, .72);
+}
+
+.minecraft-metric > span {
+  color: #aebcaf;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.minecraft-metric > strong {
+  overflow: hidden;
+  color: #f4f8f3;
+  font: 800 21px/1.1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.minecraft-metric > small {
+  overflow: hidden;
+  color: #91a395;
+  font-size: 9px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.minecraft-metric[data-health="healthy"] {
+  border-left-color: #66a75f;
+}
+
+.minecraft-metric[data-health="warning"] {
+  border-left-color: #d1a247;
+}
+
+.minecraft-metric[data-health="critical"] {
+  border-left-color: #c8554b;
+}
+
 .resource-detail-grid {
   flex: 1;
   min-height: 0;
@@ -322,6 +443,10 @@
     grid-template-rows: none;
   }
 
+  .minecraft-metrics-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .resource-detail-card {
     min-height: 200px;
   }
@@ -342,6 +467,14 @@
   }
 
   .resource-detail-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .minecraft-game-metrics > header {
+    flex-direction: column;
+  }
+
+  .minecraft-metrics-grid {
     grid-template-columns: 1fr;
   }
 }

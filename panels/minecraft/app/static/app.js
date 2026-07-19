@@ -28,6 +28,8 @@ let restartSchedulePollTimer = null;
 let restartScheduleDirty = false;
 let resourceDetailPollTimer = null;
 let resourceDetailRequestActive = false;
+let gameMetricsPollTimer = null;
+let gameMetricsRequestActive = false;
 let serverIconObjectUrl = '';
 let serverIconBusy = false;
 
@@ -1227,6 +1229,67 @@ function formatResourceBytes(value, perSecond = false) {
   return `${amount.toFixed(digits)} ${units[unit]}${perSecond ? '/s' : ''}`;
 }
 
+function formatGameUptime(value) {
+  const seconds = Math.max(0, Math.floor(Number(value) || 0));
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days) return `${days}일 ${hours}시간`;
+  if (hours) return `${hours}시간 ${minutes}분`;
+  if (minutes) return `${minutes}분`;
+  return `${seconds}초`;
+}
+
+function metricNumber(value, suffix, digits = 1) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '--';
+  const number = Number(value);
+  return `${number.toFixed(Number.isInteger(number) ? 0 : digits)}${suffix}`;
+}
+
+function renderMinecraftMetrics(data, running) {
+  const metrics = data && typeof data === 'object' ? data : {};
+  const root = $('minecraftGameMetrics');
+  const state = metrics.status || (running ? 'starting' : 'stopped');
+  const health = metrics.health || 'unknown';
+  const displayState = !running ? 'stopped' : state === 'ready' ? health : state;
+  const stateLabels = {
+    stopped: '서버 중지됨', starting: '준비 중', unsupported: '지원 안 함',
+    healthy: '정상', warning: '주의', critical: '지연', error: '조회 실패', unknown: '확인 중'
+  };
+  root.dataset.status = displayState;
+  $('minecraftMetricsState').textContent = stateLabels[displayState] || '확인 중';
+  $('minecraftMetricsMessage').textContent = metrics.message || 'Minecraft 성능 지표를 확인하고 있습니다.';
+
+  const supported = Boolean(metrics.supported);
+  $('minecraftTps').textContent = supported ? metricNumber(metrics.tps, '', 2) : state === 'unsupported' ? '미지원' : '--';
+  $('minecraftMspt').textContent = supported ? metricNumber(metrics.mspt, ' ms', 2) : state === 'unsupported' ? '미지원' : '--';
+  $('minecraftTpsMetric').dataset.health = supported ? health : 'unknown';
+  $('minecraftMsptMetric').dataset.health = supported ? health : 'unknown';
+
+  const tpsHistory = [
+    ['1분', metrics.tps_1m], ['5분', metrics.tps_5m], ['15분', metrics.tps_15m]
+  ].filter(([, value]) => value !== null && value !== undefined);
+  $('minecraftTpsDetail').textContent = tpsHistory.length
+    ? tpsHistory.map(([label, value]) => `${label} ${metricNumber(value, '', 2)}`).join(' · ')
+    : '목표 20 TPS';
+
+  const tickDetails = [
+    ['최소', metrics.mspt_min], ['95%', metrics.mspt_p95], ['최대', metrics.mspt_max]
+  ].filter(([, value]) => value !== null && value !== undefined);
+  $('minecraftMsptDetail').textContent = tickDetails.length
+    ? tickDetails.map(([label, value]) => `${label} ${metricNumber(value, 'ms', 1)}`).join(' · ')
+    : '50ms 미만 권장';
+
+  const maximum = Math.max(0, Number(metrics.players_max) || 0);
+  $('minecraftPlayers').textContent = metrics.players_available
+    ? `${Math.max(0, Number(metrics.players_online) || 0)} / ${maximum}`
+    : `-- / ${maximum}`;
+  $('minecraftUptime').textContent = running ? formatGameUptime(metrics.uptime_seconds) : '--';
+  $('minecraftMetricsSource').textContent = metrics.source
+    ? `${metrics.source} · 게임 컨테이너`
+    : '게임 컨테이너 가동 시간';
+}
+
 function setResourceMeter(valueId, barId, percent) {
   const value = Math.max(0, Math.min(100, Number(percent) || 0));
   $(valueId).textContent = `${value.toFixed(value % 1 ? 1 : 0)}%`;
@@ -1340,7 +1403,7 @@ function renderResourceDetails(data) {
   $('resourceDetailUpdatedAt').textContent = data.updated_at
     ? `최근 갱신 ${new Date(data.updated_at).toLocaleString('ko-KR', {timeZone: 'Asia/Seoul', hour12: false})}`
     : '최근 갱신 시각을 확인할 수 없습니다.';
-  $('resourceDetailStatus').textContent = data.error ? '일부 조회 실패 : 1초' : '새로고침 : 1초';
+  $('resourceDetailStatus').textContent = data.error ? '일부 조회 실패 · OS 1초 · 게임 5초' : 'OS 1초 · 게임 5초';
 }
 
 async function refreshResources() {
@@ -1359,22 +1422,42 @@ async function refreshResourceDetails() {
     renderResourceSummary(data);
     renderResourceDetails(data);
   } catch (_) {
-    $('resourceDetailStatus').textContent = '조회 실패 : 1초';
+    $('resourceDetailStatus').textContent = '조회 실패 · OS 1초 · 게임 5초';
   } finally {
     resourceDetailRequestActive = false;
+  }
+}
+
+async function refreshMinecraftMetrics() {
+  if (gameMetricsRequestActive || !resourceMonitorDialog.open) return;
+  gameMetricsRequestActive = true;
+  try {
+    const data = await api('/api/server/game-metrics');
+    renderMinecraftMetrics(data, data.status !== 'stopped');
+  } catch (error) {
+    renderMinecraftMetrics({status: 'error', message: `Minecraft 성능 지표 조회 실패: ${error.message}`}, true);
+  } finally {
+    gameMetricsRequestActive = false;
   }
 }
 
 function openResourceMonitor() {
   showDialog(resourceMonitorDialog);
   refreshResourceDetails();
+  refreshMinecraftMetrics();
   if (!resourceDetailPollTimer) resourceDetailPollTimer = setInterval(refreshResourceDetails, 1000);
+  if (!gameMetricsPollTimer) gameMetricsPollTimer = setInterval(refreshMinecraftMetrics, 5000);
 }
 
 function stopResourceDetailPolling() {
-  if (!resourceDetailPollTimer) return;
-  clearInterval(resourceDetailPollTimer);
-  resourceDetailPollTimer = null;
+  if (resourceDetailPollTimer) {
+    clearInterval(resourceDetailPollTimer);
+    resourceDetailPollTimer = null;
+  }
+  if (gameMetricsPollTimer) {
+    clearInterval(gameMetricsPollTimer);
+    gameMetricsPollTimer = null;
+  }
 }
 
 $('resourceMonitorEntry').onclick = openResourceMonitor;

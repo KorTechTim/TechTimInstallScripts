@@ -283,8 +283,20 @@
     <div class="resource-monitor-modal-body">
       <div class="resource-monitor-modal-summary">
         <div><span class="resource-live-state" id="resourceDetailServerState">상태 확인 중</span><strong>Ubuntu OS 및 Minecraft 게임 컨테이너</strong><small id="resourceDetailUpdatedAt">리소스 정보를 불러오고 있습니다.</small></div>
-        <span class="resource-refresh-badge" id="resourceDetailStatus">새로고침 : 1초</span>
+        <span class="resource-refresh-badge" id="resourceDetailStatus">OS 1초 · 게임 5초</span>
       </div>
+      <section class="minecraft-game-metrics" id="minecraftGameMetrics" data-status="stopped">
+        <header>
+          <div><small>MINECRAFT PERFORMANCE</small><h3>Minecraft 게임 성능</h3><p id="minecraftMetricsMessage">게임 서버가 시작되면 성능 지표가 표시됩니다.</p></div>
+          <span class="minecraft-metrics-state" id="minecraftMetricsState">서버 중지됨</span>
+        </header>
+        <div class="minecraft-metrics-grid">
+          <article class="minecraft-metric" id="minecraftTpsMetric"><span>TPS</span><strong id="minecraftTps">--</strong><small id="minecraftTpsDetail">목표 20 TPS</small></article>
+          <article class="minecraft-metric" id="minecraftMsptMetric"><span>MSPT</span><strong id="minecraftMspt">--</strong><small id="minecraftMsptDetail">50ms 미만 권장</small></article>
+          <article class="minecraft-metric"><span>PLAYERS</span><strong id="minecraftPlayers">0 / 0</strong><small>현재 접속자 / 최대 인원</small></article>
+          <article class="minecraft-metric"><span>UPTIME</span><strong id="minecraftUptime">--</strong><small id="minecraftMetricsSource">게임 컨테이너 가동 시간</small></article>
+        </div>
+      </section>
       <div class="resource-detail-grid">
         <section class="resource-detail-card cpu-detail-card">
           <header><div><span>CPU</span><small>OS 논리 CPU별 전체 사용률</small></div><strong id="resourceDetailCpu">0%</strong></header>
