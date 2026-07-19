@@ -62,6 +62,7 @@ HOST_RUNTIME_HELPER_FILE = HOST_DATA_DIR / "palworld-runtime-helper.sh"
 SAVED_ROOT_DIR = DATA_DIR / "server" / "Pal" / "Saved"
 SAVED_WORLDS_DIR = SAVED_ROOT_DIR / "SaveGames"
 SAVE_EXPORT_DIR = DATA_DIR / "uploads"
+INI_EDITOR_MAX_BYTES = max(1024, int(os.getenv("INI_EDITOR_MAX_BYTES", str(1024 * 1024))))
 
 AUTH_FILE = DATA_DIR / "auth.json"
 SESSIONS_FILE = DATA_DIR / "sessions.json"
@@ -128,6 +129,11 @@ class FileExplorerDeleteRequest(BaseModel):
 
 class FileExplorerFolderDownloadRequest(BaseModel):
     paths: list[str]
+
+
+class FileExplorerTextSaveRequest(BaseModel):
+    path: str
+    content: str
 
 
 def ensure_data_dirs() -> None:
@@ -1838,9 +1844,50 @@ def file_entry(path: Path) -> dict:
         "name": path.name,
         "path": saved_relative_path(path),
         "type": "dir" if path.is_dir() else "file",
+        "editable": path.is_file() and path.suffix.lower() == ".ini",
         "size": stat.st_size if path.is_file() else 0,
         "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
     }
+
+
+def resolve_ini_editor_file(relative_path: str) -> Path:
+    target = resolve_saved_path(relative_path)
+
+    if target.suffix.lower() != ".ini":
+        raise HTTPException(status_code=400, detail="INI 확장자 파일만 텍스트 편집기로 열 수 있습니다.")
+
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="편집할 INI 파일을 찾을 수 없습니다.")
+
+    return target
+
+
+def read_ini_editor_content(target: Path) -> str:
+    try:
+        if target.stat().st_size > INI_EDITOR_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="편집 가능한 INI 파일 크기는 최대 1MB입니다.")
+
+        return target.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="UTF-8 형식의 INI 파일만 편집할 수 있습니다.")
+    except OSError as error:
+        raise HTTPException(status_code=500, detail=f"INI 파일을 읽을 수 없습니다: {error}")
+
+
+def write_ini_editor_content(target: Path, content: str) -> None:
+    encoded = content.encode("utf-8")
+
+    if len(encoded) > INI_EDITOR_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="편집 가능한 INI 파일 크기는 최대 1MB입니다.")
+
+    temporary = target.with_name(f".{target.name}.{secrets.token_hex(6)}.tmp")
+
+    try:
+        temporary.write_bytes(encoded)
+        os.replace(temporary, target)
+    except OSError as error:
+        temporary.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"INI 파일을 저장할 수 없습니다: {error}")
 
 
 def create_folder_download_archive(targets: list[Path]) -> tuple[Path, str]:
@@ -2351,7 +2398,7 @@ def dashboard(request: Request):
     .advanced-button svg { width: 44px; height: 44px; display: block; padding: 8px; border-radius: 12px; background: linear-gradient(145deg, #0f766e, #155e75); color: #ffffff; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.24); }
     .advanced-button-label { color: #0f3f3d; font-size: 12px; font-weight: bold; line-height: 1; }
     .management-shortcuts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.24); }
-    .management-shortcut { min-width: 0; min-height: 68px; display: grid; grid-template-columns: 42px minmax(0, 1fr); align-items: center; gap: 11px; padding: 9px 12px; border: 1px solid rgba(205, 239, 230, 0.30); border-radius: 7px; background: rgba(7, 53, 52, 0.74); color: #ffffff; text-align: left; box-shadow: inset 0 1px 0 rgba(255,255,255,0.06); }
+    .management-shortcut { min-width: 0; min-height: 68px; display: grid; grid-template-columns: 42px minmax(0, 1fr); align-items: center; column-gap: 11px; row-gap: 4px; padding: 9px 12px; border: 1px solid rgba(205, 239, 230, 0.30); border-radius: 7px; background: rgba(7, 53, 52, 0.74); color: #ffffff; text-align: left; box-shadow: inset 0 1px 0 rgba(255,255,255,0.06); }
     .management-shortcut:hover { border-color: #99f6e4; background: rgba(15, 118, 110, 0.86); transform: translateY(-1px); }
     .management-shortcut-icon { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 7px; background: #9a594d; color: #ffffff; }
     .discord-shortcut .management-shortcut-icon { background: #5865f2; }
@@ -2359,8 +2406,11 @@ def dashboard(request: Request):
     .management-shortcut-copy { min-width: 0; display: grid; gap: 4px; }
     .management-shortcut-copy b { font-size: 13px; }
     .management-shortcut-copy small { overflow: hidden; color: rgba(255,255,255,0.72); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-    .restart-hub-summary { grid-column: 2; margin-top: -8px; color: #a7f3d0; font-size: 9px; font-weight: bold; white-space: nowrap; }
-    .resource-monitor { position: relative; z-index: 1; min-width: 0; display: flex; flex-direction: column; gap: 13px; padding: 24px 26px; border-left: 1px solid rgba(255,255,255,0.46); background: transparent; cursor: pointer; }
+    #restartSettingsBtn .management-shortcut-icon { grid-row: 1 / span 2; align-self: center; }
+    #restartSettingsBtn .management-shortcut-copy { align-self: end; }
+    .restart-hub-summary { grid-column: 2; align-self: start; margin: 0; color: #a7f3d0; font-size: 9px; font-weight: bold; line-height: 1.2; white-space: nowrap; }
+    .resource-monitor { position: relative; z-index: 1; min-width: 0; display: flex; flex-direction: column; gap: 13px; padding: 24px 26px; background: transparent; cursor: pointer; }
+    .resource-monitor::before { content: ""; position: absolute; top: 8px; bottom: 8px; left: 0; width: 1px; background: rgba(255,255,255,0.46); pointer-events: none; }
     .resource-monitor:hover { background: transparent; }
     .resource-monitor:focus-visible { outline: 2px solid #99f6e4; outline-offset: -4px; }
     .resource-monitor-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
@@ -2477,9 +2527,19 @@ def dashboard(request: Request):
     .explorer-folder-checkbox { flex: 0 0 auto; width: 17px; height: 17px; margin: 0; cursor: pointer; accent-color: #0f766e; }
     .explorer-name { display: inline-flex; align-items: center; gap: 8px; min-width: 0; border: 0; padding: 0; background: transparent; color: #0f766e; font-weight: bold; cursor: pointer; }
     .explorer-name.file { color: #1f2937; cursor: default; }
+    .explorer-name.file.editable { color: #0f766e; cursor: pointer; text-decoration: underline; text-decoration-color: rgba(15,118,110,0.35); text-underline-offset: 3px; }
+    .explorer-name.file.editable:hover { color: #115e59; text-decoration-color: currentColor; }
     .explorer-row-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
     .explorer-row-actions button { padding: 8px 10px; border-radius: 8px; font-size: 12px; }
     .explorer-note { margin-top: 12px; color: #6b7280; font-size: 12px; line-height: 1.45; }
+    .ini-editor-modal { width: min(920px, 100%); }
+    .ini-editor-body { display: grid; min-height: 0; gap: 10px; padding: 18px 20px; background: #f8fafc; }
+    .ini-editor-path { overflow: hidden; color: #475569; font: 12px/1.4 Consolas, Monaco, monospace; text-overflow: ellipsis; white-space: nowrap; }
+    .ini-editor-textarea { width: 100%; min-height: min(54vh, 560px); box-sizing: border-box; overflow: auto; resize: vertical; border: 1px solid #94a3b8; border-radius: 8px; padding: 14px; background: #0f172a; color: #e2e8f0; font: 13px/1.55 Consolas, Monaco, monospace; tab-size: 2; white-space: pre; }
+    .ini-editor-textarea:focus { outline: 2px solid #14b8a6; outline-offset: 1px; border-color: #0f766e; }
+    .ini-editor-status { min-height: 18px; color: #64748b; font-size: 12px; }
+    .ini-editor-status.success { color: #047857; font-weight: bold; }
+    .ini-editor-status.error { color: #b91c1c; font-weight: bold; }
     .advanced-group { margin-bottom: 22px; }
     .advanced-group h3 { margin: 0 0 12px; font-size: 17px; color: #111827; }
     .advanced-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
@@ -2545,7 +2605,8 @@ def dashboard(request: Request):
       .advanced-card { grid-template-columns: 1fr; }
       .settings-main-pane { padding: 22px 20px; }
       .settings-primary-row { grid-template-columns: 86px minmax(0, 1fr); gap: 16px; }
-      .resource-monitor { min-height: 226px; border-top: 1px solid rgba(255,255,255,0.28); border-left: 0; padding: 22px 20px; }
+      .resource-monitor { min-height: 226px; padding: 22px 20px; }
+      .resource-monitor::before { top: 0; right: 8px; bottom: auto; left: 8px; width: auto; height: 1px; background: rgba(255,255,255,0.28); }
       .resource-detail-grid { grid-template-columns: 1fr; }
       .advanced-grid { grid-template-columns: 1fr; }
       button { width: 100%; }
@@ -2988,6 +3049,24 @@ def dashboard(request: Request):
             <tbody id="fileExplorerBody"></tbody>
           </table>
           <div id="fileExplorerNote" class="explorer-note"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="iniEditorModal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal ini-editor-modal" role="dialog" aria-modal="true" aria-labelledby="iniEditorTitle">
+        <div class="modal-head">
+          <h2 id="iniEditorTitle">INI 텍스트 편집기</h2>
+          <button class="modal-close" type="button" onclick="closeIniEditor()" title="닫기" aria-label="닫기">×</button>
+        </div>
+        <div class="ini-editor-body">
+          <div id="iniEditorPath" class="ini-editor-path">파일을 불러오는 중입니다.</div>
+          <textarea id="iniEditorContent" class="ini-editor-textarea" wrap="off" spellcheck="false" aria-label="INI 파일 내용" onkeydown="handleIniEditorKeydown(event)"></textarea>
+          <div id="iniEditorStatus" class="ini-editor-status" role="status" aria-live="polite"></div>
+        </div>
+        <div class="modal-foot">
+          <button class="secondary" type="button" onclick="closeIniEditor()">닫기</button>
+          <button id="iniEditorSaveBtn" type="button" onclick="saveIniEditor()">설정 저장</button>
         </div>
       </div>
     </div>
@@ -3549,6 +3628,7 @@ def dashboard(request: Request):
     let fileExplorerPath = "";
     let fileExplorerLocked = false;
     let selectedExplorerFolders = new Set();
+    let iniEditorPath = "";
 
     function formatFileSize(size) {
       const bytes = Number(size || 0);
@@ -3583,6 +3663,21 @@ def dashboard(request: Request):
 
       if (locked) {
         closeFileExplorer();
+      }
+
+      const editorModal = document.getElementById("iniEditorModal");
+      const editorContent = document.getElementById("iniEditorContent");
+      const editorSaveButton = document.getElementById("iniEditorSaveBtn");
+
+      if (editorModal && editorModal.classList.contains("show") && iniEditorPath) {
+        editorContent.disabled = locked;
+        editorSaveButton.disabled = locked;
+
+        if (locked) {
+          setIniEditorStatus("서버가 실행되어 편집이 잠겼습니다. 서버를 중지하면 다시 저장할 수 있습니다.", "error");
+        } else {
+          setIniEditorStatus("서버가 중지되어 INI 파일을 다시 편집하고 저장할 수 있습니다.");
+        }
       }
     }
 
@@ -3648,7 +3743,8 @@ def dashboard(request: Request):
         const nameWrap = document.createElement("div");
         nameWrap.className = "explorer-name-wrap";
         const nameButton = document.createElement("button");
-        nameButton.className = "explorer-name" + (entry.type === "file" ? " file" : "");
+        const editableIni = entry.type === "file" && Boolean(entry.editable);
+        nameButton.className = "explorer-name" + (entry.type === "file" ? " file" : "") + (editableIni ? " editable" : "");
         nameButton.type = "button";
         nameButton.innerText = (entry.type === "dir" ? "📁 " : "📄 ") + entry.name;
 
@@ -3669,6 +3765,9 @@ def dashboard(request: Request):
           };
           nameWrap.appendChild(checkbox);
           nameButton.onclick = function () { loadFileExplorer(entry.path); };
+        } else if (editableIni) {
+          nameButton.title = "클릭하여 INI 파일 편집";
+          nameButton.onclick = function () { openIniEditor(entry.path); };
         } else {
           nameButton.disabled = true;
         }
@@ -3726,6 +3825,120 @@ def dashboard(request: Request):
 
     function downloadExplorerFile(path) {
       window.location.href = "/api/files/download?path=" + encodeURIComponent(path);
+    }
+
+    let iniEditorOriginalContent = "";
+
+    function setIniEditorStatus(message, type) {
+      const status = document.getElementById("iniEditorStatus");
+      status.className = "ini-editor-status" + (type ? " " + type : "");
+      status.innerText = message || "";
+    }
+
+    async function openIniEditor(path) {
+      if (fileExplorerLocked) {
+        alert("서버 실행 중에는 INI 파일을 편집할 수 없습니다.");
+        return;
+      }
+
+      const modal = document.getElementById("iniEditorModal");
+      const content = document.getElementById("iniEditorContent");
+      const saveButton = document.getElementById("iniEditorSaveBtn");
+      iniEditorPath = path;
+      iniEditorOriginalContent = "";
+      document.getElementById("iniEditorPath").innerText = "/Saved/" + path;
+      content.value = "";
+      content.disabled = true;
+      saveButton.disabled = true;
+      setIniEditorStatus("INI 파일을 불러오는 중입니다.");
+
+      if (modal.parentElement !== document.body) {
+        document.body.appendChild(modal);
+      }
+      modal.classList.add("show");
+      modal.setAttribute("aria-hidden", "false");
+
+      try {
+        const response = await fetch("/api/files/text?path=" + encodeURIComponent(path));
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.detail || "INI 파일 조회 실패");
+        }
+
+        iniEditorPath = data.path || path;
+        iniEditorOriginalContent = data.content || "";
+        document.getElementById("iniEditorPath").innerText = "/Saved/" + iniEditorPath;
+        content.value = iniEditorOriginalContent;
+        content.disabled = false;
+        saveButton.disabled = false;
+        setIniEditorStatus("UTF-8 INI 파일만 편집할 수 있습니다. Ctrl+S 또는 Command+S로 저장할 수 있습니다.");
+        content.focus();
+      } catch (err) {
+        setIniEditorStatus(err && err.message ? err.message : String(err), "error");
+      }
+    }
+
+    function closeIniEditor(force) {
+      const content = document.getElementById("iniEditorContent");
+
+      if (!force && !content.disabled && content.value !== iniEditorOriginalContent) {
+        if (!window.confirm("저장하지 않은 변경사항을 닫을까요?")) {
+          return;
+        }
+      }
+
+      const modal = document.getElementById("iniEditorModal");
+      modal.classList.remove("show");
+      modal.setAttribute("aria-hidden", "true");
+      iniEditorPath = "";
+      iniEditorOriginalContent = "";
+    }
+
+    async function saveIniEditor() {
+      const content = document.getElementById("iniEditorContent");
+      const saveButton = document.getElementById("iniEditorSaveBtn");
+
+      if (fileExplorerLocked || !iniEditorPath || content.disabled) {
+        setIniEditorStatus("서버를 중지한 뒤 INI 파일을 저장해주세요.", "error");
+        return;
+      }
+
+      saveButton.disabled = true;
+      setIniEditorStatus("INI 파일을 저장하는 중입니다.");
+
+      try {
+        const response = await fetch("/api/files/text", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: iniEditorPath, content: content.value })
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.detail || "INI 파일 저장 실패");
+        }
+
+        iniEditorOriginalContent = content.value;
+        setIniEditorStatus(data.message || "INI 파일이 저장되었습니다.", "success");
+        await loadFileExplorer(fileExplorerPath);
+
+        if (data.config_updated) {
+          fillConfig(data.config || {});
+          await loadWorlds();
+        }
+      } catch (err) {
+        setIniEditorStatus(err && err.message ? err.message : String(err), "error");
+      } finally {
+        saveButton.disabled = fileExplorerLocked;
+      }
+    }
+
+    function handleIniEditorKeydown(event) {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        saveIniEditor();
+      }
     }
 
     function updateFolderDownloadButton() {
@@ -5624,6 +5837,45 @@ def download_file(request: Request, path: str):
         path=str(target),
         filename=target.name,
     )
+
+
+@app.get("/api/files/text")
+def read_text_file(request: Request, path: str):
+    require_auth(request)
+    require_server_stopped_for_file_access()
+    target = resolve_ini_editor_file(path)
+
+    return {
+        "status": "ok",
+        "path": saved_relative_path(target),
+        "filename": target.name,
+        "content": read_ini_editor_content(target),
+        "max_bytes": INI_EDITOR_MAX_BYTES,
+    }
+
+
+@app.put("/api/files/text")
+def save_text_file(payload: FileExplorerTextSaveRequest, request: Request):
+    require_auth(request)
+    require_server_stopped_for_file_write()
+    target = resolve_ini_editor_file(payload.path)
+    write_ini_editor_content(target, payload.content)
+
+    config_updated = target == get_config_path().resolve()
+    response = {
+        "status": "ok",
+        "message": "INI 파일이 저장되었습니다.",
+        "path": saved_relative_path(target),
+        "filename": target.name,
+        "size": target.stat().st_size,
+        "config_updated": config_updated,
+    }
+
+    if config_updated:
+        response["message"] = "PalWorldSettings.ini 저장 및 화면 반영이 완료되었습니다."
+        response["config"] = read_config()
+
+    return response
 
 
 @app.post("/api/files/download-folders")
