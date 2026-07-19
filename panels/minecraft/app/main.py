@@ -9,14 +9,17 @@ import queue
 import re
 import secrets
 import shutil
+import tarfile
 import threading
 import time
+import zipfile
 
 import docker
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 
 app = FastAPI(title="TechTim Minecraft Server Panel")
@@ -33,8 +36,12 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 HOST_DATA_DIR = Path(os.getenv("HOST_DATA_DIR", "/opt/techtim/minecraft/data"))
 SERVER_DIR = DATA_DIR / "server"
 HOST_SERVER_DIR = HOST_DATA_DIR / "server"
+SERVER_ICON_FILE = SERVER_DIR / "server-icon.png"
+BACKUP_DIR = Path(os.getenv("BACKUP_DIR", "/backups"))
+DOWNLOAD_EXPORT_DIR = DATA_DIR / ".downloads"
 SERVER_CONTAINER = os.getenv("MINECRAFT_SERVER_CONTAINER", "minecraft-server")
 RUNTIME_IMAGE = os.getenv("MINECRAFT_RUNTIME_IMAGE", "itzg/minecraft-server:latest")
+RUNTIME_CONFIG_LABEL = "kr.techtim.minecraft.runtime-config"
 PANEL_CONTAINER_NAME = os.getenv("PANEL_CONTAINER_NAME", "minecraft-panel")
 PANEL_PROXY_CONTAINER = os.getenv("PANEL_PROXY_CONTAINER", "minecraft-panel-proxy")
 PANEL_IMAGE = os.getenv("PANEL_IMAGE", "ghcr.io/kortechtim/minecraft-panel:latest")
@@ -48,10 +55,15 @@ INSTALL_LOG_FILE = DATA_DIR / "install.log"
 INSTALL_STATUS_FILE = DATA_DIR / "install-status.txt"
 INSTALL_MARKER_FILE = DATA_DIR / "install-request.txt"
 CONTROL_LOG_FILE = DATA_DIR / "server-control.log"
+BACKUP_CONFIG_FILE = DATA_DIR / "backup-config.json"
+BACKUP_STATUS_FILE = DATA_DIR / "backup-status.json"
 PANEL_UPDATE_STATUS_FILE = DATA_DIR / "panel-update-status.json"
 SESSION_COOKIE = "techtim_session"
 INSTALL_LOCK = threading.Lock()
 INSTALL_ACTIVE = False
+SERVER_STDIN_LOCK = threading.Lock()
+BACKUP_LOCK = threading.Lock()
+BACKUP_ACTIVE = False
 PANEL_UPDATE_LOCK = threading.Lock()
 PANEL_UPDATE_ACTIVE = False
 PANEL_UPDATE_CHECK_LOCK = threading.Lock()
@@ -73,6 +85,7 @@ PUBLIC_IP_CACHE: dict[str, Any] = {"expires_at": 0.0, "value": ""}
 KST = timezone(timedelta(hours=9), name="KST")
 ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 ANSI_FRAGMENT_RE = re.compile(r"(?:\[(?:0|1|2|3|4|5|7|9|10[0-7]|[34][0-7])m)+")
+RCON_TRANSPORT_NOISE_RE = re.compile(r"\bThread RCON Client\b.*\b(?:started|shutting down)\s*$", re.IGNORECASE)
 
 SERVER_TYPES = {
     "VANILLA", "PAPER", "PURPUR", "SPIGOT", "FORGE", "NEOFORGE",
@@ -117,13 +130,19 @@ class StartServerRequest(BaseModel):
     eula_accepted: bool = False
 
 
+class BackupConfigRequest(BaseModel):
+    enabled: bool = False
+    interval_hours: int = Field(default=6, ge=1, le=168)
+    retention_count: int = Field(default=7, ge=1, le=50)
+
+
 class ConfigRequest(BaseModel):
     Type: str = "PAPER"
     Version: str = "LATEST"
     JavaVersion: str = "AUTO"
     Memory: str = "4G"
     ServerName: str = "TechTim Minecraft Server"
-    Motd: str = "TechTim Minecraft Server"
+    Motd: str = Field(default="TechTim Minecraft Server", max_length=300)
     Level: str = "world"
     Seed: str = ""
     Difficulty: str = "normal"
@@ -138,9 +157,7 @@ class ConfigRequest(BaseModel):
     SpawnProtection: int = 16
     Whitelist: str = ""
     Ops: str = ""
-    ModrinthProjects: str = ""
     ModpackUrl: str = ""
-    ExtraEnv: dict[str, Any] = Field(default_factory=dict)
 
 
 class CreateDirRequest(BaseModel):
@@ -152,14 +169,21 @@ class DeleteRequest(BaseModel):
     path: str
 
 
+class FileDownloadRequest(BaseModel):
+    paths: list[str] = Field(min_length=1, max_length=100)
+
+
 def ensure_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     SERVER_DIR.mkdir(parents=True, exist_ok=True)
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    DOWNLOAD_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def clean_log(value: str) -> str:
     text = ANSI_RE.sub("", str(value or ""))
-    return ANSI_FRAGMENT_RE.sub("", text).replace("\r\n", "\n").replace("\r", "\n")
+    text = ANSI_FRAGMENT_RE.sub("", text).replace("\r\n", "\n").replace("\r", "\n")
+    return "\n".join(line for line in text.split("\n") if not RCON_TRANSPORT_NOISE_RE.search(line))
 
 
 def append_log(path: Path, message: str) -> None:
@@ -278,7 +302,8 @@ def normalize_config(raw: dict) -> dict:
     for key in tuple(merged):
         if key == "ModpackSource" or key.startswith("CurseForge"):
             merged.pop(key, None)
-    merged["ExtraEnv"] = merged.get("ExtraEnv") if isinstance(merged.get("ExtraEnv"), dict) else {}
+    merged.pop("ModrinthProjects", None)
+    merged.pop("ExtraEnv", None)
     return merged
 
 
@@ -345,6 +370,312 @@ def server_running() -> bool:
         return container.status == "running"
     except Exception:
         return False
+
+
+def server_container_accepts_native_console(container) -> bool:
+    config = (getattr(container, "attrs", {}) or {}).get("Config") or {}
+    return bool(config.get("OpenStdin") and config.get("Tty"))
+
+
+def send_native_console_command(container, command: str) -> None:
+    if not server_container_accepts_native_console(container):
+        raise RuntimeError("게임 컨테이너의 Native 콘솔 입력이 활성화되어 있지 않습니다.")
+
+    payload = f"{command}\n".encode("utf-8")
+    with SERVER_STDIN_LOCK:
+        attached = container.attach_socket(params={
+            "stdin": True,
+            "stdout": False,
+            "stderr": False,
+            "stream": True,
+        })
+        try:
+            transport = getattr(attached, "_sock", attached)
+            if hasattr(transport, "sendall"):
+                transport.sendall(payload)
+            elif hasattr(attached, "write"):
+                written = attached.write(payload)
+                if written is not None and written != len(payload):
+                    raise RuntimeError("Native 콘솔 명령을 모두 전송하지 못했습니다.")
+                if hasattr(attached, "flush"):
+                    attached.flush()
+            else:
+                raise RuntimeError("Docker Native 콘솔 소켓에 쓸 수 없습니다.")
+        finally:
+            attached.close()
+
+
+def default_backup_config() -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "interval_hours": 6,
+        "retention_count": 7,
+        "last_backup_at": "",
+        "next_run_at": "",
+    }
+
+
+def read_backup_config() -> dict[str, Any]:
+    raw = read_json(BACKUP_CONFIG_FILE, {})
+    defaults = default_backup_config()
+    try:
+        interval_hours = min(168, max(1, int(raw.get("interval_hours", defaults["interval_hours"]))))
+        retention_count = min(50, max(1, int(raw.get("retention_count", defaults["retention_count"]))))
+    except (TypeError, ValueError):
+        interval_hours = defaults["interval_hours"]
+        retention_count = defaults["retention_count"]
+    return {
+        "enabled": bool(raw.get("enabled", defaults["enabled"])),
+        "interval_hours": interval_hours,
+        "retention_count": retention_count,
+        "last_backup_at": str(raw.get("last_backup_at") or ""),
+        "next_run_at": str(raw.get("next_run_at") or ""),
+    }
+
+
+def write_backup_config(config: dict[str, Any]) -> None:
+    ensure_dirs()
+    write_json(BACKUP_CONFIG_FILE, config)
+
+
+def write_backup_status(status: str, message: str, **details: Any) -> dict[str, Any]:
+    payload = {
+        "status": status,
+        "message": message,
+        "updated_at": datetime.now(KST).isoformat(timespec="seconds"),
+        **details,
+    }
+    write_json(BACKUP_STATUS_FILE, payload)
+    return payload
+
+
+def read_backup_status() -> dict[str, Any]:
+    return read_json(BACKUP_STATUS_FILE, {
+        "status": "idle",
+        "message": "백업 기능을 사용할 수 있습니다.",
+        "updated_at": "",
+    })
+
+
+def parse_backup_time(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or ""))
+        return parsed.replace(tzinfo=KST) if parsed.tzinfo is None else parsed.astimezone(KST)
+    except ValueError:
+        return None
+
+
+def backup_archive_path(filename: str) -> Path:
+    if not re.fullmatch(r"minecraft-\d{8}-\d{6}-KST(?:-\d+)?\.tgz", str(filename or "")):
+        raise HTTPException(status_code=400, detail="올바르지 않은 백업 파일명입니다.")
+    path = (BACKUP_DIR / filename).resolve()
+    if path.parent != BACKUP_DIR.resolve() or not path.is_file():
+        raise HTTPException(status_code=404, detail="백업 파일을 찾을 수 없습니다.")
+    return path
+
+
+def list_backup_archives() -> list[dict[str, Any]]:
+    ensure_dirs()
+    entries = []
+    for path in BACKUP_DIR.glob("minecraft-*-KST*.tgz"):
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        entries.append({
+            "name": path.name,
+            "size": stat.st_size,
+            "created_at": datetime.fromtimestamp(stat.st_mtime, KST).isoformat(timespec="seconds"),
+        })
+    return sorted(entries, key=lambda entry: entry["created_at"], reverse=True)
+
+
+def run_rcon_command(container, command: str) -> str:
+    result = container.exec_run(["rcon-cli", command], stdout=True, stderr=True)
+    output = result.output.decode("utf-8", errors="replace") if isinstance(result.output, bytes) else str(result.output or "")
+    output = clean_log(output).strip()
+    if result.exit_code != 0:
+        raise RuntimeError(output or f"RCON 명령 실패: {command}")
+    return output
+
+
+def minecraft_backup_filter(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
+    parts = Path(info.name).parts
+    excluded_directories = {"logs", "cache", ".cache", ".tmp", "packs"}
+    if any(part in excluded_directories for part in parts) or info.name.endswith(".tmp"):
+        return None
+    return info
+
+
+def create_backup_archive(destination: Path) -> None:
+    temporary = destination.with_suffix(destination.suffix + ".partial")
+    temporary.unlink(missing_ok=True)
+    try:
+        with tarfile.open(temporary, "w:gz", compresslevel=6) as archive:
+            archive.add(SERVER_DIR, arcname=".", recursive=True, filter=minecraft_backup_filter)
+        temporary.replace(destination)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def prune_backup_archives(retention_count: int) -> None:
+    archives = [BACKUP_DIR / entry["name"] for entry in list_backup_archives()]
+    for path in archives[retention_count:]:
+        path.unlink(missing_ok=True)
+
+
+def claim_backup_operation() -> bool:
+    global BACKUP_ACTIVE
+    with BACKUP_LOCK:
+        if BACKUP_ACTIVE:
+            return False
+        BACKUP_ACTIVE = True
+        return True
+
+
+def backup_operation_active() -> bool:
+    with BACKUP_LOCK:
+        return BACKUP_ACTIVE
+
+
+def release_backup_operation() -> None:
+    global BACKUP_ACTIVE
+    with BACKUP_LOCK:
+        BACKUP_ACTIVE = False
+
+
+def backup_job(reason: str) -> None:
+    container = get_container()
+    writes_paused = False
+    filename_base = datetime.now(KST).strftime("minecraft-%Y%m%d-%H%M%S-KST")
+    filename = f"{filename_base}.tgz"
+    duplicate = 1
+    while (BACKUP_DIR / filename).exists():
+        filename = f"{filename_base}-{duplicate}.tgz"
+        duplicate += 1
+    destination = BACKUP_DIR / filename
+    write_backup_status("running", "Minecraft 서버 데이터를 백업하고 있습니다.", filename=filename, reason=reason)
+    try:
+        ensure_dirs()
+        if not any(SERVER_DIR.iterdir()):
+            raise RuntimeError("백업할 Minecraft 서버 데이터가 없습니다.")
+        if container:
+            container.reload()
+            if container.status == "running":
+                run_rcon_command(container, "save-on")
+                run_rcon_command(container, "save-off")
+                writes_paused = True
+                run_rcon_command(container, "save-all flush")
+                time.sleep(1)
+        if hasattr(os, "sync"):
+            os.sync()
+        create_backup_archive(destination)
+        config = read_backup_config()
+        prune_backup_archives(config["retention_count"])
+        completed_at = datetime.now(KST)
+        config["last_backup_at"] = completed_at.isoformat(timespec="seconds")
+        config["next_run_at"] = (
+            completed_at + timedelta(hours=config["interval_hours"])
+        ).isoformat(timespec="seconds") if config["enabled"] else ""
+        write_backup_config(config)
+        write_backup_status(
+            "completed",
+            "백업이 완료되었습니다.",
+            filename=filename,
+            size=destination.stat().st_size,
+            reason=reason,
+        )
+        append_log(CONTROL_LOG_FILE, f"Minecraft 서버 백업 완료: {filename}")
+    except Exception as error:
+        destination.unlink(missing_ok=True)
+        config = read_backup_config()
+        if config["enabled"]:
+            config["next_run_at"] = (
+                datetime.now(KST) + timedelta(hours=config["interval_hours"])
+            ).isoformat(timespec="seconds")
+            write_backup_config(config)
+        write_backup_status("failed", f"백업에 실패했습니다: {clean_log(str(error))}", filename=filename, reason=reason)
+    finally:
+        if writes_paused and container:
+            try:
+                container.reload()
+                if container.status == "running":
+                    run_rcon_command(container, "save-on")
+            except Exception as error:
+                append_log(CONTROL_LOG_FILE, f"백업 후 자동 저장 재개 확인 필요: {clean_log(str(error))}")
+        release_backup_operation()
+
+
+def start_backup(reason: str) -> bool:
+    if not claim_backup_operation():
+        return False
+    threading.Thread(target=backup_job, args=(reason,), daemon=True).start()
+    return True
+
+
+def restore_backup_job(source: Path) -> None:
+    staging = DATA_DIR / f".minecraft-restore-{secrets.token_hex(6)}"
+    previous = DATA_DIR / f".minecraft-before-restore-{secrets.token_hex(6)}"
+    write_backup_status("restoring", "선택한 백업을 복원하고 있습니다.", filename=source.name)
+    try:
+        staging.mkdir(parents=True, exist_ok=False)
+        with tarfile.open(source, "r:gz") as archive:
+            archive.extractall(staging, filter="data")
+        if not any(staging.iterdir()):
+            raise RuntimeError("백업 파일에 복원할 서버 데이터가 없습니다.")
+
+        if SERVER_DIR.exists():
+            SERVER_DIR.rename(previous)
+        try:
+            staging.rename(SERVER_DIR)
+        except Exception:
+            if previous.exists() and not SERVER_DIR.exists():
+                previous.rename(SERVER_DIR)
+            raise
+        write_backup_status("restored", "백업 복원이 완료되었습니다. 서버를 시작해주세요.", filename=source.name)
+        append_log(CONTROL_LOG_FILE, f"Minecraft 서버 백업 복원 완료: {source.name}")
+        if previous.exists():
+            try:
+                shutil.rmtree(previous)
+            except OSError as error:
+                append_log(
+                    CONTROL_LOG_FILE,
+                    f"백업 복원 전 데이터 정리 확인 필요: {clean_log(str(error))}",
+                )
+    except Exception as error:
+        write_backup_status("failed", f"백업 복원에 실패했습니다: {clean_log(str(error))}", filename=source.name)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+        if previous.exists() and not SERVER_DIR.exists():
+            previous.rename(SERVER_DIR)
+        release_backup_operation()
+
+
+def start_restore(source: Path) -> bool:
+    if not claim_backup_operation():
+        return False
+    threading.Thread(target=restore_backup_job, args=(source,), daemon=True).start()
+    return True
+
+
+def backup_scheduler() -> None:
+    while True:
+        time.sleep(30)
+        try:
+            config = read_backup_config()
+            if not config["enabled"]:
+                continue
+            next_run = parse_backup_time(config["next_run_at"])
+            if next_run is None:
+                next_run = datetime.now(KST) + timedelta(hours=config["interval_hours"])
+                config["next_run_at"] = next_run.isoformat(timespec="seconds")
+                write_backup_config(config)
+                continue
+            if datetime.now(KST) >= next_run:
+                start_backup("automatic")
+        except Exception as error:
+            write_backup_status("failed", f"자동 백업 스케줄 확인 실패: {clean_log(str(error))}")
 
 
 def public_server_ip() -> str:
@@ -803,7 +1134,6 @@ def runtime_environment(config: dict) -> dict[str, str]:
     }
     optional = {
         "SEED": config["Seed"], "WHITELIST": config["Whitelist"], "OPS": config["Ops"],
-        "MODRINTH_PROJECTS": config["ModrinthProjects"],
     }
     if config["Type"] in MODPACK_URL_TYPES:
         optional["GENERIC_PACK"] = config["ModpackUrl"]
@@ -812,13 +1142,38 @@ def runtime_environment(config: dict) -> dict[str, str]:
     for key, value in optional.items():
         if str(value or "").strip():
             env[key] = str(value).strip()
-    if config["ModrinthProjects"].strip():
-        env["MODRINTH_DOWNLOAD_DEPENDENCIES"] = "required"
-    for key, value in config.get("ExtraEnv", {}).items():
-        normalized_key = str(key).strip().upper()
-        if normalized_key != "EULA" and re.fullmatch(r"[A-Z][A-Z0-9_]*", normalized_key) and value is not None:
-            env[normalized_key] = str(value)
     return env
+
+
+def runtime_config_signature(runtime_image: str, environment: dict[str, str]) -> str:
+    payload = {
+        "image": runtime_image,
+        "environment": sorted((str(key), str(value)) for key, value in environment.items()),
+    }
+    return hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def container_matches_runtime(container, runtime_image: str, environment: dict[str, str]) -> bool:
+    expected_signature = runtime_config_signature(runtime_image, environment)
+    attrs = getattr(container, "attrs", {}) or {}
+    config = attrs.get("Config") or {}
+    if not server_container_accepts_native_console(container):
+        return False
+    labels = config.get("Labels") or {}
+    stored_signature = str(labels.get(RUNTIME_CONFIG_LABEL) or "")
+    if stored_signature:
+        return secrets.compare_digest(stored_signature, expected_signature)
+
+    # Containers created by an older panel do not have the signature label.
+    # Compare their image and panel-managed environment once so they can still be reused.
+    if str(config.get("Image") or "") != runtime_image:
+        return False
+    current_environment = {}
+    for entry in config.get("Env") or []:
+        key, separator, value = str(entry).partition("=")
+        if separator:
+            current_environment[key] = value
+    return all(current_environment.get(key) == str(value) for key, value in environment.items())
 
 
 def validate_start(config: dict) -> None:
@@ -858,6 +1213,75 @@ def relative_path(path: Path) -> str:
     return "" if path.resolve() == root else path.resolve().relative_to(root).as_posix()
 
 
+def resolve_download_target(relative: str) -> Path:
+    cleaned = str(relative or "").strip().replace("\\", "/").lstrip("/")
+    if not cleaned or any(part in {"", ".", ".."} for part in cleaned.split("/")):
+        raise HTTPException(status_code=400, detail="다운로드할 항목 경로가 올바르지 않습니다.")
+    candidate = SERVER_DIR.joinpath(*cleaned.split("/"))
+    if candidate.is_symlink():
+        raise HTTPException(status_code=400, detail="심볼릭 링크는 다운로드할 수 없습니다.")
+    target = resolve_path(cleaned)
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"다운로드할 항목을 찾을 수 없습니다: {relative}")
+    return target
+
+
+def create_selected_download_archive(targets: list[Path]) -> tuple[Path, str]:
+    ensure_dirs()
+    root = SERVER_DIR.resolve()
+    timestamp = datetime.now(KST).strftime("%Y%m%d-%H%M%S")
+    download_name = f"minecraft-files-{timestamp}.zip"
+    archive_path = DOWNLOAD_EXPORT_DIR / f".{download_name}.{secrets.token_hex(6)}.tmp"
+    selected: list[Path] = []
+    selected_directories: list[Path] = []
+    for target in sorted(targets, key=lambda item: len(item.relative_to(root).parts)):
+        if any(parent == target or parent in target.parents for parent in selected_directories):
+            continue
+        selected.append(target)
+        if target.is_dir():
+            selected_directories.append(target)
+
+    written: set[str] = set()
+    try:
+        with zipfile.ZipFile(
+            archive_path,
+            mode="w",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=6,
+            allowZip64=True,
+        ) as archive:
+            for target in selected:
+                if target.is_file():
+                    archive_name = target.relative_to(root).as_posix()
+                    if archive_name not in written:
+                        archive.write(target, arcname=archive_name)
+                        written.add(archive_name)
+                    continue
+
+                for current_dir, dirnames, filenames in os.walk(target, followlinks=False):
+                    current = Path(current_dir)
+                    dirnames[:] = [name for name in dirnames if not (current / name).is_symlink()]
+                    directory_name = current.relative_to(root).as_posix().rstrip("/") + "/"
+                    if directory_name not in written:
+                        archive.writestr(directory_name, b"")
+                        written.add(directory_name)
+                    for filename in filenames:
+                        source = current / filename
+                        if source.is_symlink() or not source.is_file():
+                            continue
+                        resolved = source.resolve()
+                        if not str(resolved).startswith(str(root) + os.sep):
+                            continue
+                        archive_name = source.relative_to(root).as_posix()
+                        if archive_name not in written:
+                            archive.write(source, arcname=archive_name)
+                            written.add(archive_name)
+        return archive_path, download_name
+    except Exception:
+        archive_path.unlink(missing_ok=True)
+        raise
+
+
 def login_html(change: bool = False) -> str:
     title = "새 관리자 비밀번호" if change else "관리자 로그인"
     fields = ('<input id="password2" type="password" placeholder="새 비밀번호 확인" required>' if change else '')
@@ -876,6 +1300,12 @@ def login_html(change: bool = False) -> str:
 
 
 initialize_auth()
+
+
+@app.on_event("startup")
+def start_backup_scheduler() -> None:
+    ensure_dirs()
+    threading.Thread(target=backup_scheduler, daemon=True, name="minecraft-backup-scheduler").start()
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -1051,9 +1481,65 @@ def save_config(payload: ConfigRequest, request: Request):
     return {"status": "ok", "message": "설정이 저장되었습니다."}
 
 
+@app.get("/api/server-icon")
+def get_server_icon(request: Request):
+    require_auth(request)
+    if not SERVER_ICON_FILE.is_file():
+        raise HTTPException(status_code=404, detail="등록된 서버 아이콘이 없습니다.")
+    return FileResponse(
+        SERVER_ICON_FILE,
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/api/server-icon")
+async def upload_server_icon(request: Request, icon: UploadFile = File(...)):
+    require_auth(request)
+    if server_running():
+        raise HTTPException(status_code=409, detail="서버 실행 중에는 서버 아이콘을 변경할 수 없습니다.")
+    if backup_operation_active():
+        raise HTTPException(status_code=409, detail="백업 또는 복원 작업 중에는 서버 아이콘을 변경할 수 없습니다.")
+    payload = await icon.read(2 * 1024 * 1024 + 1)
+    if len(payload) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="PNG 파일은 2MB 이하여야 합니다.")
+    if (
+        len(payload) < 24
+        or payload[:8] != b"\x89PNG\r\n\x1a\n"
+        or payload[12:16] != b"IHDR"
+    ):
+        raise HTTPException(status_code=400, detail="올바른 PNG 파일이 아닙니다.")
+    width = int.from_bytes(payload[16:20], "big")
+    height = int.from_bytes(payload[20:24], "big")
+    if (width, height) != (64, 64):
+        raise HTTPException(status_code=400, detail="서버 아이콘은 64×64 PNG여야 합니다.")
+    ensure_dirs()
+    temporary = SERVER_ICON_FILE.with_suffix(".png.uploading")
+    try:
+        temporary.write_bytes(payload)
+        temporary.replace(SERVER_ICON_FILE)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
+    return {"status": "saved", "message": "서버 아이콘이 저장되었습니다."}
+
+
+@app.delete("/api/server-icon")
+def delete_server_icon(request: Request):
+    require_auth(request)
+    if server_running():
+        raise HTTPException(status_code=409, detail="서버 실행 중에는 서버 아이콘을 삭제할 수 없습니다.")
+    if backup_operation_active():
+        raise HTTPException(status_code=409, detail="백업 또는 복원 작업 중에는 서버 아이콘을 삭제할 수 없습니다.")
+    SERVER_ICON_FILE.unlink(missing_ok=True)
+    return {"status": "deleted", "message": "서버 아이콘이 삭제되었습니다."}
+
+
 @app.post("/api/server/start")
 def start_server(payload: StartServerRequest, request: Request):
     require_auth(request)
+    if backup_operation_active():
+        raise HTTPException(status_code=409, detail="백업 또는 복원 작업 중에는 서버를 시작할 수 없습니다.")
     if not payload.eula_accepted:
         raise HTTPException(status_code=400, detail="Minecraft EULA에 동의해야 서버를 시작할 수 있습니다.")
     if server_running():
@@ -1063,30 +1549,58 @@ def start_server(payload: StartServerRequest, request: Request):
         raise HTTPException(status_code=400, detail="먼저 서버 설치를 진행해주세요.")
     validate_start(config)
     runtime_image = runtime_image_for_config(config)
+    environment = runtime_environment(config)
     client = docker_client()
     old = get_container()
     if old:
+        old.reload()
+        if old.status in STOPPABLE_SERVER_STATUSES:
+            raise HTTPException(status_code=409, detail="이미 서버가 동작 중입니다.")
+    CONTROL_LOG_FILE.write_text("", encoding="utf-8")
+    if old:
+        if old.status in {"created", "exited"} and container_matches_runtime(old, runtime_image, environment):
+            old.update(restart_policy={"Name": "unless-stopped"})
+            append_log(CONTROL_LOG_FILE, "기존 서버 컨테이너와 영구 저장 데이터를 확인했습니다.")
+            append_log(CONTROL_LOG_FILE, "재설치 없이 기존 Minecraft 서버를 시작합니다.")
+            old.start()
+            append_log(CONTROL_LOG_FILE, f"Minecraft 서버 시작 요청 완료: {old.short_id}")
+            return {
+                "status": "started",
+                "message": "기존 Minecraft 서버를 시작했습니다.",
+                "reused": True,
+            }
+        append_log(CONTROL_LOG_FILE, "변경된 서버 설정을 적용하기 위해 게임 컨테이너만 다시 구성합니다.")
+        append_log(CONTROL_LOG_FILE, "월드와 서버 파일이 저장된 /data 데이터는 그대로 유지됩니다.")
         old.remove(force=True)
     ensure_dirs()
-    CONTROL_LOG_FILE.write_text("", encoding="utf-8")
+    signature = runtime_config_signature(runtime_image, environment)
     container = client.containers.run(
         runtime_image,
         name=SERVER_CONTAINER,
         detach=True,
-        environment=runtime_environment(config),
+        environment=environment,
         volumes={str(HOST_SERVER_DIR): {"bind": "/data", "mode": "rw"}},
         ports={"25565/tcp": SERVER_PORT},
         restart_policy={"Name": "unless-stopped"},
+        labels={RUNTIME_CONFIG_LABEL: signature},
         stdin_open=True,
         tty=True,
     )
+    if not old:
+        append_log(CONTROL_LOG_FILE, "영구 저장 폴더를 연결하고 Minecraft 서버를 처음 시작합니다.")
     append_log(CONTROL_LOG_FILE, f"Minecraft 서버 시작 요청 완료: {container.short_id}")
-    return {"status": "started"}
+    return {
+        "status": "started",
+        "message": "Minecraft 서버를 시작했습니다.",
+        "reused": False,
+    }
 
 
 @app.post("/api/server/stop")
 def stop_server(request: Request):
     require_auth(request)
+    if backup_operation_active():
+        raise HTTPException(status_code=409, detail="백업 또는 복원 작업이 끝난 후 서버를 중지해주세요.")
     container = get_container()
     if not container:
         raise HTTPException(status_code=404, detail="생성된 서버 컨테이너가 없습니다.")
@@ -1112,6 +1626,8 @@ def stop_server(request: Request):
 @app.post("/api/server/restart")
 def restart_server(request: Request):
     require_auth(request)
+    if backup_operation_active():
+        raise HTTPException(status_code=409, detail="백업 또는 복원 작업이 끝난 후 서버를 재시작해주세요.")
     container = get_container()
     if not container:
         raise HTTPException(status_code=404, detail="먼저 서버를 시작해주세요.")
@@ -1124,6 +1640,8 @@ def restart_server(request: Request):
 @app.post("/api/server/delete")
 def delete_server(request: Request):
     require_auth(request)
+    if backup_operation_active():
+        raise HTTPException(status_code=409, detail="백업 또는 복원 작업 중에는 서버 데이터를 삭제할 수 없습니다.")
     if server_running():
         raise HTTPException(status_code=409, detail="서버 기동 중에는 서버를 삭제할 수 없습니다.")
     global INSTALL_ACTIVE
@@ -1250,18 +1768,15 @@ def send_server_command(payload: ServerCommandRequest, request: Request):
         raise HTTPException(status_code=400, detail="한 줄짜리 Minecraft 명령어를 입력해주세요.")
 
     try:
-        result = container.exec_run(["rcon-cli", command], stdout=True, stderr=True)
-    except docker.errors.DockerException as error:
-        raise HTTPException(status_code=500, detail=f"명령어 전송에 실패했습니다: {error}") from error
+        send_native_console_command(container, command)
+    except (docker.errors.DockerException, OSError, RuntimeError) as error:
+        raise HTTPException(status_code=500, detail=f"Native 콘솔 명령 전송에 실패했습니다: {error}") from error
 
-    output = result.output.decode("utf-8", errors="replace") if isinstance(result.output, bytes) else str(result.output or "")
-    output = clean_log(output).strip()
-    append_log(CONTROL_LOG_FILE, f"[콘솔 명령] > {command}")
-    if output:
-        append_log(CONTROL_LOG_FILE, f"[명령 결과] {output[:4000]}")
-    if result.exit_code != 0:
-        raise HTTPException(status_code=500, detail=output or "Minecraft 서버가 명령어를 처리하지 못했습니다.")
-    return {"status": "sent", "message": "명령어를 전송했습니다.", "output": output}
+    return {
+        "status": "sent",
+        "message": "Native 서버 콘솔로 명령어를 전송했습니다.",
+        "output": "",
+    }
 
 
 @app.get("/api/players")
@@ -1336,21 +1851,14 @@ def player_action(payload: PlayerActionRequest, request: Request):
         raise HTTPException(status_code=400, detail="지원하지 않는 플레이어 관리 작업입니다.")
 
     try:
-        result = container.exec_run(["rcon-cli", command], stdout=True, stderr=True)
-    except docker.errors.DockerException as error:
-        raise HTTPException(status_code=500, detail=f"플레이어 관리 명령에 실패했습니다: {error}") from error
-    output = result.output.decode("utf-8", errors="replace") if isinstance(result.output, bytes) else str(result.output or "")
-    output = clean_log(output).strip()
-    if result.exit_code != 0:
-        raise HTTPException(status_code=500, detail=output or "Minecraft 서버가 플레이어 관리 명령을 처리하지 못했습니다.")
+        send_native_console_command(container, command)
+    except (docker.errors.DockerException, OSError, RuntimeError) as error:
+        raise HTTPException(status_code=500, detail=f"Native 플레이어 관리 명령 전송에 실패했습니다: {error}") from error
 
     if action in {"op", "deop"}:
         update_config_player_list("Ops", player, action == "op")
     elif action in {"whitelist_add", "whitelist_remove"}:
         update_config_player_list("Whitelist", player, action == "whitelist_add")
-    append_log(CONTROL_LOG_FILE, f"[플레이어 관리] {command}")
-    if output:
-        append_log(CONTROL_LOG_FILE, f"[명령 결과] {output[:4000]}")
     messages = {
         "op": f"{player} 플레이어에게 OP 권한을 부여했습니다.",
         "deop": f"{player} 플레이어의 OP 권한을 해제했습니다.",
@@ -1360,7 +1868,101 @@ def player_action(payload: PlayerActionRequest, request: Request):
         "ban": f"{player} 플레이어의 접속을 차단했습니다.",
         "pardon": f"{player} 플레이어의 접속 차단을 해제했습니다.",
     }
-    return {"status": "completed", "message": messages[action], "output": output}
+    return {"status": "sent", "message": messages[action], "output": ""}
+
+
+@app.get("/api/backups")
+def backups_status(request: Request):
+    require_auth(request)
+    ensure_dirs()
+    with BACKUP_LOCK:
+        active = BACKUP_ACTIVE
+    container = get_container()
+    server_active = False
+    if container:
+        try:
+            container.reload()
+            server_active = container.status in STOPPABLE_SERVER_STATUSES
+        except docker.errors.DockerException:
+            server_active = False
+    return {
+        "config": read_backup_config(),
+        "status": read_backup_status(),
+        "active": active,
+        "server_active": server_active,
+        "backups": list_backup_archives(),
+    }
+
+
+@app.post("/api/backups/config")
+def save_backup_config(payload: BackupConfigRequest, request: Request):
+    require_auth(request)
+    if not claim_backup_operation():
+        raise HTTPException(status_code=409, detail="백업 또는 복원 작업이 진행 중입니다.")
+    try:
+        now = datetime.now(KST)
+        existing = read_backup_config()
+        config = {
+            "enabled": payload.enabled,
+            "interval_hours": payload.interval_hours,
+            "retention_count": payload.retention_count,
+            "last_backup_at": existing["last_backup_at"],
+            "next_run_at": (
+                now + timedelta(hours=payload.interval_hours)
+            ).isoformat(timespec="seconds") if payload.enabled else "",
+        }
+        write_backup_config(config)
+        prune_backup_archives(payload.retention_count)
+        return {
+            "status": "ok",
+            "message": "자동 백업 설정이 저장되었습니다.",
+            "config": config,
+        }
+    finally:
+        release_backup_operation()
+
+
+@app.post("/api/backups/run")
+def run_backup_now(request: Request):
+    require_auth(request)
+    ensure_dirs()
+    if not any(SERVER_DIR.iterdir()):
+        raise HTTPException(status_code=409, detail="백업할 Minecraft 서버 데이터가 없습니다.")
+    if not start_backup("manual"):
+        raise HTTPException(status_code=409, detail="백업 또는 복원 작업이 이미 진행 중입니다.")
+    return {"status": "started", "message": "즉시 백업을 시작했습니다."}
+
+
+@app.post("/api/backups/{filename}/restore")
+def restore_backup(filename: str, request: Request):
+    require_auth(request)
+    container = get_container()
+    if container:
+        container.reload()
+        if container.status in STOPPABLE_SERVER_STATUSES:
+            raise HTTPException(status_code=409, detail="백업 복원은 Minecraft 서버를 중지한 후 진행해주세요.")
+    source = backup_archive_path(filename)
+    if not start_restore(source):
+        raise HTTPException(status_code=409, detail="백업 또는 복원 작업이 이미 진행 중입니다.")
+    return {"status": "started", "message": "백업 복원을 시작했습니다."}
+
+
+@app.get("/api/backups/{filename}/download")
+def download_backup(filename: str, request: Request):
+    require_auth(request)
+    path = backup_archive_path(filename)
+    return FileResponse(path, filename=path.name, media_type="application/gzip")
+
+
+@app.post("/api/backups/{filename}/delete")
+def delete_backup(filename: str, request: Request):
+    require_auth(request)
+    with BACKUP_LOCK:
+        if BACKUP_ACTIVE:
+            raise HTTPException(status_code=409, detail="백업 또는 복원 작업 중에는 백업 파일을 삭제할 수 없습니다.")
+    path = backup_archive_path(filename)
+    path.unlink()
+    return {"status": "deleted", "message": "백업 파일을 삭제했습니다."}
 
 
 @app.get("/api/files")
@@ -1381,17 +1983,50 @@ def list_files(request: Request, path: str = ""):
 
 
 def require_file_write() -> None:
+    if backup_operation_active():
+        raise HTTPException(status_code=409, detail="백업 또는 복원 작업 중에는 서버 파일을 변경할 수 없습니다.")
     if server_running():
         raise HTTPException(status_code=409, detail="서버 실행 중에는 파일을 변경할 수 없습니다.")
+
+
+def require_file_download() -> None:
+    if backup_operation_active():
+        raise HTTPException(status_code=409, detail="백업 또는 복원 작업 중에는 서버 파일을 다운로드할 수 없습니다.")
+    if server_running():
+        raise HTTPException(status_code=409, detail="서버 실행 중에는 서버 파일을 다운로드할 수 없습니다.")
 
 
 @app.get("/api/files/download")
 def download_file(request: Request, path: str):
     require_auth(request)
-    target = resolve_path(path)
+    require_file_download()
+    target = resolve_download_target(path)
     if not target.is_file():
         raise HTTPException(status_code=404, detail="파일을 찾을 수 없습니다.")
     return FileResponse(str(target), filename=target.name)
+
+
+@app.post("/api/files/download-selected")
+def download_selected_files(payload: FileDownloadRequest, request: Request):
+    require_auth(request)
+    require_file_download()
+    targets: list[Path] = []
+    seen: set[Path] = set()
+    for relative in payload.paths:
+        target = resolve_download_target(relative)
+        if target not in seen:
+            targets.append(target)
+            seen.add(target)
+    try:
+        archive_path, download_name = create_selected_download_archive(targets)
+    except (OSError, ValueError, zipfile.BadZipFile) as error:
+        raise HTTPException(status_code=500, detail=f"선택 항목 ZIP 생성 중 오류가 발생했습니다: {error}") from error
+    return FileResponse(
+        path=str(archive_path),
+        filename=download_name,
+        media_type="application/zip",
+        background=BackgroundTask(archive_path.unlink, missing_ok=True),
+    )
 
 
 @app.post("/api/files/upload")
