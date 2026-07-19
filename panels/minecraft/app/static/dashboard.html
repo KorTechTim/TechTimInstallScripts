@@ -13,9 +13,12 @@
       <div class="header-actions">
         <a class="icon-button" href="https://www.youtube.com/@kortechtim" target="_blank" rel="noopener noreferrer" title="유튜브채널 접속" aria-label="유튜브채널 접속"><img src="https://cdn.simpleicons.org/youtube/FF0000" alt=""></a>
         <a class="icon-button" href="https://discord.gg/Awy6Uh38KW" target="_blank" rel="noopener noreferrer" title="디스코드 접속" aria-label="디스코드 접속"><img src="https://cdn.simpleicons.org/discord/5865F2" alt=""></a>
-        <button class="icon-button panel-update" id="panelUpdateButton" type="button" title="TechTim 구동기 업데이트" aria-label="TechTim 구동기 업데이트">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 9 19.37a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.63 15a1.7 1.7 0 0 0-1.55-1H3v-4h.08A1.7 1.7 0 0 0 4.63 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.63h.01A1.7 1.7 0 0 0 10 3.08V3h4v.08a1.7 1.7 0 0 0 1.03 1.55 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.37 9v.01A1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z"></path></svg>
-        </button>
+        <span class="panel-update-anchor">
+          <button class="icon-button panel-update" id="panelUpdateButton" type="button" title="TechTim 구동기 업데이트" aria-label="TechTim 구동기 업데이트" aria-describedby="panelUpdateNotice">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 9 19.37a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.63 15a1.7 1.7 0 0 0-1.55-1H3v-4h.08A1.7 1.7 0 0 0 4.63 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.63h.01A1.7 1.7 0 0 0 10 3.08V3h4v.08a1.7 1.7 0 0 0 1.03 1.55 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.37 9v.01A1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z"></path></svg>
+          </button>
+          <span class="panel-update-notice" id="panelUpdateNotice" role="status" aria-live="polite">업데이트가 있습니다. 웹패널을 업그레이드하세요</span>
+        </span>
         <button class="icon-button logout" id="logout" type="button" title="로그아웃" aria-label="로그아웃">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 21V5a2 2 0 0 1 2-2h7"></path><path d="M8 21h6"></path><circle cx="11" cy="7.2" r="1.5"></circle><path d="M10.5 9.4 9 12.2l2.4 1.4"></path><path d="M11.7 11.4 14 12.8"></path><path d="M9.1 12.6 7.7 15.5"></path><path d="M11.5 13.8 10.8 17"></path><path d="M16 12h5"></path><path d="m19 9 3 3-3 3"></path></svg>
         </button>
@@ -72,10 +75,10 @@
       <div class="form-scroll">
         <section class="form-section"><h3>배포 유형</h3><div class="grid cols-4 deployment-grid">
           <label>서버 유형<select id="Type"><option value="VANILLA">Vanilla</option><option value="PAPER">Paper (플러그인 권장)</option><option value="PURPUR">Purpur</option><option value="SPIGOT">Spigot</option><option value="FORGE">Forge</option><option value="NEOFORGE">NeoForge</option><option value="FABRIC">Fabric</option><option value="QUILT">Quilt</option></select></label>
-          <label>Minecraft 버전
+          <label><span class="field-label">Minecraft 버전<span class="help-tooltip"><button type="button" class="help-tooltip-trigger" aria-label="Minecraft 버전 입력 도움말" aria-describedby="minecraftVersionTooltip">?</button><span class="help-tooltip-content" id="minecraftVersionTooltip" role="tooltip"><strong>Minecraft 버전 선택</strong><span>목록에서 버전을 선택하거나</span><span>원하는 버전을 직접 입력할 수 있습니다.</span></span></span></span>
             <span class="version-picker">
-              <input id="Version" value="LATEST" placeholder="직접 입력" autocomplete="off">
-              <select id="minecraftVersionSelect" aria-label="Minecraft 버전 목록">
+              <input id="Version" value="LATEST" placeholder="직접 입력" autocomplete="off" aria-describedby="minecraftVersionTooltip">
+              <select id="minecraftVersionSelect" aria-label="Minecraft 버전 목록" aria-describedby="minecraftVersionTooltip">
                 <option value="">목록 선택</option>
                 <option value="LATEST">LATEST</option>
                 <option value="26.2">26.2</option><option value="26.1.2">26.1.2</option><option value="26.1.1">26.1.1</option><option value="26.1">26.1</option>
@@ -88,7 +91,6 @@
                 <option value="1.16.5">1.16.5</option><option value="1.16.4">1.16.4</option><option value="1.16.3">1.16.3</option><option value="1.16.2">1.16.2</option><option value="1.16.1">1.16.1</option><option value="1.16">1.16</option>
               </select>
             </span>
-            <small class="field-help">목록에서 선택하거나 원하는 버전을 직접 입력할 수 있습니다.</small>
           </label>
           <label><span class="field-label">Java 버전<span class="help-tooltip"><button type="button" class="help-tooltip-trigger" aria-label="Minecraft 버전별 권장 Java 버전" aria-describedby="javaVersionTooltip">?</button><span class="help-tooltip-content" id="javaVersionTooltip" role="tooltip"><strong>Minecraft 권장 Java</strong><span>26.1 이상: Java 25</span><span>1.20.5 ~ 1.21.x: Java 21</span><span>1.18 ~ 1.20.4: Java 17</span><span>1.17.x: Java 16</span><span>1.16.5 이하 Forge: Java 8</span><span>Paper 1.16.5: Java 16 권장</span><small>모드팩이 별도 버전을 요구하면 해당 요구사항을 우선하세요.</small></span></span></span>
             <select id="JavaVersion" aria-describedby="javaVersionTooltip">
@@ -100,7 +102,6 @@
               <option value="21">Java 21</option>
               <option value="25">Java 25</option>
             </select>
-            <small class="field-help">Minecraft 또는 모드팩의 요구 버전에 맞춰 선택하세요.</small>
           </label>
           <label>메모리
             <span class="input-with-unit"><input id="Memory" value="4" inputmode="numeric" pattern="[1-9][0-9]*" placeholder="4" autocomplete="off" required><span class="input-unit" aria-hidden="true">G</span></span>

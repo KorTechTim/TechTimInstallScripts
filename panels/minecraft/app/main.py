@@ -54,6 +54,8 @@ INSTALL_LOCK = threading.Lock()
 INSTALL_ACTIVE = False
 PANEL_UPDATE_LOCK = threading.Lock()
 PANEL_UPDATE_ACTIVE = False
+PANEL_UPDATE_CHECK_LOCK = threading.Lock()
+PANEL_UPDATE_CHECK_CACHE: dict[str, Any] = {"expires_at": 0.0, "payload": None}
 VERSION_CACHE_LOCK = threading.Lock()
 VERSION_CACHE: dict[str, Any] = {"expires_at": 0.0, "payload": None}
 RESOURCE_LOCK = threading.Lock()
@@ -470,6 +472,52 @@ def read_panel_update_status() -> dict:
     return status
 
 
+def panel_update_check_payload() -> dict:
+    now = time.monotonic()
+    with PANEL_UPDATE_CHECK_LOCK:
+        cached = PANEL_UPDATE_CHECK_CACHE.get("payload")
+        if cached and now < float(PANEL_UPDATE_CHECK_CACHE.get("expires_at") or 0):
+            return dict(cached)
+
+        try:
+            client = docker_client()
+            current_container = client.containers.get(PANEL_CONTAINER_NAME)
+            current_container.reload()
+            current_image = current_container.image
+            current_image.reload()
+            current_image_id = current_image.id
+            current_digests = {
+                str(value).rsplit("@", 1)[-1].lower()
+                for value in (current_image.attrs.get("RepoDigests") or [])
+                if "@" in str(value)
+            }
+            latest_image_id = str(client.images.get_registry_data(PANEL_IMAGE).id or "").lower()
+
+            if not latest_image_id or not current_digests:
+                raise RuntimeError("실행 중인 패널 이미지의 digest를 확인할 수 없습니다.")
+
+            payload = {
+                "status": "ok",
+                "update_available": latest_image_id not in current_digests,
+                "current_version": PANEL_VERSION,
+                "current_image_id": current_image_id,
+                "latest_image_id": latest_image_id,
+            }
+            cache_seconds = 300
+        except Exception as exc:
+            payload = {
+                "status": "unavailable",
+                "update_available": False,
+                "current_version": PANEL_VERSION,
+                "message": clean_log(str(exc)),
+            }
+            cache_seconds = 60
+
+        PANEL_UPDATE_CHECK_CACHE["payload"] = payload
+        PANEL_UPDATE_CHECK_CACHE["expires_at"] = now + cache_seconds
+        return dict(payload)
+
+
 def is_panel_updater_running() -> bool:
     try:
         updater = docker_client().containers.get(f"{PANEL_CONTAINER_NAME}-updater")
@@ -817,6 +865,12 @@ def request_panel_update(request: Request, tasks: BackgroundTasks):
 def panel_update_status(request: Request):
     require_auth(request)
     return read_panel_update_status()
+
+
+@app.get("/api/panel/update/check")
+def panel_update_check(request: Request):
+    require_auth(request)
+    return panel_update_check_payload()
 
 
 @app.get("/", response_class=HTMLResponse)

@@ -162,6 +162,7 @@ $('consoleCommandForm').onsubmit = async event => {
 
 $('logout').onclick = async () => { await api('/api/auth/logout', {method: 'POST'}); location.href = '/login'; };
 $('panelUpdateButton').onclick = () => {
+  $('panelUpdateNotice').classList.remove('show');
   showDialog(panelUpdateDialog);
   loadPanelUpdateStatus();
 };
@@ -401,6 +402,15 @@ function schedulePanelUpdateStatus(delay = 2000) {
   panelUpdatePollTimer = setTimeout(loadPanelUpdateStatus, delay);
 }
 
+async function checkPanelUpdateOnLoad() {
+  try {
+    const data = await api('/api/panel/update/check');
+    $('panelUpdateNotice').classList.toggle('show', Boolean(data.update_available));
+  } catch (_) {
+    $('panelUpdateNotice').classList.remove('show');
+  }
+}
+
 function setPanelUpdateProgress(progress, status = 'idle') {
   const value = Math.max(0, Math.min(100, Math.round(Number(progress) || 0)));
   const wrapper = $('panelUpdateProgress');
@@ -535,6 +545,7 @@ async function refreshResources() {
 
 async function initialize() {
   loadMinecraftVersions();
+  checkPanelUpdateOnLoad();
   await refreshStatus();
   const config = await api('/api/config').catch(() => null);
   if (config) $('settingsMode').textContent = settingsSummary(config.config);
