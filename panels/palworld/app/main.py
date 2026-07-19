@@ -72,6 +72,17 @@ PANEL_UPDATE_LOCK = threading.Lock()
 PANEL_UPDATE_ACTIVE = False
 PANEL_UPDATE_CHECK_LOCK = threading.Lock()
 PANEL_UPDATE_CHECK_CACHE: dict[str, Any] = {"expires_at": 0.0, "payload": None}
+RESOURCE_LOCK = threading.Lock()
+RESOURCE_NETWORK_SAMPLE: dict[str, Any] = {
+    "container_id": "",
+    "sampled_at": 0.0,
+    "received": 0,
+    "sent": 0,
+}
+OS_CPU_LOCK = threading.Lock()
+OS_CPU_SAMPLE: dict[int, tuple[int, int]] = {}
+PROC_STAT_FILE = Path(os.getenv("PROC_STAT_FILE", "/proc/stat"))
+PROC_MEMINFO_FILE = Path(os.getenv("PROC_MEMINFO_FILE", "/proc/meminfo"))
 RESTART_SCHEDULE_LOCK = threading.RLock()
 RESTART_SCHEDULER_STOP = threading.Event()
 RESTART_SCHEDULER_THREAD: threading.Thread | None = None
@@ -125,6 +136,136 @@ def ensure_data_dirs() -> None:
     (DATA_DIR / "backups").mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "uploads").mkdir(parents=True, exist_ok=True)
     SAVED_ROOT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def parse_os_cpu_stat(value: str) -> dict[int, tuple[int, int]]:
+    samples: dict[int, tuple[int, int]] = {}
+    for line in value.splitlines():
+        parts = line.split()
+        if not parts or not re.fullmatch(r"cpu\d+", parts[0]):
+            continue
+        try:
+            counters = [int(counter) for counter in parts[1:9]]
+        except ValueError:
+            continue
+        if len(counters) < 4:
+            continue
+        idle = counters[3] + (counters[4] if len(counters) > 4 else 0)
+        samples[int(parts[0][3:])] = (sum(counters), idle)
+    return samples
+
+
+def os_cpu_usage() -> tuple[float, list[dict[str, Any]]]:
+    try:
+        current = parse_os_cpu_stat(PROC_STAT_FILE.read_text(encoding="ascii", errors="ignore"))
+    except OSError:
+        current = {}
+    with OS_CPU_LOCK:
+        previous = dict(OS_CPU_SAMPLE)
+        OS_CPU_SAMPLE.clear()
+        OS_CPU_SAMPLE.update(current)
+
+    threads = []
+    for index in sorted(current):
+        total, idle = current[index]
+        previous_total, previous_idle = previous.get(index, (total, idle))
+        total_delta = total - previous_total
+        idle_delta = idle - previous_idle
+        percent = (total_delta - idle_delta) / total_delta * 100 if total_delta > 0 else 0.0
+        threads.append({"thread": index + 1, "percent": round(min(100.0, max(0.0, percent)), 1)})
+    average = sum(thread["percent"] for thread in threads) / len(threads) if threads else 0.0
+    return round(average, 1), threads
+
+
+def os_memory_usage() -> dict[str, int | float]:
+    values: dict[str, int] = {}
+    try:
+        for line in PROC_MEMINFO_FILE.read_text(encoding="ascii", errors="ignore").splitlines():
+            key, separator, raw = line.partition(":")
+            if not separator:
+                continue
+            match = re.search(r"\d+", raw)
+            if match:
+                values[key] = int(match.group()) * 1024
+    except OSError:
+        values = {}
+
+    total = max(0, values.get("MemTotal", 0))
+    available = max(0, values.get("MemAvailable", 0))
+    if total and not available:
+        available = max(
+            0,
+            sum(values.get(key, 0) for key in ("MemFree", "Buffers", "Cached", "SReclaimable"))
+            - values.get("Shmem", 0),
+        )
+    if not total:
+        try:
+            page_size = int(os.sysconf("SC_PAGE_SIZE"))
+            total = page_size * int(os.sysconf("SC_PHYS_PAGES"))
+            available = page_size * int(os.sysconf("SC_AVPHYS_PAGES"))
+        except (OSError, ValueError):
+            total = 0
+            available = 0
+
+    available = min(total, available) if total else 0
+    used = max(0, total - available)
+    swap_total = max(0, values.get("SwapTotal", 0))
+    swap_free = min(swap_total, max(0, values.get("SwapFree", 0))) if swap_total else 0
+    swap_used = max(0, swap_total - swap_free)
+    percent = used / total * 100 if total else 0.0
+    return {
+        "memory_percent": round(min(100.0, max(0.0, percent)), 1),
+        "memory_used": used,
+        "memory_total": total,
+        "memory_available": available,
+        "swap_used": swap_used,
+        "swap_total": swap_total,
+    }
+
+
+def container_resource_usage(container) -> dict[str, Any]:
+    stats = container.stats(stream=False)
+    memory = stats.get("memory_stats") or {}
+    memory_stats = memory.get("stats") or {}
+    memory_cache = int(memory_stats.get("total_inactive_file") or memory_stats.get("inactive_file") or 0)
+    memory_used = max(0, int(memory.get("usage") or 0) - memory_cache)
+    memory_limit = max(0, int(memory.get("limit") or 0))
+    memory_percent = memory_used / memory_limit * 100 if memory_limit else 0.0
+
+    networks = stats.get("networks") or {}
+    received = sum(max(0, int(item.get("rx_bytes") or 0)) for item in networks.values())
+    sent = sum(max(0, int(item.get("tx_bytes") or 0)) for item in networks.values())
+    sampled_at = time.monotonic()
+    container_id = str(getattr(container, "id", "") or "")
+    with RESOURCE_LOCK:
+        previous_id = str(RESOURCE_NETWORK_SAMPLE.get("container_id") or "")
+        elapsed = sampled_at - float(RESOURCE_NETWORK_SAMPLE.get("sampled_at") or 0)
+        if previous_id == container_id and elapsed > 0:
+            received_per_second = max(
+                0.0,
+                (received - int(RESOURCE_NETWORK_SAMPLE.get("received") or 0)) / elapsed,
+            )
+            sent_per_second = max(
+                0.0,
+                (sent - int(RESOURCE_NETWORK_SAMPLE.get("sent") or 0)) / elapsed,
+            )
+        else:
+            received_per_second = 0.0
+            sent_per_second = 0.0
+        RESOURCE_NETWORK_SAMPLE.update({
+            "container_id": container_id,
+            "sampled_at": sampled_at,
+            "received": received,
+            "sent": sent,
+        })
+
+    return {
+        "game_memory_percent": round(min(100.0, max(0.0, memory_percent)), 1),
+        "game_memory_used": memory_used,
+        "game_memory_limit": memory_limit,
+        "network_received_per_second": round(received_per_second),
+        "network_sent_per_second": round(sent_per_second),
+    }
 
 
 def ensure_official_runtime_files() -> None:
@@ -2118,7 +2259,7 @@ def dashboard(request: Request):
     .value { font-size: 20px; font-weight: bold; }
     .actions { margin-top: 24px; display: grid; grid-template-columns: repeat(auto-fit, minmax(136px, 1fr)); gap: 12px; align-items: stretch; }
     .actions button { width: 100%; min-height: 48px; }
-    .log-mode-toggle { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); min-height: 48px; overflow: hidden; border: 1px solid #cbd5e1; border-radius: 8px; background: rgba(248,250,252,0.92); }
+    .log-mode-toggle { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); min-height: 48px; overflow: hidden; border: 1px solid #cbd5e1; border-radius: 999px; background: rgba(248,250,252,0.92); box-shadow: inset 0 1px 2px rgba(15,23,42,0.06); }
     .actions .log-mode-toggle button { min-width: 0; min-height: 46px; padding: 8px 10px; border: 0; border-radius: 0; background: transparent; color: #475569; font-size: 12px; white-space: nowrap; box-shadow: none; }
     .actions .log-mode-toggle button + button { border-left: 1px solid #cbd5e1; }
     .actions .log-mode-toggle button:hover { background: #e2e8f0; color: #1e293b; }
@@ -2127,13 +2268,13 @@ def dashboard(request: Request):
     .config-body { transition: filter 0.2s ease, opacity 0.2s ease; }
     .config.locked { background: rgba(255, 255, 255, 0.66); }
     .config.locked .config-body { filter: blur(1.4px); opacity: 0.58; pointer-events: none; user-select: none; }
-    .config.locked .settings-hub-pane { filter: blur(1.2px); opacity: 0.58; pointer-events: none; user-select: none; }
+    .config.locked .settings-main-pane { filter: blur(1.2px); opacity: 0.58; pointer-events: none; user-select: none; }
     .config h2 { margin: 0 0 16px; font-size: 22px; }
     .config-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
-    .advanced-card { position: relative; margin-top: 18px; min-height: 152px; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,0.66); background: linear-gradient(90deg, rgba(8, 38, 48, 0.92), rgba(20, 81, 71, 0.48)), url("/static/palworld-settings-bg.png") center / cover no-repeat; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); color: #ffffff; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.12), 0 16px 34px rgba(7, 18, 26, 0.16); }
+    .advanced-card { position: relative; margin-top: 18px; min-height: 246px; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,0.66); background: linear-gradient(90deg, rgba(8, 38, 48, 0.92), rgba(20, 81, 71, 0.48)), url("/static/palworld-settings-bg.png") center / cover no-repeat; display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(330px, 0.88fr); color: #ffffff; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.12), 0 16px 34px rgba(7, 18, 26, 0.16); }
     .advanced-card::before { content: ""; position: absolute; inset: 8px; border-radius: 10px; border: 1px solid rgba(125, 211, 252, 0.44); background: linear-gradient(90deg, rgba(34,211,238,0.22), transparent 26%, transparent 76%, rgba(74,222,128,0.28)); pointer-events: none; }
-    .settings-hub-pane { position: relative; z-index: 1; min-width: 0; display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; gap: 20px; padding: 26px 28px; }
-    .settings-hub-pane + .settings-hub-pane { border-left: 1px solid rgba(255,255,255,0.28); background: linear-gradient(90deg, rgba(5,44,47,0.18), rgba(13,71,64,0.32)); }
+    .settings-main-pane { position: relative; z-index: 1; min-width: 0; display: grid; align-content: center; gap: 17px; padding: 24px 28px; transition: filter 0.2s ease, opacity 0.2s ease; }
+    .settings-primary-row { min-width: 0; display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; gap: 20px; }
     .advanced-copy { position: relative; z-index: 1; min-width: 0; padding-left: 22px; }
     .advanced-copy::before { content: ""; position: absolute; left: 0; top: 4px; bottom: 4px; width: 4px; border-radius: 999px; background: linear-gradient(180deg, #67e8f9, #a7f3d0 52%, #fde68a); box-shadow: 0 0 18px rgba(103,232,249,0.58); }
     .advanced-title { font-size: 20px; font-weight: bold; margin-bottom: 6px; }
@@ -2143,7 +2284,60 @@ def dashboard(request: Request):
     .advanced-button img { width: 46px; height: 46px; display: block; object-fit: cover; border-radius: 12px; }
     .advanced-button svg { width: 44px; height: 44px; display: block; padding: 8px; border-radius: 12px; background: linear-gradient(145deg, #0f766e, #155e75); color: #ffffff; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.24); }
     .advanced-button-label { color: #0f3f3d; font-size: 12px; font-weight: bold; line-height: 1; }
-    .restart-hub-summary { display: block; margin-top: 7px; color: #a7f3d0; font-size: 12px; font-weight: bold; }
+    .management-shortcuts { display: grid; grid-template-columns: minmax(0, 1fr); gap: 9px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.24); }
+    .management-shortcut { min-width: 0; min-height: 58px; display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 9px 12px; border: 1px solid rgba(205, 239, 230, 0.30); border-radius: 7px; background: rgba(7, 53, 52, 0.74); color: #ffffff; text-align: left; box-shadow: inset 0 1px 0 rgba(255,255,255,0.06); }
+    .management-shortcut:hover { border-color: #99f6e4; background: rgba(15, 118, 110, 0.86); transform: translateY(-1px); }
+    .management-shortcut-icon { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 7px; background: #9a594d; color: #ffffff; }
+    .management-shortcut-icon svg { width: 23px; height: 23px; }
+    .management-shortcut-copy { min-width: 0; display: grid; gap: 4px; }
+    .management-shortcut-copy b { font-size: 13px; }
+    .management-shortcut-copy small { overflow: hidden; color: rgba(255,255,255,0.72); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+    .restart-hub-summary { color: #a7f3d0; font-size: 10px; font-weight: bold; white-space: nowrap; }
+    .resource-monitor { position: relative; z-index: 1; min-width: 0; display: flex; flex-direction: column; gap: 13px; padding: 24px 26px; border-left: 1px solid rgba(255,255,255,0.26); background: rgba(4, 36, 39, 0.58); cursor: pointer; transition: background 0.18s ease, box-shadow 0.18s ease; }
+    .resource-monitor:hover { background: rgba(5, 55, 55, 0.72); box-shadow: inset 0 0 0 1px rgba(153,246,228,0.2); }
+    .resource-monitor:focus-visible { outline: 2px solid #99f6e4; outline-offset: -4px; }
+    .resource-monitor-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
+    .resource-monitor-head h3 { margin: 0 0 4px; font-size: 17px; }
+    .resource-monitor-head p { margin: 0; color: rgba(255,255,255,0.7); font-size: 10px; }
+    .resource-monitor-head span { color: #a7f3d0; font-size: 10px; font-weight: bold; }
+    .resource-summary-card { flex: 1; display: grid; align-content: center; gap: 10px; min-height: 0; padding: 15px; border: 1px solid rgba(204,251,241,0.23); border-radius: 8px; background: rgba(6, 43, 43, 0.78); }
+    .resource-summary-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .resource-summary-row > div { display: grid; gap: 3px; }
+    .resource-summary-row span { font-size: 13px; font-weight: 800; }
+    .resource-summary-row small { color: rgba(255,255,255,0.58); font-size: 9px; }
+    .resource-summary-row strong { font: 800 17px/1 Consolas, Monaco, monospace; }
+    .resource-meter { height: 9px; overflow: hidden; border-radius: 999px; background: rgba(1, 21, 22, 0.84); }
+    .resource-meter span { display: block; width: 0; height: 100%; border-radius: inherit; background: #5eead4; transition: width 0.3s ease; }
+    .resource-meter.memory span { background: #7dd3fc; }
+    .resource-meter.disk span { background: #fcd34d; }
+    .resource-summary-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.14); color: rgba(255,255,255,0.62); font-size: 9px; }
+    .resource-summary-foot b { color: #a7f3d0; font-size: 9px; }
+    .resource-monitor-modal { width: min(940px, 100%); }
+    .resource-monitor-modal-body { display: grid; gap: 14px; overflow: auto; padding: 20px; background: linear-gradient(145deg, #ecfeff, #eff6ff); }
+    .resource-monitor-modal-summary { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 16px; border: 1px solid #bae6e8; border-radius: 10px; background: rgba(255,255,255,0.86); }
+    .resource-monitor-modal-summary > div { display: grid; gap: 5px; }
+    .resource-monitor-modal-summary strong { color: #164e63; font-size: 14px; }
+    .resource-monitor-modal-summary small { color: #64748b; font-size: 10px; }
+    .resource-live-state, .resource-refresh-badge { width: max-content; padding: 5px 8px; border-radius: 5px; font-size: 10px; font-weight: 800; }
+    .resource-live-state { background: #b91c1c; color: #ffffff; }
+    .resource-live-state.online { background: #0f766e; }
+    .resource-refresh-badge { border: 1px solid #99f6e4; background: #ccfbf1; color: #115e59; }
+    .resource-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .resource-detail-card { min-width: 0; min-height: 176px; display: flex; flex-direction: column; gap: 12px; padding: 15px; border: 1px solid #cbd5e1; border-radius: 10px; background: rgba(255,255,255,0.9); color: #1f2937; }
+    .resource-detail-card header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .resource-detail-card header > div { display: grid; gap: 3px; }
+    .resource-detail-card header span { color: #0f172a; font-size: 13px; font-weight: 800; }
+    .resource-detail-card header small { color: #64748b; font-size: 9px; }
+    .resource-detail-card header strong { font: 800 18px/1 Consolas, Monaco, monospace; }
+    .resource-detail-card footer { margin-top: auto; color: #64748b; font-size: 10px; }
+    .resource-detail-card .resource-meter { background: #dbe7e7; }
+    .cpu-thread-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; }
+    .cpu-thread-item { min-width: 0; display: grid; grid-template-columns:auto 1fr auto; align-items: center; gap: 7px; font-size: 9px; }
+    .cpu-thread-item i { height: 6px; overflow: hidden; border-radius: 999px; background: #dbe7e7; }
+    .cpu-thread-item i span { display: block; height: 100%; border-radius: inherit; background: #14b8a6; }
+    .resource-detail-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .resource-detail-stats div { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px; border: 1px solid #e2e8f0; border-radius: 7px; background: #f8fafc; font-size: 9px; }
+    .resource-detail-network { display: flex; justify-content: space-between; gap: 12px; color: #0f766e; font: 700 12px/1.4 Consolas, Monaco, monospace; }
     .modal-backdrop { position: fixed; inset: 0; z-index: 100; display: none; align-items: center; justify-content: center; padding: 24px; background: rgba(10, 18, 28, 0.62); }
     .modal-backdrop.show { display: flex; }
     .modal { width: min(1060px, 100%); max-height: min(86vh, 900px); overflow: hidden; border-radius: 16px; border: 1px solid rgba(255,255,255,0.45); background: rgba(255,255,255,0.96); box-shadow: 0 28px 90px rgba(0,0,0,0.45); display: flex; flex-direction: column; }
@@ -2265,8 +2459,10 @@ def dashboard(request: Request):
       .grid, .config-grid { grid-template-columns: 1fr; }
       .server-mode-line { margin-top: 8px; }
       .advanced-card { grid-template-columns: 1fr; }
-      .settings-hub-pane { grid-template-columns: 86px minmax(0, 1fr); gap: 16px; padding: 22px 20px; }
-      .settings-hub-pane + .settings-hub-pane { border-left: 0; border-top: 1px solid rgba(255,255,255,0.28); }
+      .settings-main-pane { padding: 22px 20px; }
+      .settings-primary-row { grid-template-columns: 86px minmax(0, 1fr); gap: 16px; }
+      .resource-monitor { min-height: 226px; border-top: 1px solid rgba(255,255,255,0.28); border-left: 0; padding: 22px 20px; }
+      .resource-detail-grid { grid-template-columns: 1fr; }
       .advanced-grid { grid-template-columns: 1fr; }
       button { width: 100%; }
       .advanced-button { width: 86px; height: 86px; }
@@ -2278,6 +2474,14 @@ def dashboard(request: Request):
       .restart-modal-controls { grid-template-columns: 1fr; }
       .restart-modal-intro { grid-template-columns: 46px minmax(0, 1fr); }
       .restart-modal-intro-icon { width: 46px; height: 46px; }
+    }
+    @media (max-width: 520px) {
+      .settings-primary-row { grid-template-columns: 76px minmax(0, 1fr); }
+      .advanced-button { width: 76px; height: 82px; }
+      .management-shortcut { grid-template-columns: 42px minmax(0, 1fr); }
+      .restart-hub-summary { grid-column: 2; white-space: normal; }
+      .resource-monitor-modal-summary { align-items: flex-start; flex-direction: column; }
+      .resource-detail-stats, .cpu-thread-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -2432,31 +2636,39 @@ def dashboard(request: Request):
         </div>
       </div>
         <div class="advanced-card">
-          <div class="settings-hub-pane">
-            <button id="advancedSettingsBtn" class="advanced-button" type="button" onclick="openAdvancedSettings()" title="상세 설정 열기" aria-label="상세 설정 열기">
-              <img src="/static/palworld-settings-icon.png" alt="">
-              <span class="advanced-button-label">설정하기</span>
-            </button>
-            <div class="advanced-copy">
-              <div class="advanced-title">Palworld 상세 서버 설정</div>
-              <div class="advanced-subtitle">경험치, 포획률, 낮/밤 속도, 알 부화 시간, 전투 배율과 월드 규칙을 조정합니다.</div>
+          <div class="settings-main-pane">
+            <div class="settings-primary-row">
+              <button id="advancedSettingsBtn" class="advanced-button" type="button" onclick="openAdvancedSettings()" title="상세 설정 열기" aria-label="상세 설정 열기">
+                <img src="/static/palworld-settings-icon.png" alt="">
+                <span class="advanced-button-label">설정하기</span>
+              </button>
+              <div class="advanced-copy">
+                <div class="advanced-title">Palworld 상세 서버 설정</div>
+                <div class="advanced-subtitle">경험치, 포획률, 낮/밤 속도, 알 부화 시간, 전투 배율과 월드 규칙을 조정합니다.</div>
+              </div>
             </div>
+            <nav class="management-shortcuts" aria-label="Palworld 운영 기능">
+              <button id="restartSettingsBtn" class="management-shortcut" type="button" onclick="openRestartScheduleSettings()" title="자동 재시작 설정 열기">
+                <span class="management-shortcut-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M8 2v4" /><path d="M16 2v4" /><rect width="18" height="18" x="3" y="4" rx="2" /><path d="M3 10h18" /><circle cx="12" cy="15" r="3" /><path d="M12 13.5V15l1 1" />
+                  </svg>
+                </span>
+                <span class="management-shortcut-copy"><b>예약 재시작</b><small>매일 지정한 한국표준 시각에 게임 서버를 재시작합니다.</small></span>
+                <span id="restartScheduleSummary" class="restart-hub-summary">예약 정보 확인 중</span>
+              </button>
+            </nav>
           </div>
-          <div class="settings-hub-pane">
-            <button id="restartSettingsBtn" class="advanced-button" type="button" onclick="openRestartScheduleSettings()" title="자동 재시작 설정 열기" aria-label="자동 재시작 설정 열기">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M20 11a8 8 0 1 0-2.34 5.66" />
-                <path d="M20 5v6h-6" />
-                <path d="M12 7v5l3 2" />
-              </svg>
-              <span class="advanced-button-label">예약설정</span>
-            </button>
-            <div class="advanced-copy">
-              <div class="advanced-title">게임 서버 자동 재시작</div>
-              <div class="advanced-subtitle">매일 지정한 한국표준 시각에 실행 중인 게임 서버 컨테이너만 재시작합니다.</div>
-              <span id="restartScheduleSummary" class="restart-hub-summary">예약 정보 확인 중</span>
+          <aside id="resourceMonitorEntry" class="resource-monitor" role="button" tabindex="0" aria-haspopup="dialog" aria-controls="resourceMonitorModal" aria-label="상세 서버 성능 모니터링 열기" onclick="openResourceMonitor()" onkeydown="handleResourceMonitorKey(event)">
+            <div class="resource-monitor-head"><div><h3>서버 리소스</h3><p>Ubuntu OS 및 Palworld 게임 컨테이너</p></div><span id="resourceStatus">새로고침 : 5초</span></div>
+            <div class="resource-summary-card">
+              <div class="resource-summary-row"><div><span>CPU</span><small>OS 전체 사용률</small></div><strong id="resourceCpuSummary">0%</strong></div>
+              <div class="resource-meter"><span id="resourceCpuSummaryBar"></span></div>
+              <div class="resource-summary-row"><div><span>MEM</span><small>전체 메모리 사용률</small></div><strong id="resourceMemorySummary">0%</strong></div>
+              <div class="resource-meter memory"><span id="resourceMemorySummaryBar"></span></div>
+              <div class="resource-summary-foot"><span id="resourceServerState">게임 서버 대기</span><b>클릭하여 상세 보기</b></div>
             </div>
-          </div>
+          </aside>
         </div>
     </div>
 
@@ -2572,15 +2784,59 @@ def dashboard(request: Request):
       </div>
     </div>
 
+    <div id="resourceMonitorModal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal resource-monitor-modal" role="dialog" aria-modal="true" aria-labelledby="resourceMonitorModalTitle">
+        <div class="modal-head">
+          <div><small>LIVE MONITORING</small><h2 id="resourceMonitorModalTitle">상세 서버 모니터링</h2></div>
+          <button class="modal-close" type="button" onclick="closeResourceMonitor()" title="닫기" aria-label="닫기">×</button>
+        </div>
+        <div class="resource-monitor-modal-body">
+          <div class="resource-monitor-modal-summary">
+            <div><span class="resource-live-state" id="resourceDetailServerState">상태 확인 중</span><strong>Ubuntu OS 및 Palworld 게임 컨테이너</strong><small id="resourceDetailUpdatedAt">리소스 정보를 불러오고 있습니다.</small></div>
+            <span class="resource-refresh-badge" id="resourceDetailStatus">새로고침 : 1초</span>
+          </div>
+          <div class="resource-detail-grid">
+            <section class="resource-detail-card">
+              <header><div><span>CPU</span><small>OS 논리 CPU별 전체 사용률</small></div><strong id="resourceDetailCpu">0%</strong></header>
+              <div class="resource-meter"><span id="resourceDetailCpuBar"></span></div>
+              <div class="cpu-thread-grid" id="resourceDetailCpuThreads"><span>OS CPU 통계를 불러오는 중입니다.</span></div>
+              <footer id="resourceDetailCpuCount">논리 CPU 확인 중</footer>
+            </section>
+            <section class="resource-detail-card">
+              <header><div><span>MEMORY</span><small>OS 및 게임 컨테이너 메모리</small></div><strong id="resourceDetailMemory">0%</strong></header>
+              <div class="resource-meter memory"><span id="resourceDetailMemoryBar"></span></div>
+              <div class="resource-detail-stats">
+                <div><span>전체</span><strong id="resourceDetailMemoryTotal">0 B</strong></div>
+                <div><span>사용</span><strong id="resourceDetailMemoryUsed">0 B</strong></div>
+                <div><span>사용 가능</span><strong id="resourceDetailMemoryAvailable">0 B</strong></div>
+                <div><span>게임 메모리</span><strong id="resourceDetailGameMemory">중지됨</strong></div>
+              </div>
+              <footer id="resourceDetailSwap">가상 메모리 사용 안 함</footer>
+            </section>
+            <section class="resource-detail-card">
+              <header><div><span>DISK</span><small>Palworld 서버 데이터 디스크</small></div><strong id="resourceDetailDisk">0%</strong></header>
+              <div class="resource-meter disk"><span id="resourceDetailDiskBar"></span></div>
+              <footer id="resourceDetailDiskUsage">0 B / 0 B</footer>
+            </section>
+            <section class="resource-detail-card">
+              <header><div><span>NETWORK</span><small>게임 컨테이너 수신 및 송신</small></div><strong id="resourceDetailNetworkState">대기</strong></header>
+              <div class="resource-detail-network"><span id="resourceDetailNetworkDown">↓ 0 B/s</span><span id="resourceDetailNetworkUp">↑ 0 B/s</span></div>
+              <footer>Palworld 게임 컨테이너 기준 실시간 전송량</footer>
+            </section>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="actions">
       <button id="installBtn" onclick="requestInstall()">엔진 설치</button>
       <button class="secondary" onclick="startServer()">서버 시작</button>
       <button id="serverStopBtn" class="secondary" onclick="stopServer()">서버 중지</button>
+      <button id="fileExplorerBtn" class="secondary" onclick="openFileExplorer()">서버 디렉토리 탐색기</button>
       <div class="log-mode-toggle" role="group" aria-label="로그 선택">
         <button id="serverLogToggle" type="button" onclick="loadServerLog()" aria-pressed="false">서버 로그</button>
         <button id="installLogToggle" class="is-active" type="button" onclick="loadLog()" aria-pressed="true">설치 로그</button>
       </div>
-      <button id="fileExplorerBtn" class="secondary" onclick="openFileExplorer()">서버 디렉토리 탐색기</button>
       <input id="fileExplorerUploadInput" type="file" onchange="uploadExplorerFile()" style="display:none">
       <input id="fileExplorerFolderUploadInput" type="file" webkitdirectory directory multiple onchange="uploadExplorerFolder()" style="display:none">
     </div>
@@ -2633,6 +2889,8 @@ def dashboard(request: Request):
     let panelUpdateRequested = false;
     let panelUpdatePollTimer = null;
     let panelUpdateReloadScheduled = false;
+    let resourceDetailPollTimer = null;
+    let resourceRequestActive = false;
 
     function setCurrentLogMode(mode) {
       currentLogMode = mode === "server" ? "server" : "install";
@@ -4021,6 +4279,152 @@ def dashboard(request: Request):
       }
     }
 
+    function resourcePercent(value) {
+      const number = Number(value || 0);
+      return Math.max(0, Math.min(100, Number.isFinite(number) ? number : 0));
+    }
+
+    function formatResourcePercent(value) {
+      const number = resourcePercent(value);
+      return (Number.isInteger(number) ? number.toFixed(0) : number.toFixed(1)) + "%";
+    }
+
+    function formatResourceBytes(value, perSecond) {
+      let number = Math.max(0, Number(value || 0));
+      const units = ["B", "KB", "MB", "GB", "TB"];
+      let unitIndex = 0;
+      while (number >= 1024 && unitIndex < units.length - 1) {
+        number /= 1024;
+        unitIndex += 1;
+      }
+      const precision = number >= 100 || unitIndex === 0 ? 0 : (number >= 10 ? 1 : 2);
+      return number.toFixed(precision) + " " + units[unitIndex] + (perSecond ? "/s" : "");
+    }
+
+    function setResourceMeter(valueId, barId, value) {
+      const percent = resourcePercent(value);
+      document.getElementById(valueId).innerText = formatResourcePercent(percent);
+      document.getElementById(barId).style.width = percent + "%";
+    }
+
+    function renderCpuThreads(threads) {
+      const target = document.getElementById("resourceDetailCpuThreads");
+      const values = Array.isArray(threads) ? threads : [];
+      target.innerHTML = "";
+      if (!values.length) {
+        target.innerHTML = "<span>OS CPU 통계를 불러올 수 없습니다.</span>";
+      } else {
+        values.forEach(function (item) {
+          const percent = resourcePercent(item.percent);
+          const row = document.createElement("div");
+          const name = document.createElement("b");
+          const meter = document.createElement("i");
+          const fill = document.createElement("span");
+          const value = document.createElement("strong");
+          row.className = "cpu-thread-item";
+          name.innerText = "CPU" + Number(item.thread || 0);
+          fill.style.width = percent + "%";
+          value.innerText = formatResourcePercent(percent);
+          meter.appendChild(fill);
+          row.appendChild(name);
+          row.appendChild(meter);
+          row.appendChild(value);
+          target.appendChild(row);
+        });
+      }
+      document.getElementById("resourceDetailCpuCount").innerText = values.length + " Threads";
+    }
+
+    function renderResourceSummary(data) {
+      setResourceMeter("resourceCpuSummary", "resourceCpuSummaryBar", data.cpu_percent);
+      setResourceMeter("resourceMemorySummary", "resourceMemorySummaryBar", data.memory_percent);
+      document.getElementById("resourceServerState").innerText = data.running ? "게임 서버 실행 중" : "게임 서버 대기";
+      document.getElementById("resourceStatus").innerText = data.error ? "일부 조회 실패 : 5초" : "새로고침 : 5초";
+    }
+
+    function renderResourceDetails(data) {
+      setResourceMeter("resourceDetailCpu", "resourceDetailCpuBar", data.cpu_percent);
+      setResourceMeter("resourceDetailMemory", "resourceDetailMemoryBar", data.memory_percent);
+      setResourceMeter("resourceDetailDisk", "resourceDetailDiskBar", data.disk_percent);
+      renderCpuThreads(data.cpu_threads);
+      document.getElementById("resourceDetailMemoryTotal").innerText = formatResourceBytes(data.memory_total);
+      document.getElementById("resourceDetailMemoryUsed").innerText = formatResourceBytes(data.memory_used);
+      document.getElementById("resourceDetailMemoryAvailable").innerText = formatResourceBytes(data.memory_available);
+      document.getElementById("resourceDetailGameMemory").innerText = data.running && data.game_memory_limit
+        ? formatResourceBytes(data.game_memory_used) + " / " + formatResourceBytes(data.game_memory_limit)
+        : "중지됨";
+      document.getElementById("resourceDetailSwap").innerText = data.swap_total
+        ? "가상 메모리 " + formatResourceBytes(data.swap_used) + " / " + formatResourceBytes(data.swap_total)
+        : "가상 메모리 사용 안 함";
+      document.getElementById("resourceDetailDiskUsage").innerText = formatResourceBytes(data.disk_used) + " / " + formatResourceBytes(data.disk_total);
+      document.getElementById("resourceDetailNetworkDown").innerText = "↓ " + formatResourceBytes(data.network_received_per_second, true);
+      document.getElementById("resourceDetailNetworkUp").innerText = "↑ " + formatResourceBytes(data.network_sent_per_second, true);
+      document.getElementById("resourceDetailNetworkState").innerText = data.running ? "활성" : "대기";
+      const state = document.getElementById("resourceDetailServerState");
+      state.innerText = data.running ? "게임 서버 실행 중" : "게임 서버 중지됨";
+      state.classList.toggle("online", Boolean(data.running));
+      document.getElementById("resourceDetailUpdatedAt").innerText = data.updated_at
+        ? "최근 갱신 " + new Date(data.updated_at).toLocaleString("ko-KR", { timeZone: "Asia/Seoul", hour12: false })
+        : "최근 갱신 시각을 확인할 수 없습니다.";
+      document.getElementById("resourceDetailStatus").innerText = data.error ? "일부 조회 실패 · 1초" : "새로고침 : 1초";
+    }
+
+    async function refreshServerResources(showDetails) {
+      if (resourceRequestActive) {
+        return;
+      }
+      resourceRequestActive = true;
+      try {
+        const response = await fetch("/api/server/resources");
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.detail || "리소스 조회 실패");
+        }
+        renderResourceSummary(data);
+        if (showDetails) {
+          renderResourceDetails(data);
+        }
+      } catch (err) {
+        document.getElementById("resourceStatus").innerText = "조회 실패 : 5초";
+        if (showDetails) {
+          document.getElementById("resourceDetailStatus").innerText = "조회 실패 · 1초";
+        }
+      } finally {
+        resourceRequestActive = false;
+      }
+    }
+
+    function openResourceMonitor() {
+      const modal = document.getElementById("resourceMonitorModal");
+      if (modal.parentElement !== document.body) {
+        document.body.appendChild(modal);
+      }
+      modal.classList.add("show");
+      modal.setAttribute("aria-hidden", "false");
+      refreshServerResources(true);
+      if (!resourceDetailPollTimer) {
+        resourceDetailPollTimer = window.setInterval(function () { refreshServerResources(true); }, 1000);
+      }
+    }
+
+    function closeResourceMonitor() {
+      const modal = document.getElementById("resourceMonitorModal");
+      modal.classList.remove("show");
+      modal.setAttribute("aria-hidden", "true");
+      if (resourceDetailPollTimer) {
+        window.clearInterval(resourceDetailPollTimer);
+        resourceDetailPollTimer = null;
+      }
+    }
+
+    function handleResourceMonitorKey(event) {
+      if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+      event.preventDefault();
+      openResourceMonitor();
+    }
+
     function readConfigForm() {
       return {
         ServerName: document.getElementById("cfgServerName").value.trim() || "TechTim Palworld Server",
@@ -4348,6 +4752,7 @@ def dashboard(request: Request):
       setCurrentLogMode(shouldShowServerLog ? "server" : "install");
       await loadConfig();
       await loadRestartSchedule(true);
+      await refreshServerResources(false);
 
       if (shouldShowServerLog) {
         await loadServerLog();
@@ -4360,6 +4765,7 @@ def dashboard(request: Request):
     setInterval(loadServerStatus, 2000);
     setInterval(refreshCurrentLog, 2000);
     setInterval(function () { loadRestartSchedule(false); }, 30000);
+    setInterval(function () { refreshServerResources(false); }, 5000);
 
     initializeDashboard();
   </script>
@@ -4939,6 +5345,42 @@ def server_status(request: Request):
             "status": "error",
             "error": str(e),
         }
+
+
+@app.get("/api/server/resources")
+def server_resources(request: Request):
+    require_auth(request)
+    ensure_data_dirs()
+    disk = shutil.disk_usage(DATA_DIR)
+    cpu_percent, cpu_threads = os_cpu_usage()
+    memory = os_memory_usage()
+    resources: dict[str, Any] = {
+        "running": False,
+        "cpu_percent": cpu_percent,
+        "cpu_threads": cpu_threads,
+        **memory,
+        "game_memory_percent": 0.0,
+        "game_memory_used": 0,
+        "game_memory_limit": 0,
+        "disk_percent": round(disk.used / disk.total * 100, 1) if disk.total else 0.0,
+        "disk_used": disk.used,
+        "disk_total": disk.total,
+        "network_received_per_second": 0,
+        "network_sent_per_second": 0,
+        "updated_at": datetime.now(KST).isoformat(timespec="seconds"),
+    }
+    try:
+        container = docker.from_env().containers.get(PALWORLD_SERVER_CONTAINER)
+        container.reload()
+        if container.status != "running":
+            return resources
+        resources["running"] = True
+        resources.update(container_resource_usage(container))
+    except docker.errors.NotFound:
+        pass
+    except Exception as error:
+        resources["error"] = sanitize_log_text(str(error))
+    return resources
 
 
 @app.get("/api/server/log")
