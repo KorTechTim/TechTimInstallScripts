@@ -109,8 +109,8 @@
         <section class="form-section conditional" id="loaderModpackSection">
           <h3>모드팩 자동 설치</h3>
           <label>모드팩 URL
-            <span class="modpack-url-row"><input id="ModpackUrl" type="url" placeholder="직접 서버팩 URL을 입력하거나 CurseForge에서 검색"><button id="curseforgeBrowseButton" type="button"><span aria-hidden="true">⌕</span> CurseForge 검색</button></span>
-            <small class="field-help">수동 서버팩 주소를 입력하거나 CurseForge의 일반 모드팩 파일을 선택할 수 있습니다.</small>
+            <span class="modpack-url-row"><input id="ModpackUrl" type="url" placeholder="직접 서버팩 ZIP URL을 입력하거나 CurseForge에서 검색"><button id="curseforgeBrowseButton" type="button"><span aria-hidden="true">⌕</span> CurseForge 검색</button></span>
+            <small class="field-help">서버팩 ZIP 주소를 직접 입력하거나 CurseForge에서 서버팩 제공 버전을 선택할 수 있습니다.</small>
           </label>
           <div class="curseforge-selection" id="curseforgeSelection" hidden>
             <span class="curseforge-selection-icon" aria-hidden="true">CF</span>
@@ -120,6 +120,7 @@
           <input id="ModpackSource" type="hidden" value="manual">
           <input id="CurseForgeProjectId" type="hidden">
           <input id="CurseForgeFileId" type="hidden">
+          <input id="CurseForgeServerPackFileId" type="hidden">
           <input id="CurseForgeSlug" type="hidden">
           <input id="CurseForgeProjectName" type="hidden">
           <input id="CurseForgeFileName" type="hidden">
@@ -148,7 +149,7 @@
   </dialog>
 
   <dialog id="curseforgeDialog" class="modal curseforge-modal">
-    <div class="modal-head"><div><small>CURSEFORGE MODPACKS</small><h2>CurseForge 모드팩 찾기</h2></div><button class="close" type="button" data-close="curseforgeDialog" aria-label="닫기">×</button></div>
+    <div class="modal-head"><div><small>CURSEFORGE SERVER PACKS</small><h2>CurseForge 서버 모드팩 찾기</h2></div><button class="close" type="button" data-close="curseforgeDialog" aria-label="닫기">×</button></div>
     <div class="curseforge-body">
       <form id="curseforgeSearchForm" class="curseforge-search">
         <label>모드팩 이름<input id="curseforgeQuery" type="search" placeholder="예: Better MC, All the Mods"></label>
@@ -158,7 +159,7 @@
       </form>
       <div class="curseforge-view-head">
         <button id="curseforgeBack" type="button" hidden>← 모드팩 목록</button>
-        <div><strong id="curseforgeViewTitle">인기 모드팩</strong><small id="curseforgeViewCaption">설치할 모드팩을 선택하세요.</small></div>
+        <div><strong id="curseforgeViewTitle">인기 서버 모드팩</strong><small id="curseforgeViewCaption">서버팩 ZIP이 제공되는 모드팩만 표시됩니다.</small></div>
       </div>
       <div id="curseforgeResults" class="curseforge-results" aria-live="polite"></div>
     </div>
