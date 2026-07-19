@@ -5,7 +5,6 @@ const filesDialog = $('filesDialog');
 const eulaDialog = $('eulaDialog');
 const deleteServerDialog = $('deleteServerDialog');
 const panelUpdateDialog = $('panelUpdateDialog');
-const curseforgeDialog = $('curseforgeDialog');
 let logMode = 'install';
 let currentPath = '';
 let currentParent = '';
@@ -14,13 +13,6 @@ let panelUpdateRequested = false;
 let panelUpdatePollTimer = null;
 let panelUpdateReloadScheduled = false;
 let commandSending = false;
-let selectedCurseForgeProject = null;
-let curseForgeProjects = [];
-let curseForgeProjectNextIndex = 0;
-let curseForgeProjectHasMore = false;
-let curseForgeFiles = [];
-let curseForgeFileNextIndex = 0;
-let curseForgeFileHasMore = false;
 
 const statusKo = {
   not_started: '미설치', running: '실행 중', completed: '설치 완료', failed: '설치 실패',
@@ -245,258 +237,13 @@ $('deleteServerConfirm').onclick = async event => {
   }
 };
 
-const fields = ['Type','Version','JavaVersion','Memory','ServerName','Motd','Level','Seed','Difficulty','GameMode','MaxPlayers','OnlineMode','Pvp','AllowFlight','EnableCommandBlock','ViewDistance','SimulationDistance','SpawnProtection','Whitelist','Ops','ModrinthProjects','ModpackUrl','ModpackSource','CurseForgeProjectId','CurseForgeFileId','CurseForgeServerPackFileId','CurseForgeSlug','CurseForgeProjectName','CurseForgeFileName','CurseForgePageUrl','CurseForgeGameVersion','CurseForgeLoader'];
+const fields = ['Type','Version','JavaVersion','Memory','ServerName','Motd','Level','Seed','Difficulty','GameMode','MaxPlayers','OnlineMode','Pvp','AllowFlight','EnableCommandBlock','ViewDistance','SimulationDistance','SpawnProtection','Whitelist','Ops','ModrinthProjects','ModpackUrl'];
 const checkFields = new Set(['OnlineMode','Pvp','AllowFlight','EnableCommandBlock']);
 const numberFields = new Set(['MaxPlayers','ViewDistance','SimulationDistance','SpawnProtection']);
 
 function updateTypeFields() {
   $('loaderModpackSection').classList.toggle('visible', ['FORGE', 'NEOFORGE', 'FABRIC'].includes($('Type').value));
 }
-
-function renderCurseForgeSelection() {
-  const selected = $('ModpackSource').value === 'curseforge' && Boolean($('CurseForgeFileId').value);
-  $('curseforgeSelection').hidden = !selected;
-  if (!selected) return;
-  $('curseforgeSelectionName').textContent = $('CurseForgeProjectName').value || 'CurseForge 모드팩';
-  const details = [$('CurseForgeFileName').value, $('CurseForgeGameVersion').value, $('CurseForgeLoader').value, '서버팩 ZIP'].filter(Boolean);
-  $('curseforgeSelectionDetail').textContent = details.join(' · ');
-}
-
-function clearCurseForgeSelection(clearUrl = false) {
-  $('ModpackSource').value = 'manual';
-  ['CurseForgeProjectId','CurseForgeFileId','CurseForgeServerPackFileId','CurseForgeSlug','CurseForgeProjectName','CurseForgeFileName','CurseForgePageUrl','CurseForgeGameVersion','CurseForgeLoader'].forEach(key => { $(key).value = ''; });
-  if (clearUrl) $('ModpackUrl').value = '';
-  renderCurseForgeSelection();
-}
-
-function curseForgeLoaderCode(type) {
-  return {FORGE: '1', FABRIC: '4', NEOFORGE: '6'}[type] || '';
-}
-
-function curseForgeLoaderName(gameVersions) {
-  const values = new Set((gameVersions || []).map(value => String(value).toLowerCase()));
-  if (values.has('neoforge')) return 'NeoForge';
-  if (values.has('fabric')) return 'Fabric';
-  if (values.has('forge')) return 'Forge';
-  if (values.has('quilt')) return 'Quilt';
-  return '';
-}
-
-function curseForgeMinecraftVersion(gameVersions) {
-  const requested = $('curseforgeGameVersion').value.trim();
-  const versions = (gameVersions || []).map(String);
-  if (requested && versions.includes(requested)) return requested;
-  return versions.find(value => /^\d+(?:\.\d+)+$/.test(value)) || '';
-}
-
-function formatDownloads(value) {
-  const count = Number(value) || 0;
-  return new Intl.NumberFormat('ko-KR', {notation: count >= 10000 ? 'compact' : 'standard', maximumFractionDigits: 1}).format(count);
-}
-
-function setCurseForgeLoading(message) {
-  const loading = document.createElement('div');
-  loading.className = 'curseforge-empty';
-  loading.textContent = message;
-  $('curseforgeResults').replaceChildren(loading);
-}
-
-function appendCurseForgeMoreButton(label, handler) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'curseforge-load-more';
-  button.textContent = label;
-  button.onclick = async () => {
-    button.disabled = true;
-    button.textContent = '불러오는 중';
-    await handler();
-  };
-  $('curseforgeResults').append(button);
-}
-
-function renderCurseForgeProjects() {
-  const results = $('curseforgeResults');
-  results.textContent = '';
-  if (!curseForgeProjects.length) {
-    const empty = document.createElement('div');
-    empty.className = 'curseforge-empty';
-    empty.textContent = curseForgeProjectHasMore
-      ? '현재 검색 구간에는 서버팩을 제공하는 모드팩이 없습니다.'
-      : '검색 조건에 맞는 서버 모드팩이 없습니다.';
-    results.append(empty);
-  }
-  curseForgeProjects.forEach(project => {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'curseforge-project';
-    const visual = document.createElement('span');
-    visual.className = 'curseforge-project-logo';
-    if (project.logoUrl) {
-      const image = document.createElement('img');
-      image.src = project.logoUrl;
-      image.alt = '';
-      image.loading = 'lazy';
-      visual.append(image);
-    } else {
-      visual.textContent = 'CF';
-    }
-    const copy = document.createElement('span');
-    copy.className = 'curseforge-project-copy';
-    const title = document.createElement('strong');
-    title.textContent = project.name;
-    const summary = document.createElement('small');
-    summary.textContent = project.summary || '설명 없음';
-    const meta = document.createElement('span');
-    const author = Array.isArray(project.authors) && project.authors.length ? project.authors.join(', ') : 'CurseForge';
-    meta.textContent = `${author} · 다운로드 ${formatDownloads(project.downloadCount)}`;
-    copy.append(title, summary, meta);
-    const arrow = document.createElement('b');
-    arrow.className = 'curseforge-project-arrow';
-    arrow.textContent = '›';
-    button.append(visual, copy, arrow);
-    button.onclick = () => loadCurseForgeFiles(project);
-    results.append(button);
-  });
-  if (curseForgeProjectHasMore) {
-    appendCurseForgeMoreButton('서버 모드팩 더 불러오기', () => loadCurseForgeProjects(true));
-  }
-}
-
-async function loadCurseForgeProjects(append = false) {
-  const submit = $('curseforgeSearchButton');
-  submit.disabled = true;
-  submit.textContent = append ? '불러오는 중' : '검색 중';
-  if (!append) {
-    selectedCurseForgeProject = null;
-    curseForgeProjects = [];
-    curseForgeProjectNextIndex = 0;
-    curseForgeProjectHasMore = false;
-    $('curseforgeBack').hidden = true;
-    $('curseforgeViewTitle').textContent = $('curseforgeQuery').value.trim() ? '검색 결과' : '인기 서버 모드팩';
-    $('curseforgeViewCaption').textContent = '서버팩 ZIP이 제공되는 모드팩만 표시됩니다.';
-    setCurseForgeLoading('CurseForge에서 서버 모드팩을 불러오고 있습니다.');
-  }
-  const params = new URLSearchParams({
-    query: $('curseforgeQuery').value.trim(),
-    game_version: $('curseforgeGameVersion').value.trim(),
-    mod_loader_type: $('curseforgeLoader').value,
-    index: String(append ? curseForgeProjectNextIndex : 0),
-  });
-  try {
-    const data = await api(`/api/curseforge/search?${params}`);
-    const incoming = Array.isArray(data.projects) ? data.projects : [];
-    const known = new Set(curseForgeProjects.map(project => String(project.id)));
-    curseForgeProjects.push(...incoming.filter(project => !known.has(String(project.id))));
-    curseForgeProjectNextIndex = Number(data.pagination?.nextIndex) || 0;
-    curseForgeProjectHasMore = Boolean(data.pagination?.hasMore);
-    renderCurseForgeProjects();
-  } catch (error) {
-    if (!append) setCurseForgeLoading(error.message);
-    else { toast(error.message, true); renderCurseForgeProjects(); }
-  } finally {
-    submit.disabled = false;
-    submit.textContent = '검색';
-  }
-}
-
-function selectCurseForgeFile(project, file) {
-  const pageUrl = `https://www.curseforge.com/minecraft/modpacks/${encodeURIComponent(project.slug)}/files/${file.id}`;
-  const loader = curseForgeLoaderName(file.gameVersions);
-  const gameVersion = curseForgeMinecraftVersion(file.gameVersions);
-  $('ModpackUrl').value = pageUrl;
-  $('ModpackSource').value = 'curseforge';
-  $('CurseForgeProjectId').value = project.id;
-  $('CurseForgeFileId').value = file.id;
-  $('CurseForgeServerPackFileId').value = file.serverPackFileId;
-  $('CurseForgeSlug').value = project.slug;
-  $('CurseForgeProjectName').value = project.name;
-  $('CurseForgeFileName').value = file.displayName || file.fileName;
-  $('CurseForgePageUrl').value = pageUrl;
-  $('CurseForgeGameVersion').value = gameVersion;
-  $('CurseForgeLoader').value = loader;
-  if (gameVersion) $('Version').value = gameVersion;
-  if (loader === 'Forge') $('Type').value = 'FORGE';
-  if (loader === 'NeoForge') $('Type').value = 'NEOFORGE';
-  if (loader === 'Fabric') $('Type').value = 'FABRIC';
-  updateTypeFields();
-  renderCurseForgeSelection();
-  closeDialog(curseforgeDialog);
-}
-
-function renderCurseForgeFiles(project) {
-  const results = $('curseforgeResults');
-  results.textContent = '';
-  if (!curseForgeFiles.length) {
-    const empty = document.createElement('div');
-    empty.className = 'curseforge-empty';
-    empty.textContent = curseForgeFileHasMore
-      ? '현재 검색 구간에는 서버팩 ZIP이 연결된 버전이 없습니다.'
-      : '선택한 조건에 맞는 서버팩 제공 버전이 없습니다. 버전 또는 로더 조건을 비워보세요.';
-    results.append(empty);
-  }
-  curseForgeFiles.forEach(file => {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'curseforge-file';
-    const copy = document.createElement('span');
-    const title = document.createElement('strong');
-    title.textContent = file.displayName || file.fileName;
-    const tags = [curseForgeMinecraftVersion(file.gameVersions), curseForgeLoaderName(file.gameVersions)].filter(Boolean);
-    const meta = document.createElement('small');
-    const release = {1: '정식', 2: '베타', 3: '알파'}[file.releaseType] || '배포';
-    meta.textContent = `${tags.join(' · ') || '버전 정보 없음'} · ${release} · 다운로드 ${formatDownloads(file.downloadCount)}`;
-    copy.append(title, meta);
-    const action = document.createElement('b');
-    action.textContent = '서버팩 선택';
-    button.append(copy, action);
-    button.onclick = () => selectCurseForgeFile(project, file);
-    results.append(button);
-  });
-  if (curseForgeFileHasMore) {
-    appendCurseForgeMoreButton('서버팩 버전 더 불러오기', () => loadCurseForgeFiles(project, true));
-  }
-}
-
-async function loadCurseForgeFiles(project, append = false) {
-  selectedCurseForgeProject = project;
-  if (!append) {
-    curseForgeFiles = [];
-    curseForgeFileNextIndex = 0;
-    curseForgeFileHasMore = false;
-    $('curseforgeBack').hidden = false;
-    $('curseforgeViewTitle').textContent = project.name;
-    $('curseforgeViewCaption').textContent = '서버팩 ZIP이 연결된 버전만 선택할 수 있습니다.';
-    setCurseForgeLoading('사용 가능한 서버팩 버전을 불러오고 있습니다.');
-  }
-  const params = new URLSearchParams({
-    game_version: $('curseforgeGameVersion').value.trim(),
-    mod_loader_type: $('curseforgeLoader').value,
-    index: String(append ? curseForgeFileNextIndex : 0),
-  });
-  try {
-    const data = await api(`/api/curseforge/projects/${project.id}/files?${params}`);
-    const incoming = Array.isArray(data.files) ? data.files : [];
-    const known = new Set(curseForgeFiles.map(file => String(file.id)));
-    curseForgeFiles.push(...incoming.filter(file => !known.has(String(file.id))));
-    curseForgeFileNextIndex = Number(data.pagination?.nextIndex) || 0;
-    curseForgeFileHasMore = Boolean(data.pagination?.hasMore);
-    renderCurseForgeFiles(project);
-  } catch (error) {
-    if (!append) setCurseForgeLoading(error.message);
-    else { toast(error.message, true); renderCurseForgeFiles(project); }
-  }
-}
-
-$('curseforgeBrowseButton').onclick = () => {
-  const version = $('Version').value.trim();
-  $('curseforgeGameVersion').value = version && version !== 'LATEST' ? version : '';
-  $('curseforgeLoader').value = curseForgeLoaderCode($('Type').value);
-  $('curseforgeQuery').value = '';
-  showDialog(curseforgeDialog);
-  loadCurseForgeProjects();
-};
-$('curseforgeSearchForm').onsubmit = event => { event.preventDefault(); loadCurseForgeProjects(); };
-$('curseforgeBack').onclick = () => loadCurseForgeProjects();
 
 function updateRange(input) {
   const output = document.querySelector(`output[data-for="${input.id}"]`);
@@ -510,12 +257,6 @@ $('minecraftVersionSelect').onchange = event => {
 };
 $('Memory').oninput = event => { event.target.value = event.target.value.replace(/\D/g, ''); };
 $('Type').onchange = updateTypeFields;
-$('ModpackUrl').addEventListener('input', () => {
-  if ($('ModpackSource').value === 'curseforge' && $('ModpackUrl').value !== $('CurseForgePageUrl').value) {
-    clearCurseForgeSelection(false);
-  }
-});
-$('curseforgeSelectionClear').onclick = () => clearCurseForgeSelection(true);
 
 async function openSettings(targetId = '') {
   try {
@@ -532,7 +273,6 @@ async function openSettings(targetId = '') {
     $('JavaVersion').disabled = Boolean(data.engine_installed);
     $('ExtraEnv').value = JSON.stringify(data.config.ExtraEnv || {}, null, 2);
     updateTypeFields();
-    renderCurseForgeSelection();
     showDialog(settingsDialog);
     if (targetId) {
       requestAnimationFrame(() => {

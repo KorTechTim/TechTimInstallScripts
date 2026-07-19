@@ -1,9 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlparse
-from urllib.request import Request as UrlRequest, urlopen
+from urllib.request import urlopen
 import hashlib
 import json
 import os
@@ -42,11 +40,6 @@ PANEL_PROXY_CONTAINER = os.getenv("PANEL_PROXY_CONTAINER", "minecraft-panel-prox
 PANEL_IMAGE = os.getenv("PANEL_IMAGE", "ghcr.io/kortechtim/minecraft-panel:latest")
 SERVER_PORT = int(os.getenv("SERVER_PORT", "25565"))
 PULL_HEARTBEAT_SECONDS = max(2, int(os.getenv("DOCKER_PULL_HEARTBEAT_SECONDS", "10")))
-INSTALL_CODE = os.getenv("INSTALL_CODE", "").strip()
-CURSEFORGE_PROXY_URL = os.getenv(
-    "CURSEFORGE_PROXY_URL",
-    "https://www.techtim.kr/api/curseforge",
-).strip()
 
 AUTH_FILE = DATA_DIR / "auth.json"
 SESSIONS_FILE = DATA_DIR / "sessions.json"
@@ -133,16 +126,6 @@ class ConfigRequest(BaseModel):
     Ops: str = ""
     ModrinthProjects: str = ""
     ModpackUrl: str = ""
-    ModpackSource: str = "manual"
-    CurseForgeProjectId: str = ""
-    CurseForgeFileId: str = ""
-    CurseForgeServerPackFileId: str = ""
-    CurseForgeSlug: str = ""
-    CurseForgeProjectName: str = ""
-    CurseForgeFileName: str = ""
-    CurseForgePageUrl: str = ""
-    CurseForgeGameVersion: str = ""
-    CurseForgeLoader: str = ""
     ExtraEnv: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -259,39 +242,9 @@ def minecraft_version_payload() -> dict:
     return payload
 
 
-def curseforge_proxy_request(action: str, params: dict[str, str]) -> dict:
-    if not INSTALL_CODE:
-        raise HTTPException(status_code=503, detail="패널에 Minecraft 설치 코드가 설정되지 않았습니다.")
-    proxy_url = urlparse(CURSEFORGE_PROXY_URL)
-    local_development_proxy = proxy_url.scheme == "http" and proxy_url.hostname in {"127.0.0.1", "localhost"}
-    if proxy_url.scheme != "https" and not local_development_proxy:
-        raise HTTPException(status_code=503, detail="CurseForge API 중계 주소가 올바르지 않습니다.")
-
-    query = urlencode({"action": action, **{key: value for key, value in params.items() if value}})
-    request = UrlRequest(
-        f"{CURSEFORGE_PROXY_URL}?{query}",
-        headers={
-            "Accept": "application/json",
-            "X-TechTim-Install-Code": INSTALL_CODE,
-            "User-Agent": f"TechTim-Minecraft-Panel/{PANEL_VERSION}",
-        },
-    )
-    try:
-        with urlopen(request, timeout=15) as response:
-            return json.load(response)
-    except HTTPError as error:
-        try:
-            payload = json.loads(error.read().decode("utf-8"))
-            detail = str(payload.get("detail") or "CurseForge API 중계 요청이 거부되었습니다.")
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            detail = "CurseForge API 중계 요청이 거부되었습니다."
-        raise HTTPException(status_code=error.code, detail=detail) from error
-    except (URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as error:
-        raise HTTPException(status_code=502, detail="CurseForge API에 연결할 수 없습니다. 잠시 후 다시 시도해주세요.") from error
-
-
 def normalize_config(raw: dict) -> dict:
     merged = {**default_config(), **(raw or {})}
+    legacy_curseforge_selection = str(merged.get("ModpackSource") or "").strip().lower() == "curseforge"
     merged["Type"] = str(merged["Type"]).upper()
     if merged["Type"] not in SERVER_TYPES:
         merged["Type"] = "PAPER"
@@ -307,18 +260,10 @@ def normalize_config(raw: dict) -> dict:
     merged["ViewDistance"] = min(32, max(2, int(merged["ViewDistance"])))
     merged["SimulationDistance"] = min(32, max(2, int(merged["SimulationDistance"])))
     merged["SpawnProtection"] = min(128, max(0, int(merged["SpawnProtection"])))
-    merged["ModpackUrl"] = str(merged.get("ModpackUrl") or "").strip()
-    merged["ModpackSource"] = str(merged.get("ModpackSource") or "manual").strip().lower()
-    if merged["ModpackSource"] not in {"manual", "curseforge"}:
-        merged["ModpackSource"] = "manual"
-    if merged["Type"] not in MODPACK_URL_TYPES:
-        merged["ModpackSource"] = "manual"
-    for key in (
-        "CurseForgeProjectId", "CurseForgeFileId", "CurseForgeServerPackFileId", "CurseForgeSlug",
-        "CurseForgeProjectName", "CurseForgeFileName", "CurseForgePageUrl",
-        "CurseForgeGameVersion", "CurseForgeLoader",
-    ):
-        merged[key] = str(merged.get(key) or "").strip()
+    merged["ModpackUrl"] = "" if legacy_curseforge_selection else str(merged.get("ModpackUrl") or "").strip()
+    for key in tuple(merged):
+        if key == "ModpackSource" or key.startswith("CurseForge"):
+            merged.pop(key, None)
     merged["ExtraEnv"] = merged.get("ExtraEnv") if isinstance(merged.get("ExtraEnv"), dict) else {}
     return merged
 
@@ -685,7 +630,7 @@ def bool_env(value: Any) -> str:
     return "TRUE" if bool(value) else "FALSE"
 
 
-def runtime_environment(config: dict, curseforge_server_pack_url: str = "") -> dict[str, str]:
+def runtime_environment(config: dict) -> dict[str, str]:
     env = {
         "EULA": "TRUE",
         "TYPE": config["Type"],
@@ -711,12 +656,9 @@ def runtime_environment(config: dict, curseforge_server_pack_url: str = "") -> d
         "SEED": config["Seed"], "WHITELIST": config["Whitelist"], "OPS": config["Ops"],
         "MODRINTH_PROJECTS": config["ModrinthProjects"],
     }
-    curseforge_selected = config["ModpackSource"] == "curseforge"
-    if curseforge_selected:
-        optional["GENERIC_PACK"] = curseforge_server_pack_url
-    elif config["Type"] in MODPACK_URL_TYPES:
+    if config["Type"] in MODPACK_URL_TYPES:
         optional["GENERIC_PACK"] = config["ModpackUrl"]
-    if not curseforge_selected and config["Type"] == "FORGE" and config["ModpackUrl"]:
+    if config["Type"] == "FORGE" and config["ModpackUrl"]:
         optional["FORGE_VERSION"] = "latest"
     for key, value in optional.items():
         if str(value or "").strip():
@@ -731,19 +673,7 @@ def runtime_environment(config: dict, curseforge_server_pack_url: str = "") -> d
 
 
 def validate_start(config: dict) -> None:
-    if config["ModpackSource"] == "curseforge":
-        page_url = config["CurseForgePageUrl"]
-        if not re.fullmatch(
-            r"https://www\.curseforge\.com/minecraft/modpacks/[a-z0-9-]+/files/[1-9]\d*",
-            page_url,
-            re.IGNORECASE,
-        ):
-            raise HTTPException(status_code=400, detail="CurseForge 검색에서 설치할 모드팩 버전을 다시 선택해주세요.")
-        if not all(re.fullmatch(r"[1-9]\d*", config[key]) for key in (
-            "CurseForgeProjectId", "CurseForgeFileId", "CurseForgeServerPackFileId",
-        )):
-            raise HTTPException(status_code=400, detail="서버팩 ZIP이 연결된 CurseForge 버전을 다시 선택해주세요.")
-    elif config["ModpackUrl"] and not re.match(r"^https?://\S+$", config["ModpackUrl"], re.IGNORECASE):
+    if config["ModpackUrl"] and not re.match(r"^https?://\S+$", config["ModpackUrl"], re.IGNORECASE):
         raise HTTPException(status_code=400, detail="모드팩 URL은 http:// 또는 https:// 주소로 입력해주세요.")
 
 
@@ -953,42 +883,6 @@ def minecraft_versions(request: Request):
     return minecraft_version_payload()
 
 
-@app.get("/api/curseforge/search")
-def curseforge_search(
-    request: Request,
-    query: str = "",
-    game_version: str = "",
-    mod_loader_type: str = "",
-    index: int = 0,
-):
-    require_auth(request)
-    return curseforge_proxy_request("search", {
-        "query": query.strip()[:80],
-        "gameVersion": game_version.strip()[:32],
-        "modLoaderType": mod_loader_type.strip()[:2],
-        "index": str(min(9950, max(0, index))),
-    })
-
-
-@app.get("/api/curseforge/projects/{project_id}/files")
-def curseforge_project_files(
-    project_id: int,
-    request: Request,
-    game_version: str = "",
-    mod_loader_type: str = "",
-    index: int = 0,
-):
-    require_auth(request)
-    if project_id <= 0:
-        raise HTTPException(status_code=400, detail="올바른 CurseForge 프로젝트 ID가 필요합니다.")
-    return curseforge_proxy_request("files", {
-        "projectId": str(project_id),
-        "gameVersion": game_version.strip()[:32],
-        "modLoaderType": mod_loader_type.strip()[:2],
-        "index": str(min(9950, max(0, index))),
-    })
-
-
 @app.post("/api/config")
 def save_config(payload: ConfigRequest, request: Request):
     require_auth(request)
@@ -1013,18 +907,6 @@ def start_server(payload: StartServerRequest, request: Request):
     if not installed(config):
         raise HTTPException(status_code=400, detail="먼저 서버 설치를 진행해주세요.")
     validate_start(config)
-    server_pack_url = ""
-    if config["ModpackSource"] == "curseforge":
-        server_pack = curseforge_proxy_request("server-pack-download", {
-            "projectId": config["CurseForgeProjectId"],
-            "fileId": config["CurseForgeFileId"],
-        })
-        server_pack_url = str(server_pack.get("downloadUrl") or "").strip()
-        returned_server_pack_id = str(server_pack.get("serverPackFileId") or "").strip()
-        if not re.match(r"^https://\S+$", server_pack_url, re.IGNORECASE):
-            raise HTTPException(status_code=502, detail="CurseForge 서버팩 ZIP 다운로드 주소를 가져오지 못했습니다.")
-        if returned_server_pack_id != config["CurseForgeServerPackFileId"]:
-            raise HTTPException(status_code=409, detail="서버팩 정보가 변경되었습니다. CurseForge에서 버전을 다시 선택해주세요.")
     runtime_image = runtime_image_for_config(config)
     client = docker_client()
     old = get_container()
@@ -1036,7 +918,7 @@ def start_server(payload: StartServerRequest, request: Request):
         runtime_image,
         name=SERVER_CONTAINER,
         detach=True,
-        environment=runtime_environment(config, server_pack_url),
+        environment=runtime_environment(config),
         volumes={str(HOST_SERVER_DIR): {"bind": "/data", "mode": "rw"}},
         ports={"25565/tcp": SERVER_PORT},
         restart_policy={"Name": "unless-stopped"},
