@@ -533,7 +533,7 @@ function publicAddressFallback() {
   if (hostname === '127.0.0.1' || hostname.startsWith('10.') || hostname.startsWith('192.168.')) return '';
   const second = Number(hostname.split('.')[1]);
   if (hostname.startsWith('172.') && second >= 16 && second <= 31) return '';
-  return `${hostname}:25565`;
+  return hostname;
 }
 
 async function copyToClipboard(value) {
@@ -559,7 +559,7 @@ $('resourcePublicAddress').onclick = async event => {
   if (!address) return;
   try {
     await copyToClipboard(address);
-    showButtonBubble(button, '서버 접속 주소가 복사되었습니다.', false);
+    showButtonBubble(button, '공인 IP가 복사되었습니다.', false);
   } catch (error) {
     showButtonBubble(button, error.message);
   }
@@ -578,9 +578,7 @@ async function refreshResources() {
     $('resourceNetworkDown').textContent = `↓ ${formatResourceBytes(data.network_received_per_second, true)}`;
     $('resourceNetworkUp').textContent = `↑ ${formatResourceBytes(data.network_sent_per_second, true)}`;
     $('resourceNetworkState').textContent = data.running ? '활성' : '대기';
-    const publicAddress = data.public_ip
-      ? `${data.public_ip}:${Number(data.server_port) || 25565}`
-      : publicAddressFallback();
+    const publicAddress = data.public_ip || publicAddressFallback();
     const publicAddressButton = $('resourcePublicAddress');
     publicAddressButton.dataset.address = publicAddress;
     publicAddressButton.disabled = !publicAddress;
