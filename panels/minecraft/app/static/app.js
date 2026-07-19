@@ -1208,9 +1208,15 @@ async function refreshResources() {
     renderCpuThreads(data.cpu_threads);
     setResourceMeter('resourceMemory', 'resourceMemoryBar', data.memory_percent);
     setResourceMeter('resourceDisk', 'resourceDiskBar', data.disk_percent);
-    $('resourceMemoryDetail').textContent = data.memory_limit
-      ? `${formatResourceBytes(data.memory_used)} / ${formatResourceBytes(data.memory_limit)}`
-      : '서버 시작 후 표시';
+    $('resourceMemoryTotal').textContent = formatResourceBytes(data.memory_total);
+    $('resourceMemoryUsed').textContent = formatResourceBytes(data.memory_used);
+    $('resourceMemoryAvailable').textContent = formatResourceBytes(data.memory_available);
+    $('resourceSwapDetail').textContent = data.swap_total
+      ? `${formatResourceBytes(data.swap_used)} / ${formatResourceBytes(data.swap_total)}`
+      : '사용 안 함';
+    $('resourceMemoryDetail').textContent = data.running && data.game_memory_limit
+      ? `게임 서버 ${formatResourceBytes(data.game_memory_used)} / ${formatResourceBytes(data.game_memory_limit)}`
+      : '게임 서버 중지됨';
     $('resourceDiskDetail').textContent = `${formatResourceBytes(data.disk_used)} / ${formatResourceBytes(data.disk_total)}`;
     $('resourceNetworkDown').textContent = `↓ ${formatResourceBytes(data.network_received_per_second, true)}`;
     $('resourceNetworkUp').textContent = `↑ ${formatResourceBytes(data.network_sent_per_second, true)}`;

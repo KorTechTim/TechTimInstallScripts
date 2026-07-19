@@ -25,6 +25,14 @@
       </div>
     </header>
 
+    <section class="ad-banner-slot" aria-label="배너 광고 모집 안내">
+      <div class="ad-banner-copy">
+        <span>TECHTIM PARTNERSHIP</span>
+        <h2>배너 광고 모집중</h2>
+        <p>함께 성장할 게임·서버 브랜드 파트너를 기다립니다.</p>
+      </div>
+    </section>
+
     <section class="statusbar" aria-label="서버 상태">
       <div class="status-item"><span class="status-icon game"><img src="/static/minecraft-game-icon.png" alt=""></span><span><small>게임</small><b>Minecraft Java</b></span></div>
       <div class="status-item"><span class="status-icon" id="installIcon">×</span><span><small>설치 상태</small><b id="installStatus">미설치</b></span></div>
@@ -82,7 +90,17 @@
           <div class="resource-monitor-head"><div><h3>서버 리소스</h3><p>Ubuntu OS · 게임 컨테이너 · 데이터 디스크</p></div><span id="resourceStatus">새로고침 : 5초</span></div>
           <div class="resource-grid">
             <div class="resource-item cpu-resource"><div class="resource-item-head"><span>CPU Threads</span><strong id="resourceCpuThreadCount">대기</strong></div><div class="cpu-thread-grid" id="resourceCpuThreads"><span class="cpu-thread-empty">OS 사용률 확인 중</span></div><small>OS 논리 CPU별 전체 사용률</small></div>
-            <div class="resource-item"><div class="resource-item-head"><span>MEM</span><strong id="resourceMemory">0%</strong></div><div class="resource-meter"><span id="resourceMemoryBar"></span></div><small id="resourceMemoryDetail">0 B / 0 B</small></div>
+            <div class="resource-item memory-resource">
+              <div class="resource-item-head"><span>MEM</span><strong id="resourceMemory">0%</strong></div>
+              <div class="resource-meter"><span id="resourceMemoryBar"></span></div>
+              <div class="memory-stat-grid">
+                <div><span>전체</span><strong id="resourceMemoryTotal">0 B</strong></div>
+                <div><span>사용</span><strong id="resourceMemoryUsed">0 B</strong></div>
+                <div><span>사용 가능</span><strong id="resourceMemoryAvailable">0 B</strong></div>
+                <div><span>가상 메모리</span><strong id="resourceSwapDetail">사용 안 함</strong></div>
+              </div>
+              <small id="resourceMemoryDetail">게임 서버 메모리 확인 중</small>
+            </div>
             <div class="resource-item"><div class="resource-item-head"><span>Disk</span><strong id="resourceDisk">0%</strong></div><div class="resource-meter"><span id="resourceDiskBar"></span></div><small id="resourceDiskDetail">0 B / 0 B</small></div>
             <div class="resource-item network"><div class="resource-item-head"><span>Network</span><strong id="resourceNetworkState">대기</strong></div><div class="network-rates"><span id="resourceNetworkDown">↓ 0 B/s</span><span id="resourceNetworkUp">↑ 0 B/s</span></div><small>게임 서버 수신 / 송신</small><button class="public-address" id="resourcePublicAddress" type="button" title="클릭하여 공인 IP 복사" disabled><span>공인 IP</span><strong id="resourcePublicAddressText">확인 중</strong><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg></button></div>
           </div>

@@ -80,6 +80,7 @@ RESOURCE_NETWORK_SAMPLE: dict[str, Any] = {
 OS_CPU_LOCK = threading.Lock()
 OS_CPU_SAMPLE: dict[int, tuple[int, int]] = {}
 PROC_STAT_FILE = Path(os.getenv("PROC_STAT_FILE", "/proc/stat"))
+PROC_MEMINFO_FILE = Path(os.getenv("PROC_MEMINFO_FILE", "/proc/meminfo"))
 PUBLIC_IP_LOCK = threading.Lock()
 PUBLIC_IP_CACHE: dict[str, Any] = {"expires_at": 0.0, "value": ""}
 KST = timezone(timedelta(hours=9), name="KST")
@@ -498,6 +499,20 @@ def run_rcon_command(container, command: str) -> str:
     return output
 
 
+def send_backup_console_command(container, command: str) -> str:
+    if server_container_accepts_native_console(container):
+        try:
+            send_native_console_command(container, command)
+        except (docker.errors.DockerException, OSError, RuntimeError) as error:
+            raise RuntimeError(f"백업 준비 명령({command})의 Native 콘솔 전송에 실패했습니다: {error}") from error
+        return "native"
+    try:
+        run_rcon_command(container, command)
+    except (docker.errors.DockerException, OSError, RuntimeError) as error:
+        raise RuntimeError(f"백업 준비 명령({command})을 서버에 전송하지 못했습니다: {error}") from error
+    return "rcon"
+
+
 def minecraft_backup_filter(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
     parts = Path(info.name).parts
     excluded_directories = {"logs", "cache", ".cache", ".tmp", "packs"}
@@ -547,6 +562,7 @@ def release_backup_operation() -> None:
 def backup_job(reason: str) -> None:
     container = get_container()
     writes_paused = False
+    console_transport = "offline"
     filename_base = datetime.now(KST).strftime("minecraft-%Y%m%d-%H%M%S-KST")
     filename = f"{filename_base}.tgz"
     duplicate = 1
@@ -562,11 +578,10 @@ def backup_job(reason: str) -> None:
         if container:
             container.reload()
             if container.status == "running":
-                run_rcon_command(container, "save-on")
-                run_rcon_command(container, "save-off")
+                console_transport = send_backup_console_command(container, "save-off")
                 writes_paused = True
-                run_rcon_command(container, "save-all flush")
-                time.sleep(1)
+                send_backup_console_command(container, "save-all flush")
+                time.sleep(2)
         if hasattr(os, "sync"):
             os.sync()
         create_backup_archive(destination)
@@ -584,8 +599,9 @@ def backup_job(reason: str) -> None:
             filename=filename,
             size=destination.stat().st_size,
             reason=reason,
+            console_transport=console_transport,
         )
-        append_log(CONTROL_LOG_FILE, f"Minecraft 서버 백업 완료: {filename}")
+        append_log(CONTROL_LOG_FILE, f"Minecraft 서버 백업 완료: {filename} ({console_transport} 콘솔)")
     except Exception as error:
         destination.unlink(missing_ok=True)
         config = read_backup_config()
@@ -600,7 +616,7 @@ def backup_job(reason: str) -> None:
             try:
                 container.reload()
                 if container.status == "running":
-                    run_rcon_command(container, "save-on")
+                    send_backup_console_command(container, "save-on")
             except Exception as error:
                 append_log(CONTROL_LOG_FILE, f"백업 후 자동 저장 재개 확인 필요: {clean_log(str(error))}")
         release_backup_operation()
@@ -745,6 +761,48 @@ def os_cpu_usage() -> tuple[float, list[dict[str, Any]]]:
     return round(average, 1), threads
 
 
+def os_memory_usage() -> dict[str, int | float]:
+    values: dict[str, int] = {}
+    try:
+        for line in PROC_MEMINFO_FILE.read_text(encoding="ascii", errors="ignore").splitlines():
+            key, separator, raw = line.partition(":")
+            if not separator:
+                continue
+            match = re.search(r"\d+", raw)
+            if match:
+                values[key] = int(match.group()) * 1024
+    except OSError:
+        values = {}
+
+    total = max(0, values.get("MemTotal", 0))
+    available = max(0, values.get("MemAvailable", 0))
+    if total and not available:
+        available = max(0, sum(values.get(key, 0) for key in ("MemFree", "Buffers", "Cached", "SReclaimable")) - values.get("Shmem", 0))
+    if not total:
+        try:
+            page_size = int(os.sysconf("SC_PAGE_SIZE"))
+            total = page_size * int(os.sysconf("SC_PHYS_PAGES"))
+            available = page_size * int(os.sysconf("SC_AVPHYS_PAGES"))
+        except (OSError, ValueError):
+            total = 0
+            available = 0
+
+    available = min(total, available) if total else 0
+    used = max(0, total - available)
+    swap_total = max(0, values.get("SwapTotal", 0))
+    swap_free = min(swap_total, max(0, values.get("SwapFree", 0))) if swap_total else 0
+    swap_used = max(0, swap_total - swap_free)
+    percent = used / total * 100 if total else 0.0
+    return {
+        "memory_percent": round(min(100.0, max(0.0, percent)), 1),
+        "memory_used": used,
+        "memory_total": total,
+        "memory_available": available,
+        "swap_used": swap_used,
+        "swap_total": swap_total,
+    }
+
+
 def container_resource_usage(container) -> dict[str, Any]:
     stats = container.stats(stream=False)
     memory = stats.get("memory_stats") or {}
@@ -776,9 +834,9 @@ def container_resource_usage(container) -> dict[str, Any]:
         })
 
     return {
-        "memory_percent": round(min(100.0, max(0.0, memory_percent)), 1),
-        "memory_used": memory_used,
-        "memory_limit": memory_limit,
+        "game_memory_percent": round(min(100.0, max(0.0, memory_percent)), 1),
+        "game_memory_used": memory_used,
+        "game_memory_limit": memory_limit,
         "network_received_per_second": round(received_per_second),
         "network_sent_per_second": round(sent_per_second),
     }
@@ -1707,13 +1765,15 @@ def server_resources(request: Request):
     ensure_dirs()
     disk = shutil.disk_usage(SERVER_DIR)
     cpu_percent, cpu_threads = os_cpu_usage()
+    memory = os_memory_usage()
     resources: dict[str, Any] = {
         "running": False,
         "cpu_percent": cpu_percent,
         "cpu_threads": cpu_threads,
-        "memory_percent": 0.0,
-        "memory_used": 0,
-        "memory_limit": 0,
+        **memory,
+        "game_memory_percent": 0.0,
+        "game_memory_used": 0,
+        "game_memory_limit": 0,
         "disk_percent": round(disk.used / disk.total * 100, 1) if disk.total else 0.0,
         "disk_used": disk.used,
         "disk_total": disk.total,
