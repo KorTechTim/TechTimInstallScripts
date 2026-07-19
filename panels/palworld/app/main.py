@@ -30,7 +30,7 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 GAME_CODE = os.getenv("GAME_CODE", "palworld")
-PANEL_VERSION = os.getenv("PANEL_VERSION", "1.0.0")
+PANEL_VERSION = os.getenv("PANEL_VERSION", "1.1.0")
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 HOST_DATA_DIR = Path(os.getenv("HOST_DATA_DIR", "/opt/techtim/palworld/data"))
@@ -70,6 +70,8 @@ INSTALL_JOB_LOCK = threading.Lock()
 INSTALL_JOB_ACTIVE = False
 PANEL_UPDATE_LOCK = threading.Lock()
 PANEL_UPDATE_ACTIVE = False
+PANEL_UPDATE_CHECK_LOCK = threading.Lock()
+PANEL_UPDATE_CHECK_CACHE: dict[str, Any] = {"expires_at": 0.0, "payload": None}
 RESTART_SCHEDULE_LOCK = threading.RLock()
 RESTART_SCHEDULER_STOP = threading.Event()
 RESTART_SCHEDULER_THREAD: threading.Thread | None = None
@@ -100,7 +102,8 @@ class ConfigRequest(BaseModel):
 
 class RestartScheduleRequest(BaseModel):
     enabled: bool = False
-    restart_time: str = "04:00"
+    restart_times: list[str] = Field(default_factory=list)
+    restart_time: str | None = None
 
 
 class FileExplorerCreateDirRequest(BaseModel):
@@ -403,8 +406,10 @@ def clear_server_control_log() -> None:
 def default_restart_schedule() -> dict:
     return {
         "enabled": False,
+        "restart_times": ["04:00"],
         "restart_time": "04:00",
         "last_run_date": "",
+        "last_run_key": "",
         "last_run_at": "",
         "last_result": "not_run",
         "last_message": "",
@@ -420,24 +425,65 @@ def normalize_restart_time(value: str) -> str:
     return normalized
 
 
+def normalize_restart_times(values: Any) -> list[str]:
+    if isinstance(values, str):
+        values = [values]
+
+    if not isinstance(values, (list, tuple)):
+        raise ValueError("재시작 시각을 한 개 이상 입력해주세요.")
+
+    normalized_times: list[str] = []
+
+    for value in values:
+        if not str(value or "").strip():
+            continue
+
+        normalized = normalize_restart_time(str(value))
+
+        if normalized not in normalized_times:
+            normalized_times.append(normalized)
+
+    if not normalized_times:
+        raise ValueError("재시작 시각을 한 개 이상 입력해주세요.")
+
+    if len(normalized_times) > 3:
+        raise ValueError("재시작 시각은 최대 3개까지 설정할 수 있습니다.")
+
+    return sorted(normalized_times)
+
+
 def load_restart_schedule() -> dict:
     ensure_data_dirs()
 
     with RESTART_SCHEDULE_LOCK:
         schedule = default_restart_schedule()
+        stored_has_restart_times = False
 
         if RESTART_SCHEDULE_FILE.exists():
             try:
                 stored = json.loads(RESTART_SCHEDULE_FILE.read_text(encoding="utf-8"))
                 if isinstance(stored, dict):
+                    stored_has_restart_times = "restart_times" in stored
                     schedule.update(stored)
             except (OSError, json.JSONDecodeError):
                 pass
 
+        stored_times = schedule.get("restart_times")
+
+        if not stored_has_restart_times or not isinstance(stored_times, list) or not stored_times:
+            stored_times = [schedule.get("restart_time", "04:00")]
+
         try:
-            schedule["restart_time"] = normalize_restart_time(schedule.get("restart_time", "04:00"))
+            schedule["restart_times"] = normalize_restart_times(stored_times)
         except ValueError:
-            schedule["restart_time"] = "04:00"
+            schedule["restart_times"] = ["04:00"]
+
+        schedule["restart_time"] = schedule["restart_times"][0]
+
+        if not schedule.get("last_run_key") and schedule.get("last_run_date"):
+            schedule["last_run_key"] = (
+                f"{schedule['last_run_date']}|{schedule['restart_time']}"
+            )
 
         schedule["enabled"] = bool(schedule.get("enabled", False))
         return schedule
@@ -448,7 +494,13 @@ def persist_restart_schedule(schedule: dict) -> dict:
     normalized = default_restart_schedule()
     normalized.update(schedule)
     normalized["enabled"] = bool(normalized.get("enabled", False))
-    normalized["restart_time"] = normalize_restart_time(normalized.get("restart_time", "04:00"))
+    restart_times = normalized.get("restart_times")
+
+    if not isinstance(restart_times, list) or not restart_times:
+        restart_times = [normalized.get("restart_time", "04:00")]
+
+    normalized["restart_times"] = normalize_restart_times(restart_times)
+    normalized["restart_time"] = normalized["restart_times"][0]
 
     with RESTART_SCHEDULE_LOCK:
         temporary_path = RESTART_SCHEDULE_FILE.with_suffix(".tmp")
@@ -466,17 +518,25 @@ def restart_schedule_response(schedule: dict | None = None) -> dict:
     next_run = ""
 
     if current.get("enabled"):
-        hour, minute = (int(part) for part in current["restart_time"].split(":"))
         now = datetime.now(KST)
-        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        today = now.date().isoformat()
+        candidates = []
 
-        is_due_minute = now.strftime("%H:%M") == current["restart_time"]
-        has_run_today = current.get("last_run_date") == now.date().isoformat()
+        for restart_time in current["restart_times"]:
+            hour, minute = (int(part) for part in restart_time.split(":"))
+            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            run_key = f"{today}|{restart_time}"
+            is_due_and_pending = (
+                now.strftime("%H:%M") == restart_time
+                and current.get("last_run_key") != run_key
+            )
 
-        if target <= now and (not is_due_minute or has_run_today):
-            target += timedelta(days=1)
+            if target <= now and not is_due_and_pending:
+                target += timedelta(days=1)
 
-        next_run = target.isoformat(timespec="minutes")
+            candidates.append(target)
+
+        next_run = min(candidates).isoformat(timespec="minutes")
 
     return {
         **current,
@@ -498,16 +558,19 @@ def run_scheduled_restart_if_due() -> None:
 
     with RESTART_SCHEDULE_LOCK:
         schedule = load_restart_schedule()
+        current_time = now.strftime("%H:%M")
 
-        if not schedule.get("enabled") or now.strftime("%H:%M") != schedule["restart_time"]:
+        if not schedule.get("enabled") or current_time not in schedule["restart_times"]:
             return
 
         today = now.date().isoformat()
+        run_key = f"{today}|{current_time}"
 
-        if schedule.get("last_run_date") == today:
+        if schedule.get("last_run_key") == run_key:
             return
 
         schedule["last_run_date"] = today
+        schedule["last_run_key"] = run_key
         schedule["last_run_at"] = now.isoformat(timespec="seconds")
         schedule["last_result"] = "running"
         schedule["last_message"] = "예약 재시작을 처리하는 중입니다."
@@ -533,7 +596,7 @@ def run_scheduled_restart_if_due() -> None:
             return
 
         write_server_control_log(
-            f"KST {schedule['restart_time']} 예약에 따라 Palworld 게임 서버 컨테이너를 재시작합니다."
+            f"KST {current_time} 예약에 따라 Palworld 게임 서버 컨테이너를 재시작합니다."
         )
         container.restart(timeout=15)
         message = "예약된 Palworld 게임 서버 컨테이너 재시작이 완료되었습니다."
@@ -637,6 +700,52 @@ def read_panel_update_status() -> dict:
     status = default_panel_update_status()
     status.update(stored)
     return status
+
+
+def panel_update_check_payload() -> dict:
+    now = time.monotonic()
+    with PANEL_UPDATE_CHECK_LOCK:
+        cached = PANEL_UPDATE_CHECK_CACHE.get("payload")
+        if cached and now < float(PANEL_UPDATE_CHECK_CACHE.get("expires_at") or 0):
+            return dict(cached)
+
+        try:
+            client = docker.from_env()
+            current_container = client.containers.get(PANEL_CONTAINER_NAME)
+            current_container.reload()
+            current_image = current_container.image
+            current_image.reload()
+            current_image_id = current_image.id
+            current_digests = {
+                str(value).rsplit("@", 1)[-1].lower()
+                for value in (current_image.attrs.get("RepoDigests") or [])
+                if "@" in str(value)
+            }
+            latest_image_id = str(client.images.get_registry_data(PANEL_IMAGE).id or "").lower()
+
+            if not latest_image_id or not current_digests:
+                raise RuntimeError("실행 중인 패널 이미지의 digest를 확인할 수 없습니다.")
+
+            payload = {
+                "status": "ok",
+                "update_available": latest_image_id not in current_digests,
+                "current_version": PANEL_VERSION,
+                "current_image_id": current_image_id,
+                "latest_image_id": latest_image_id,
+            }
+            cache_seconds = 300
+        except Exception as error:
+            payload = {
+                "status": "unavailable",
+                "update_available": False,
+                "current_version": PANEL_VERSION,
+                "message": sanitize_log_text(str(error)),
+            }
+            cache_seconds = 60
+
+        PANEL_UPDATE_CHECK_CACHE["payload"] = payload
+        PANEL_UPDATE_CHECK_CACHE["expires_at"] = now + cache_seconds
+        return dict(payload)
 
 
 def is_panel_updater_running() -> bool:
@@ -904,7 +1013,7 @@ PALWORLD_OPTION_DEFAULTS = {
     "CollectionObjectHpRate": 1.0,
     "CollectionObjectRespawnSpeedRate": 1.0,
     "EnemyDropItemRate": 1.0,
-    "DeathPenalty": "All",
+    "DeathPenalty": "Item",
     "bEnablePlayerToPlayerDamage": False,
     "bEnableFriendlyFire": False,
     "bEnableInvaderEnemy": True,
@@ -913,15 +1022,16 @@ PALWORLD_OPTION_DEFAULTS = {
     "bEnableAimAssistPad": True,
     "bEnableAimAssistKeyboard": False,
     "DropItemMaxNum": 3000,
+    "PhysicsActiveDropItemMaxNum": -1,
     "DropItemMaxNum_UNKO": 100,
     "BaseCampMaxNum": 128,
-    "BaseCampMaxNumInGuild": 3,
+    "BaseCampMaxNumInGuild": 4,
     "BaseCampWorkerMaxNum": 15,
     "DropItemAliveMaxHours": 1.0,
     "bAutoResetGuildNoOnlinePlayers": False,
     "AutoResetGuildTimeNoOnlinePlayers": 72.0,
     "GuildPlayerMaxNum": 20,
-    "PalEggDefaultHatchingTime": 72.0,
+    "PalEggDefaultHatchingTime": 1.0,
     "WorkSpeedRate": 1.0,
     "AutoSaveSpan": 30.0,
     "CrossplayPlatforms": "(Steam,Xbox,PS5,Mac)",
@@ -934,7 +1044,7 @@ PALWORLD_OPTION_DEFAULTS = {
     "bCanPickupOtherGuildDeathPenaltyDrop": False,
     "bEnableNonLoginPenalty": True,
     "bEnableFastTravel": True,
-    "bIsStartLocationSelectByMap": True,
+    "bIsStartLocationSelectByMap": False,
     "bExistPlayerAfterLogout": False,
     "bEnableDefenseOtherGuildPlayer": False,
     "bInvisibleOtherGuildBaseCampAreaFX": False,
@@ -956,21 +1066,26 @@ PALWORLD_OPTION_DEFAULTS = {
     "bIsUseBackupSaveData": True,
     "Region": "",
     "bUseAuth": True,
-    "BanListURL": "https://api.palworldgame.com/api/banlist.txt",
+    "BanListURL": "https://b.palworldgame.com/api/banlist.txt",
     "SupplyDropSpan": 180,
-    "ChatPostLimitPerMinute": 10,
+    "ChatPostLimitPerMinute": 30,
     "MaxBuildingLimitNum": 0,
     "ServerReplicatePawnCullDistance": 15000.0,
     "bAllowGlobalPalboxExport": True,
     "bAllowGlobalPalboxImport": False,
     "EquipmentDurabilityDamageRate": 1.0,
     "ItemContainerForceMarkDirtyInterval": 1.0,
+    "PlayerDataPalStorageUpdateCheckTickInterval": 1.0,
     "ItemCorruptionMultiplier": 1.0,
+    "MonsterFarmActionSpeedRate": 1.0,
     "bEnableFastTravelOnlyBaseCamp": False,
     "bAllowClientMod": True,
     "bIsShowJoinLeftMessage": True,
-    "DenyTechnologyList": "()",
+    "DenyTechnologyList": "",
     "GuildRejoinCooldownMinutes": 0,
+    "AutoTransferMasterCheckIntervalSeconds": 3600.0,
+    "AutoTransferMasterThresholdDays": 14,
+    "MaxGuildsPerFrame": 10,
     "BlockRespawnTime": 5.0,
     "RespawnPenaltyDurationThreshold": 0.0,
     "RespawnPenaltyTimeScale": 2.0,
@@ -979,11 +1094,16 @@ PALWORLD_OPTION_DEFAULTS = {
     "AdditionalDropItemWhenPlayerKillingInPvPMode": "PlayerDropItem",
     "AdditionalDropItemNumWhenPlayerKillingInPvPMode": 1,
     "bAdditionalDropItemWhenPlayerKillingInPvPMode": False,
+    "bEnableVoiceChat": False,
+    "VoiceChatMaxVolumeDistance": 3000.0,
+    "VoiceChatZeroVolumeDistance": 15000.0,
     "bAllowEnhanceStat_Health": True,
     "bAllowEnhanceStat_Attack": True,
     "bAllowEnhanceStat_Stamina": True,
     "bAllowEnhanceStat_Weight": True,
     "bAllowEnhanceStat_WorkSpeed": True,
+    "bEnableBuildingPlayerUIdDisplay": False,
+    "BuildingNameDisplayCacheTTLSeconds": 60,
 }
 
 
@@ -994,6 +1114,7 @@ PALWORLD_RAW_STRING_OPTIONS = {
     "DeathPenalty",
     "LogFormatType",
     "AdditionalDropItemWhenPlayerKillingInPvPMode",
+    "DenyTechnologyList",
 }
 PALWORLD_ADVANCED_KEYS = {
     "Difficulty",
@@ -1031,6 +1152,7 @@ PALWORLD_ADVANCED_KEYS = {
     "bActiveUNKO",
     "EnablePredatorBossPal",
     "DropItemMaxNum",
+    "PhysicsActiveDropItemMaxNum",
     "DropItemMaxNum_UNKO",
     "BaseCampMaxNum",
     "BaseCampMaxNumInGuild",
@@ -1076,13 +1198,18 @@ PALWORLD_ADVANCED_KEYS = {
     "bAllowGlobalPalboxImport",
     "EquipmentDurabilityDamageRate",
     "ItemContainerForceMarkDirtyInterval",
+    "PlayerDataPalStorageUpdateCheckTickInterval",
     "ItemCorruptionMultiplier",
+    "MonsterFarmActionSpeedRate",
     "bEnableFastTravelOnlyBaseCamp",
     "bAllowClientMod",
     "bIsShowJoinLeftMessage",
     "LogFormatType",
     "DenyTechnologyList",
     "GuildRejoinCooldownMinutes",
+    "AutoTransferMasterCheckIntervalSeconds",
+    "AutoTransferMasterThresholdDays",
+    "MaxGuildsPerFrame",
     "BlockRespawnTime",
     "RespawnPenaltyDurationThreshold",
     "RespawnPenaltyTimeScale",
@@ -1091,11 +1218,16 @@ PALWORLD_ADVANCED_KEYS = {
     "AdditionalDropItemWhenPlayerKillingInPvPMode",
     "AdditionalDropItemNumWhenPlayerKillingInPvPMode",
     "bAdditionalDropItemWhenPlayerKillingInPvPMode",
+    "bEnableVoiceChat",
+    "VoiceChatMaxVolumeDistance",
+    "VoiceChatZeroVolumeDistance",
     "bAllowEnhanceStat_Health",
     "bAllowEnhanceStat_Attack",
     "bAllowEnhanceStat_Stamina",
     "bAllowEnhanceStat_Weight",
     "bAllowEnhanceStat_WorkSpeed",
+    "bEnableBuildingPlayerUIdDisplay",
+    "BuildingNameDisplayCacheTTLSeconds",
 }
 
 
@@ -1226,6 +1358,7 @@ def read_palworld_options() -> dict:
 
     merged = PALWORLD_OPTION_DEFAULTS.copy()
     merged.update(split_palworld_options(match.group(1)))
+    merged.pop("AllowConnectPlatform", None)
     return merged
 
 
@@ -1946,7 +2079,13 @@ def dashboard(request: Request):
   <style>
     body { min-height: 100vh; margin: 0; font-family: Arial, sans-serif; background: linear-gradient(135deg, rgba(9, 22, 29, 0.42), rgba(20, 53, 42, 0.28)), url("/static/palworld-panel-bg.png") center / cover fixed no-repeat; color: #1f2937; }
     .wrap { max-width: 1180px; margin: 40px auto; background: rgba(255, 255, 255, 0.65); border: 1px solid rgba(255,255,255,0.58); border-radius: 16px; padding: 40px; box-shadow: 0 24px 80px rgba(0,0,0,0.35); backdrop-filter: blur(12px); }
+    .panel-copyright { box-sizing: border-box; width: min(1260px, calc(100% - 28px)); margin: -28px auto 26px; padding-left: 3px; color: #ffffff; font-size: 11px; font-weight: 600; line-height: 1.5; text-shadow: 0 1px 4px #000000, 0 0 10px #000000; opacity: 0.9; }
     .topbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+    .brand { display: flex; align-items: center; gap: 13px; min-width: 0; }
+    .brand-icon { display: grid; place-items: center; flex: 0 0 48px; width: 48px; height: 48px; overflow: hidden; border: 1px solid rgba(15, 118, 110, 0.48); border-radius: 10px; background: rgba(255, 255, 255, 0.88); box-shadow: 0 8px 20px rgba(17, 24, 39, 0.14); }
+    .brand-icon img { display: block; width: 100%; height: 100%; object-fit: cover; }
+    .brand-copy { min-width: 0; }
+    .brand-copy small { display: block; margin-top: 3px; color: #6b7280; font-size: 12px; font-weight: 700; }
     h1 { margin: 0; font-size: 34px; }
     .top-links { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
     .top-link { display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 38px; padding: 0; border: 1px solid #d1d5db; border-radius: 999px; color: #4b5563; background: #f9fafb; text-decoration: none; appearance: none; line-height: 1; }
@@ -1955,6 +2094,11 @@ def dashboard(request: Request):
     .top-link svg { display: block; width: 21px; height: 21px; }
     .top-update { color: #52606d; }
     .top-update:hover { color: #0f766e; }
+    .panel-update-anchor { position: relative; display: inline-flex; }
+    .panel-update-notice { position: absolute; z-index: 70; top: calc(100% + 11px); right: -8px; box-sizing: border-box; width: 280px; padding: 11px 13px; border: 1px solid #5eead4; border-radius: 8px; background: #123b3a; color: #ffffff; font-size: 13px; font-weight: 700; line-height: 1.45; text-align: left; box-shadow: 0 12px 30px rgba(15, 23, 42, 0.34); opacity: 0; visibility: hidden; transform: translateY(-4px); pointer-events: none; transition: opacity 0.18s ease, transform 0.18s ease, visibility 0.18s; }
+    .panel-update-notice::before { content: ""; position: absolute; right: 18px; bottom: 100%; border-width: 0 8px 8px; border-style: solid; border-color: transparent transparent #5eead4; }
+    .panel-update-notice::after { content: ""; position: absolute; right: 19px; bottom: 100%; border-width: 0 7px 7px; border-style: solid; border-color: transparent transparent #123b3a; }
+    .panel-update-notice.show { opacity: 1; visibility: visible; transform: translateY(0); }
     .top-logout { color: #374151; }
     .top-logout:hover { color: #111827; }
     .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 24px; }
@@ -1974,6 +2118,11 @@ def dashboard(request: Request):
     .value { font-size: 20px; font-weight: bold; }
     .actions { margin-top: 24px; display: grid; grid-template-columns: repeat(auto-fit, minmax(136px, 1fr)); gap: 12px; align-items: stretch; }
     .actions button { width: 100%; min-height: 48px; }
+    .log-mode-toggle { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); min-height: 48px; overflow: hidden; border: 1px solid #cbd5e1; border-radius: 8px; background: rgba(248,250,252,0.92); }
+    .actions .log-mode-toggle button { min-width: 0; min-height: 46px; padding: 8px 10px; border: 0; border-radius: 0; background: transparent; color: #475569; font-size: 12px; white-space: nowrap; box-shadow: none; }
+    .actions .log-mode-toggle button + button { border-left: 1px solid #cbd5e1; }
+    .actions .log-mode-toggle button:hover { background: #e2e8f0; color: #1e293b; }
+    .actions .log-mode-toggle button.is-active { background: #0f766e; color: #ffffff; }
     .config { margin-top: 24px; padding: 20px; border: 1px solid rgba(229, 231, 235, 0.88); border-radius: 12px; background: rgba(255, 255, 255, 0.9); transition: background 0.2s ease, opacity 0.2s ease; }
     .config-body { transition: filter 0.2s ease, opacity 0.2s ease; }
     .config.locked { background: rgba(255, 255, 255, 0.66); }
@@ -2002,18 +2151,19 @@ def dashboard(request: Request):
     .modal-head h2 { margin: 0; font-size: 22px; }
     .modal-close { width: 40px; height: 40px; border-radius: 50%; padding: 0; background: #111827; color: #fff; }
     .modal-body { overflow: auto; padding: 20px; }
-    .restart-modal { width: min(620px, 100%); }
+    .restart-modal { width: min(900px, 100%); }
     .restart-modal-body { display: grid; gap: 18px; padding: 24px; background: linear-gradient(145deg, rgba(240,253,250,0.98), rgba(239,246,255,0.98)); }
     .restart-modal-intro { display: grid; grid-template-columns: 54px minmax(0, 1fr); align-items: center; gap: 14px; padding: 16px; border: 1px solid #bae6d3; border-radius: 12px; background: rgba(255,255,255,0.82); }
     .restart-modal-intro-icon { display: grid; place-items: center; width: 54px; height: 54px; border-radius: 10px; background: #0f766e; color: #ffffff; }
     .restart-modal-intro-icon svg { width: 30px; height: 30px; }
     .restart-modal-intro strong { display: block; margin-bottom: 4px; color: #134e4a; }
     .restart-modal-intro p { margin: 0; color: #64748b; font-size: 13px; line-height: 1.45; }
-    .restart-modal-controls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 1fr); gap: 14px; }
+    .restart-modal-controls { display: grid; grid-template-columns: minmax(190px, 1.2fr) repeat(3, minmax(150px, 1fr)); gap: 12px; }
     .restart-modal-field { min-height: 84px; padding: 14px; border: 1px solid #d1d5db; border-radius: 12px; background: #ffffff; }
     .restart-toggle { display: flex; align-items: center; gap: 9px; height: 100%; margin: 0; font-size: 15px; }
     .restart-toggle input { width: 18px; height: 18px; margin: 0; }
     .restart-time-field input { margin-top: 8px; }
+    .restart-time-field small { display: block; margin-top: 6px; color: #94a3b8; font-size: 10px; line-height: 1.35; }
     .restart-schedule-status { min-height: 20px; padding: 12px 14px; border-radius: 10px; background: #e6f4ef; color: #315f55; font-size: 12px; line-height: 1.5; }
     .restart-save-wrap { position: relative; display: inline-flex; }
     .panel-update-modal { width: min(560px, 100%); }
@@ -2104,8 +2254,14 @@ def dashboard(request: Request):
     .log { margin-top: 24px; background: #111827; color: #d1d5db; border-radius: 12px; padding: 18px; min-height: 192px; max-height: 300px; overflow: auto; font-family: Consolas, Monaco, monospace; font-size: 13px; white-space: pre-wrap; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04); }
     @media (max-width: 900px) {
       .wrap { margin: 0; border-radius: 0; padding: 20px; }
+      .panel-copyright { width: calc(100% - 24px); margin: 12px auto 20px; padding-left: 0; text-align: center; font-size: 10px; }
       .topbar { align-items: flex-start; flex-direction: column; }
       .top-links { justify-content: flex-start; }
+      .brand-icon { flex-basis: 44px; width: 44px; height: 44px; }
+      h1 { font-size: 26px; }
+      .panel-update-notice { right: auto; left: -86px; width: min(280px, calc(100vw - 40px)); }
+      .panel-update-notice::before { right: auto; left: 104px; }
+      .panel-update-notice::after { right: auto; left: 105px; }
       .grid, .config-grid { grid-template-columns: 1fr; }
       .server-mode-line { margin-top: 8px; }
       .advanced-card { grid-template-columns: 1fr; }
@@ -2128,7 +2284,13 @@ def dashboard(request: Request):
 <body>
   <div class="wrap">
     <div class="topbar">
-      <h1>TechTim Palworld Server Panel</h1>
+      <div class="brand">
+        <span class="brand-icon" aria-hidden="true"><img src="/static/techtim-profile.png" alt=""></span>
+        <div class="brand-copy">
+          <h1>TechTim Palworld Server Panel</h1>
+          <small>Dedicated Server</small>
+        </div>
+      </div>
       <div class="top-links">
         <a class="top-link" href="https://discord.gg/Awy6Uh38KW" target="_blank" rel="noopener noreferrer" title="디스코드 접속" aria-label="디스코드 접속">
           <img src="https://cdn.simpleicons.org/discord/5865F2" alt="">
@@ -2136,12 +2298,15 @@ def dashboard(request: Request):
         <a class="top-link" href="https://www.youtube.com/@kortechtim" target="_blank" rel="noopener noreferrer" title="유튜브채널 접속" aria-label="유튜브채널 접속">
           <img src="https://cdn.simpleicons.org/youtube/FF0000" alt="">
         </a>
-        <button class="top-link top-update" type="button" onclick="openPanelUpdateModal()" title="TechTim 구동기 업데이트" aria-label="TechTim 구동기 업데이트">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <circle cx="12" cy="12" r="3" />
-            <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 9 19.37a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.63 15a1.7 1.7 0 0 0-1.55-1H3v-4h.08A1.7 1.7 0 0 0 4.63 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.63h.01A1.7 1.7 0 0 0 10 3.08V3h4v.08a1.7 1.7 0 0 0 1.03 1.55 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.37 9v.01A1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z" />
-          </svg>
-        </button>
+        <span class="panel-update-anchor">
+          <button id="panelUpdateButton" class="top-link top-update" type="button" onclick="openPanelUpdateModal()" title="TechTim 구동기 업데이트" aria-label="TechTim 구동기 업데이트">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 9 19.37a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.63 15a1.7 1.7 0 0 0-1.55-1H3v-4h.08A1.7 1.7 0 0 0 4.63 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.63h.01A1.7 1.7 0 0 0 10 3.08V3h4v.08a1.7 1.7 0 0 0 1.03 1.55 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.37 9v.01A1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z" />
+            </svg>
+          </button>
+          <span id="panelUpdateNotice" class="panel-update-notice" role="status" aria-live="polite">업데이트가 있습니다. 웹패널을 업그레이드하세요</span>
+        </span>
         <button class="top-link top-logout" type="button" onclick="logout()" title="로그아웃" aria-label="로그아웃">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M5 21V5a2 2 0 0 1 2-2h7" />
@@ -2380,8 +2545,19 @@ def dashboard(request: Request):
               </label>
             </div>
             <label class="restart-modal-field restart-time-field">
-              <span>재시작 시각 (KST)</span>
-              <input id="restartScheduleTime" type="time" value="04:00" step="60">
+              <span>1차 재시작 (KST)</span>
+              <input id="restartScheduleTime1" type="time" value="04:00" step="60">
+              <small>필수 시각</small>
+            </label>
+            <label class="restart-modal-field restart-time-field">
+              <span>2차 재시작 (KST)</span>
+              <input id="restartScheduleTime2" type="time" step="60">
+              <small>선택 사항</small>
+            </label>
+            <label class="restart-modal-field restart-time-field">
+              <span>3차 재시작 (KST)</span>
+              <input id="restartScheduleTime3" type="time" step="60">
+              <small>선택 사항</small>
             </label>
           </div>
           <div id="restartScheduleStatus" class="restart-schedule-status">예약 정보를 불러오는 중입니다.</div>
@@ -2400,9 +2576,10 @@ def dashboard(request: Request):
       <button id="installBtn" onclick="requestInstall()">엔진 설치</button>
       <button class="secondary" onclick="startServer()">서버 시작</button>
       <button id="serverStopBtn" class="secondary" onclick="stopServer()">서버 중지</button>
-      <button class="secondary" onclick="restartServer()">서버 재시작</button>
-      <button class="secondary" onclick="loadServerLog()">서버 로그 보기</button>
-      <button class="secondary" onclick="loadLog()">설치 로그 보기</button>
+      <div class="log-mode-toggle" role="group" aria-label="로그 선택">
+        <button id="serverLogToggle" type="button" onclick="loadServerLog()" aria-pressed="false">서버 로그</button>
+        <button id="installLogToggle" class="is-active" type="button" onclick="loadLog()" aria-pressed="true">설치 로그</button>
+      </div>
       <button id="fileExplorerBtn" class="secondary" onclick="openFileExplorer()">서버 디렉토리 탐색기</button>
       <input id="fileExplorerUploadInput" type="file" onchange="uploadExplorerFile()" style="display:none">
       <input id="fileExplorerFolderUploadInput" type="file" webkitdirectory directory multiple onchange="uploadExplorerFolder()" style="display:none">
@@ -2446,6 +2623,7 @@ def dashboard(request: Request):
     <div id="result" class="result" hidden></div>
 
   </div>
+  <footer class="panel-copyright">© 2026 TechTim. All rights reserved. 무단 복제 및 배포를 금합니다.</footer>
 
   <script>
     let currentLogMode = "install";
@@ -2455,6 +2633,22 @@ def dashboard(request: Request):
     let panelUpdateRequested = false;
     let panelUpdatePollTimer = null;
     let panelUpdateReloadScheduled = false;
+
+    function setCurrentLogMode(mode) {
+      currentLogMode = mode === "server" ? "server" : "install";
+      const serverButton = document.getElementById("serverLogToggle");
+      const installButton = document.getElementById("installLogToggle");
+
+      if (!serverButton || !installButton) {
+        return;
+      }
+
+      const serverSelected = currentLogMode === "server";
+      serverButton.classList.toggle("is-active", serverSelected);
+      installButton.classList.toggle("is-active", !serverSelected);
+      serverButton.setAttribute("aria-pressed", String(serverSelected));
+      installButton.setAttribute("aria-pressed", String(!serverSelected));
+    }
 
     const advancedOptionGroups = [
       {
@@ -2480,6 +2674,7 @@ def dashboard(request: Request):
           { key: "CollectionDropRate", label: "채집 드롭 배율", type: "number", step: "0.1", min: "0.1", max: "10" },
           { key: "EnemyDropItemRate", label: "적 드롭 배율", type: "number", step: "0.1", min: "0.1", max: "10" },
           { key: "WorkSpeedRate", label: "작업 속도", type: "number", step: "0.1", min: "0.1", max: "10" },
+          { key: "MonsterFarmActionSpeedRate", label: "목장 생산 속도", type: "number", step: "0.1", min: "0.1", max: "10" },
           { key: "PalEggDefaultHatchingTime", label: "알 부화 시간", type: "number", step: "0.1", min: "0", max: "240" }
         ]
       },
@@ -2540,6 +2735,10 @@ def dashboard(request: Request):
           { key: "BaseCampMaxNumInGuild", label: "길드 거점 최대 수", type: "number", step: "1", min: "1", max: "10" },
           { key: "BaseCampWorkerMaxNum", label: "거점 작업 팰 수", type: "number", step: "1", min: "1", max: "50" },
           { key: "GuildPlayerMaxNum", label: "길드 최대 인원", type: "number", step: "1", min: "1", max: "100" },
+          { key: "GuildRejoinCooldownMinutes", label: "길드 재가입 대기(분)", type: "number", step: "1", min: "0" },
+          { key: "AutoTransferMasterCheckIntervalSeconds", label: "길드장 위임 검사 간격(초)", type: "number", step: "60", min: "60" },
+          { key: "AutoTransferMasterThresholdDays", label: "길드장 위임 비활성 기준(일)", type: "number", step: "1", min: "0" },
+          { key: "MaxGuildsPerFrame", label: "프레임당 길드 처리 수", type: "number", step: "1", min: "1" },
           { key: "bAutoResetGuildNoOnlinePlayers", label: "미접속 길드 자동 초기화", type: "checkbox" },
           { key: "AutoResetGuildTimeNoOnlinePlayers", label: "길드 초기화 시간", type: "number", step: "1", min: "1", max: "720" },
           { key: "bAllowGlobalPalboxExport", label: "글로벌 팰박스 내보내기", type: "checkbox" },
@@ -2548,7 +2747,9 @@ def dashboard(request: Request):
           { key: "bBuildAreaLimit", label: "건축 구역 제한", type: "checkbox" },
           { key: "bCanPickupOtherGuildDeathPenaltyDrop", label: "타 길드 사망 드롭 줍기", type: "checkbox" },
           { key: "bEnableDefenseOtherGuildPlayer", label: "타 길드 방어 허용", type: "checkbox" },
-          { key: "bInvisibleOtherGuildBaseCampAreaFX", label: "타 길드 거점 표시 숨김", type: "checkbox" }
+          { key: "bInvisibleOtherGuildBaseCampAreaFX", label: "타 길드 거점 표시 숨김", type: "checkbox" },
+          { key: "bEnableBuildingPlayerUIdDisplay", label: "건축물 생성자 UID 표시", type: "checkbox" },
+          { key: "BuildingNameDisplayCacheTTLSeconds", label: "건축물 이름 캐시(초)", type: "number", step: "1", min: "0" }
         ]
       },
       {
@@ -2558,15 +2759,52 @@ def dashboard(request: Request):
           { key: "SupplyDropSpan", label: "보급품 드롭 간격", type: "number", step: "1", min: "0", max: "720" },
           { key: "ChatPostLimitPerMinute", label: "분당 채팅 제한", type: "number", step: "1", min: "1", max: "120" },
           { key: "DropItemMaxNum", label: "드롭 아이템 최대 수", type: "number", step: "1", min: "0", max: "10000" },
+          { key: "PhysicsActiveDropItemMaxNum", label: "물리 활성 드롭 최대 수", type: "number", step: "1", min: "-1" },
           { key: "DropItemMaxNum_UNKO", label: "UNKO 드롭 최대 수", type: "number", step: "1", min: "0", max: "1000" },
           { key: "DropItemAliveMaxHours", label: "드롭 아이템 유지 시간", type: "number", step: "0.1", min: "0", max: "24" },
           { key: "ServerReplicatePawnCullDistance", label: "서버 복제 거리", type: "number", step: "100", min: "1000", max: "50000" },
+          { key: "PlayerDataPalStorageUpdateCheckTickInterval", label: "팰 저장소 검사 간격(초)", type: "number", step: "0.1", min: "0.1" },
+          { key: "ItemContainerForceMarkDirtyInterval", label: "아이템 컨테이너 동기화(초)", type: "number", step: "0.1", min: "0.1" },
+          { key: "ItemCorruptionMultiplier", label: "아이템 부패 속도", type: "number", step: "0.1", min: "0" },
           { key: "bEnableNonLoginPenalty", label: "미접속 패널티", type: "checkbox" },
           { key: "bIsUseBackupSaveData", label: "공식 백업 저장 사용", type: "checkbox" },
           { key: "bShowPlayerList", label: "플레이어 목록 표시", type: "checkbox" },
           { key: "bIsShowJoinLeftMessage", label: "입장/퇴장 메시지", type: "checkbox" },
           { key: "bAllowClientMod", label: "클라이언트 모드 허용", type: "checkbox" },
           { key: "LogFormatType", label: "로그 형식", type: "select", options: ["Text", "Json"] }
+        ]
+      },
+      {
+        title: "PvP/부활",
+        fields: [
+          { key: "BlockRespawnTime", label: "기본 부활 대기(초)", type: "number", step: "0.1", min: "0" },
+          { key: "RespawnPenaltyDurationThreshold", label: "부활 페널티 생존 기준(초)", type: "number", step: "0.1", min: "0" },
+          { key: "RespawnPenaltyTimeScale", label: "부활 대기 시간 배율", type: "number", step: "0.1", min: "0" },
+          { key: "bDisplayPvPItemNumOnWorldMap_BaseCamp", label: "거점 PvP 아이템 수 표시", type: "checkbox" },
+          { key: "bDisplayPvPItemNumOnWorldMap_Player", label: "플레이어 PvP 아이템 수 표시", type: "checkbox" },
+          { key: "bAdditionalDropItemWhenPlayerKillingInPvPMode", label: "PvP 처치 추가 드롭", type: "checkbox" },
+          { key: "AdditionalDropItemWhenPlayerKillingInPvPMode", label: "PvP 추가 드롭 아이템 ID", type: "text" },
+          { key: "AdditionalDropItemNumWhenPlayerKillingInPvPMode", label: "PvP 추가 드롭 수량", type: "number", step: "1", min: "0" }
+        ]
+      },
+      {
+        title: "능력치/기술",
+        fields: [
+          { key: "Difficulty", label: "난이도 프리셋", type: "select", options: ["None", "Casual", "Normal", "Hard"] },
+          { key: "DenyTechnologyList", label: "비활성화 기술 목록", type: "text" },
+          { key: "bAllowEnhanceStat_Health", label: "HP 능력치 강화 허용", type: "checkbox" },
+          { key: "bAllowEnhanceStat_Attack", label: "공격력 능력치 강화 허용", type: "checkbox" },
+          { key: "bAllowEnhanceStat_Stamina", label: "스태미나 능력치 강화 허용", type: "checkbox" },
+          { key: "bAllowEnhanceStat_Weight", label: "소지 중량 능력치 강화 허용", type: "checkbox" },
+          { key: "bAllowEnhanceStat_WorkSpeed", label: "작업 속도 능력치 강화 허용", type: "checkbox" }
+        ]
+      },
+      {
+        title: "음성 채팅",
+        fields: [
+          { key: "bEnableVoiceChat", label: "근접 음성 채팅", type: "checkbox" },
+          { key: "VoiceChatMaxVolumeDistance", label: "음량 감쇠 시작 거리", type: "number", step: "100", min: "0" },
+          { key: "VoiceChatZeroVolumeDistance", label: "음량 소멸 거리", type: "number", step: "100", min: "0" }
         ]
       },
       {
@@ -2733,7 +2971,7 @@ def dashboard(request: Request):
       const result = document.getElementById("result");
       const isUpdate = btn.dataset.operation === "update";
 
-      currentLogMode = "install";
+      setCurrentLogMode("install");
       btn.disabled = true;
       result.innerText = isUpdate
         ? "Palworld 서버 엔진 업데이트를 시작하는 중입니다..."
@@ -2771,13 +3009,13 @@ def dashboard(request: Request):
 
       if (isRunningStatus(currentStatus)) {
         alert("이미 서버가 동작중입니다.");
-        currentLogMode = "server";
+        setCurrentLogMode("server");
         await loadServerLog({ preserveWhenEmpty: true });
         return;
       }
 
       result.innerText = "Palworld 서버를 시작하는 중입니다...";
-      currentLogMode = "server";
+      setCurrentLogMode("server");
       setLogText("[패널] Palworld 서버를 시작하는 중입니다...");
 
       try {
@@ -2800,12 +3038,12 @@ def dashboard(request: Request):
           (data.container ? "컨테이너: " + data.container : "");
 
         if (data.status === "config_error") {
-          currentLogMode = "server";
+          setCurrentLogMode("server");
           setLogText("[패널] 서버 시작이 차단되었습니다.\\n" + (data.message || ""));
           return;
         }
 
-        currentLogMode = "server";
+        setCurrentLogMode("server");
         await loadServerStatus();
         await loadServerLog({ preserveWhenEmpty: true });
 
@@ -2864,7 +3102,7 @@ def dashboard(request: Request):
 
       setServerStopModalState("stopping", "Palworld 서버를 안전하게 종료하고 있습니다.");
       result.innerText = "Palworld 서버를 중지하는 중입니다...";
-      currentLogMode = "server";
+      setCurrentLogMode("server");
       document.getElementById("serverStatus").innerText = displayServerStatus("stopping");
       updateServerStatusIcon("stopping");
       setLogText("[패널] Palworld 서버 중지 요청을 보냈습니다...");
@@ -2886,7 +3124,7 @@ def dashboard(request: Request):
           "메시지: " + (data.message || "") + "\\n" +
           (data.container ? "컨테이너: " + data.container : "");
 
-        currentLogMode = "server";
+        setCurrentLogMode("server");
         if (data.status === "stopped" || data.status === "not_created") {
           document.getElementById("serverStatus").innerText = displayServerStatus(data.status);
           updateServerStatusIcon(data.status);
@@ -2924,7 +3162,7 @@ def dashboard(request: Request):
           "메시지: " + (data.message || "") + "\\n" +
           (data.container ? "컨테이너: " + data.container : "");
 
-        currentLogMode = "server";
+        setCurrentLogMode("server");
         await loadServerStatus();
         await loadServerLog();
 
@@ -3542,6 +3780,11 @@ def dashboard(request: Request):
       fillAdvancedOptions(advancedOptions);
 
       const modal = document.getElementById("advancedModal");
+
+      if (modal.parentElement !== document.body) {
+        document.body.appendChild(modal);
+      }
+
       modal.classList.add("show");
       modal.setAttribute("aria-hidden", "false");
     }
@@ -3658,6 +3901,11 @@ def dashboard(request: Request):
     async function openRestartScheduleSettings() {
       await loadRestartSchedule(true);
       const modal = document.getElementById("restartScheduleModal");
+
+      if (modal.parentElement !== document.body) {
+        document.body.appendChild(modal);
+      }
+
       modal.classList.add("show");
       modal.setAttribute("aria-hidden", "false");
     }
@@ -3681,16 +3929,22 @@ def dashboard(request: Request):
 
     function renderRestartSchedule(schedule, fillControls) {
       const enabled = Boolean(schedule && schedule.enabled);
-      const restartTime = (schedule && schedule.restart_time) || "04:00";
+      const restartTimes = Array.isArray(schedule && schedule.restart_times) && schedule.restart_times.length
+        ? schedule.restart_times.slice(0, 3)
+        : [(schedule && schedule.restart_time) || "04:00"];
       const summary = document.getElementById("restartScheduleSummary");
 
       if (summary) {
-        summary.innerText = enabled ? "매일 " + restartTime + " KST" : "자동 재시작 꺼짐";
+        summary.innerText = enabled
+          ? "매일 " + restartTimes.join(" · ") + " KST"
+          : "자동 재시작 꺼짐";
       }
 
       if (fillControls !== false) {
         document.getElementById("restartScheduleEnabled").checked = enabled;
-        document.getElementById("restartScheduleTime").value = restartTime;
+        document.getElementById("restartScheduleTime1").value = restartTimes[0] || "04:00";
+        document.getElementById("restartScheduleTime2").value = restartTimes[1] || "";
+        document.getElementById("restartScheduleTime3").value = restartTimes[2] || "";
       }
 
       const status = document.getElementById("restartScheduleStatus");
@@ -3729,10 +3983,20 @@ def dashboard(request: Request):
 
     async function saveRestartSchedule() {
       const button = document.getElementById("restartScheduleSaveBtn");
+      const restartTimes = [
+        document.getElementById("restartScheduleTime1").value,
+        document.getElementById("restartScheduleTime2").value,
+        document.getElementById("restartScheduleTime3").value
+      ].filter(function (value) { return Boolean(value); });
       const payload = {
         enabled: document.getElementById("restartScheduleEnabled").checked,
-        restart_time: document.getElementById("restartScheduleTime").value || "04:00"
+        restart_times: restartTimes
       };
+
+      if (!restartTimes.length) {
+        document.getElementById("restartScheduleStatus").innerText = "재시작 시각을 한 개 이상 입력해주세요.";
+        return;
+      }
 
       button.disabled = true;
 
@@ -3832,7 +4096,7 @@ def dashboard(request: Request):
     }
 
     async function loadServerLog(options) {
-      currentLogMode = "server";
+      setCurrentLogMode("server");
       const preserveWhenEmpty = Boolean(options && options.preserveWhenEmpty);
 
       try {
@@ -3909,7 +4173,7 @@ def dashboard(request: Request):
     }
 
     async function loadLog() {
-      currentLogMode = "install";
+      setCurrentLogMode("install");
       await loadInstallLogOnly();
     }
 
@@ -3933,10 +4197,28 @@ def dashboard(request: Request):
     }
 
     function openPanelUpdateModal() {
+      document.getElementById("panelUpdateNotice").classList.remove("show");
       const modal = document.getElementById("panelUpdateModal");
       modal.classList.add("show");
       modal.setAttribute("aria-hidden", "false");
       loadPanelUpdateStatus();
+    }
+
+    async function checkPanelUpdateOnLoad() {
+      const notice = document.getElementById("panelUpdateNotice");
+
+      try {
+        const response = await fetch("/api/panel/update/check", { cache: "no-store" });
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.detail || "업데이트 확인 실패");
+        }
+
+        notice.classList.toggle("show", Boolean(data.update_available));
+      } catch (err) {
+        notice.classList.remove("show");
+      }
     }
 
     function closePanelUpdateModal() {
@@ -3971,6 +4253,10 @@ def dashboard(request: Request):
         statusBox.innerText = data.message || "업데이트 상태를 확인할 수 없습니다.";
         updateButton.disabled = active;
         updateButton.innerText = active ? "업데이트 진행 중" : "업데이트 확인 및 설치";
+
+        if (["not_required", "completed"].includes(status)) {
+          document.getElementById("panelUpdateNotice").classList.remove("show");
+        }
 
         if (panelUpdateRequested && status === "not_required") {
           panelUpdateRequested = false;
@@ -4015,6 +4301,7 @@ def dashboard(request: Request):
 
       panelUpdateRequested = true;
       panelUpdateReloadScheduled = false;
+      document.getElementById("panelUpdateNotice").classList.remove("show");
       updateButton.disabled = true;
       updateButton.innerText = "업데이트 확인 중";
       statusBox.dataset.status = "checking";
@@ -4053,11 +4340,12 @@ def dashboard(request: Request):
     }
 
     async function initializeDashboard() {
+      checkPanelUpdateOnLoad();
       await loadStatus();
       const serverStatus = await loadServerStatus();
       const shouldShowServerLog = (serverStatus || "").toLowerCase() === "running";
 
-      currentLogMode = shouldShowServerLog ? "server" : "install";
+      setCurrentLogMode(shouldShowServerLog ? "server" : "install");
       await loadConfig();
       await loadRestartSchedule(true);
 
@@ -4188,6 +4476,12 @@ def panel_update_status(request: Request):
     return read_panel_update_status()
 
 
+@app.get("/api/panel/update/check")
+def panel_update_check(request: Request):
+    require_auth(request)
+    return panel_update_check_payload()
+
+
 @app.get("/api/docker/status")
 def docker_status(request: Request):
     require_auth(request)
@@ -4252,14 +4546,21 @@ def save_restart_schedule(payload: RestartScheduleRequest, request: Request):
         with RESTART_SCHEDULE_LOCK:
             schedule = load_restart_schedule()
             previous_enabled = schedule.get("enabled", False)
-            previous_time = schedule.get("restart_time", "04:00")
+            previous_times = schedule.get("restart_times", ["04:00"])
+            requested_times = payload.restart_times
+
+            if not requested_times and payload.restart_time:
+                requested_times = [payload.restart_time]
+
             schedule["enabled"] = payload.enabled
-            schedule["restart_time"] = normalize_restart_time(payload.restart_time)
+            schedule["restart_times"] = normalize_restart_times(requested_times or ["04:00"])
+            schedule["restart_time"] = schedule["restart_times"][0]
 
             if schedule["enabled"] and (
-                not previous_enabled or schedule["restart_time"] != previous_time
+                not previous_enabled or schedule["restart_times"] != previous_times
             ):
                 schedule["last_run_date"] = ""
+                schedule["last_run_key"] = ""
 
             saved = persist_restart_schedule(schedule)
 
