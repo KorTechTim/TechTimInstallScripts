@@ -5,10 +5,10 @@ const serverIdentityDialog = $('serverIdentityDialog');
 const filesDialog = $('filesDialog');
 const playerManagerDialog = $('playerManagerDialog');
 const backupManagerDialog = $('backupManagerDialog');
+const restartScheduleDialog = $('restartScheduleDialog');
 const eulaDialog = $('eulaDialog');
 const deleteServerDialog = $('deleteServerDialog');
 const panelUpdateDialog = $('panelUpdateDialog');
-let logMode = 'install';
 let currentPath = '';
 let currentParent = '';
 let writeLocked = false;
@@ -22,6 +22,8 @@ let stopRequestActive = false;
 let playerManagerBusy = false;
 let backupManagerBusy = false;
 let backupPollTimer = null;
+let restartScheduleBusy = false;
+let restartSchedulePollTimer = null;
 let serverIconObjectUrl = '';
 let serverIconBusy = false;
 
@@ -108,24 +110,16 @@ async function refreshStatus() {
     $('settingsEntry').classList.toggle('locked', serverActive);
     $('settingsButton').disabled = serverActive;
     $('consoleCommandInput').disabled = !server.running || commandSending;
-    if (server.running && logMode !== 'server') selectLog('server');
   } catch (error) { toast(error.message, true); }
 }
 
 async function refreshLog() {
   try {
-    const data = await api(logMode === 'install' ? '/api/install/log' : '/api/server/log');
+    const data = await api('/api/log');
     const nearBottom = terminal.scrollHeight - terminal.scrollTop - terminal.clientHeight < 80;
-    terminal.textContent = data.log || (logMode === 'install' ? '설치 작업을 시작하면 로그가 표시됩니다.' : '서버가 시작되면 로그가 표시됩니다.');
+    terminal.textContent = data.log || '설치 또는 서버 작업을 시작하면 로그가 표시됩니다.';
     if (nearBottom) terminal.scrollTop = terminal.scrollHeight;
   } catch (error) { terminal.textContent = error.message; }
-}
-
-function selectLog(mode) {
-  logMode = mode;
-  document.querySelectorAll('[data-log]').forEach(button => button.classList.toggle('active', button.dataset.log === mode));
-  $('logCaption').textContent = mode === 'install' ? '설치 로그' : '서버 로그';
-  refreshLog();
 }
 
 function syncModalScrollLock() {
@@ -142,7 +136,6 @@ function closeDialog(dialog) {
   syncModalScrollLock();
 }
 
-document.querySelectorAll('[data-log]').forEach(button => button.onclick = () => selectLog(button.dataset.log));
 document.querySelectorAll('[data-close]').forEach(button => button.onclick = () => closeDialog($(button.dataset.close)));
 document.querySelectorAll('[data-placeholder-menu]').forEach(button => {
   button.onclick = () => showButtonBubble(button, '준비 중인 메뉴입니다.', false);
@@ -463,6 +456,95 @@ $('backupConfigForm').onsubmit = async event => {
 };
 backupManagerDialog.addEventListener('close', stopBackupPolling);
 
+const restartResultLabels = {
+  not_run: '실행 기록 없음', running: '재시작 처리 중', success: '재시작 완료',
+  skipped: '이번 일정 건너뜀', error: '재시작 오류'
+};
+
+function setRestartScheduleDisabled(disabled) {
+  $('restartScheduleForm').querySelectorAll('input,button').forEach(control => { control.disabled = disabled; });
+  $('restartScheduleRefresh').disabled = disabled;
+}
+
+function renderRestartSchedule(data, fillControls = true) {
+  const schedule = data.schedule || {};
+  const enabled = Boolean(schedule.enabled);
+  const restartTime = schedule.restart_time || '04:00';
+  if (fillControls) {
+    $('restartScheduleEnabled').checked = enabled;
+    $('restartScheduleTime').value = restartTime;
+  }
+  $('restartScheduleEnabledLabel').textContent = enabled ? '사용 중' : '사용 안 함';
+  const state = $('restartScheduleState');
+  state.textContent = schedule.active ? '재시작 처리 중' : (enabled ? '예약 사용 중' : '예약 꺼짐');
+  state.classList.toggle('online', enabled && !schedule.active);
+  state.classList.toggle('busy', Boolean(schedule.active));
+  $('restartScheduleSummary').textContent = enabled
+    ? `매일 ${restartTime} 한국표준시`
+    : '자동 재시작을 사용하지 않습니다.';
+  $('restartScheduleNextRun').textContent = enabled
+    ? `다음 재시작: ${formatBackupTime(schedule.next_run_at)}`
+    : '실행 중인 서버를 임의로 시작하지 않습니다.';
+  const result = $('restartScheduleResult');
+  result.dataset.status = schedule.last_result || 'not_run';
+  const label = restartResultLabels[schedule.last_result] || '실행 기록 없음';
+  const lastRun = schedule.last_run_at ? ` · ${formatBackupTime(schedule.last_run_at)}` : '';
+  result.textContent = `${label}${lastRun} · ${schedule.last_message || '예약 재시작 실행 기록이 없습니다.'}`;
+  setRestartScheduleDisabled(restartScheduleBusy || Boolean(schedule.active));
+}
+
+async function loadRestartSchedule(fillControls = true) {
+  try {
+    renderRestartSchedule(await api('/api/restart-schedule'), fillControls);
+  } catch (error) {
+    $('restartScheduleResult').dataset.status = 'error';
+    $('restartScheduleResult').textContent = error.message;
+  }
+}
+
+function startRestartSchedulePolling() {
+  if (restartSchedulePollTimer) return;
+  restartSchedulePollTimer = setInterval(() => loadRestartSchedule(false), 5000);
+}
+
+function stopRestartSchedulePolling() {
+  if (!restartSchedulePollTimer) return;
+  clearInterval(restartSchedulePollTimer);
+  restartSchedulePollTimer = null;
+}
+
+$('restartScheduleButton').onclick = () => {
+  showDialog(restartScheduleDialog);
+  loadRestartSchedule();
+  startRestartSchedulePolling();
+};
+$('restartScheduleRefresh').onclick = () => loadRestartSchedule(false);
+$('restartScheduleEnabled').onchange = event => {
+  $('restartScheduleEnabledLabel').textContent = event.target.checked ? '사용 중' : '사용 안 함';
+};
+$('restartScheduleForm').onsubmit = async event => {
+  event.preventDefault();
+  if (restartScheduleBusy) return;
+  restartScheduleBusy = true;
+  setRestartScheduleDisabled(true);
+  try {
+    const data = await api('/api/restart-schedule', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
+        enabled: $('restartScheduleEnabled').checked,
+        restart_time: $('restartScheduleTime').value || '04:00'
+      })
+    });
+    renderRestartSchedule(data);
+    toast(data.message || '예약 재시작 설정이 저장되었습니다.');
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    restartScheduleBusy = false;
+    await loadRestartSchedule();
+  }
+};
+restartScheduleDialog.addEventListener('close', stopRestartSchedulePolling);
+
 $('consoleCommandForm').onsubmit = async event => {
   event.preventDefault();
   const input = $('consoleCommandInput');
@@ -477,7 +559,6 @@ $('consoleCommandForm').onsubmit = async event => {
       body: JSON.stringify({command})
     });
     input.value = '';
-    selectLog('server');
     toast(data.message || '명령어를 전송했습니다.');
     await refreshLog();
   } catch (error) {
@@ -505,7 +586,7 @@ $('installButton').onclick = async () => {
       return;
     }
     await api('/api/install', {method: 'POST'});
-    selectLog('install');
+    refreshLog();
     showButtonBubble($('installButton'), '서버 설치를 시작했습니다.', false);
     refreshStatus();
   } catch (error) {
@@ -528,7 +609,7 @@ async function serverAction(action, payload = null) {
       options.body = JSON.stringify(payload);
     }
     const result = await api(`/api/server/${action}`, options);
-    selectLog('server');
+    refreshLog();
     toast(result.message || {start: '서버 시작을 요청했습니다.', stop: '서버가 즉시 종료되었습니다.', restart: '서버를 재시작했습니다.'}[action]);
   } catch (error) {
     toast(error.message, true);
@@ -565,7 +646,7 @@ $('deleteServerConfirm').onclick = async event => {
   try {
     const data = await api('/api/server/delete', {method: 'POST'});
     closeDialog(deleteServerDialog);
-    selectLog('install');
+    refreshLog();
     const config = await api('/api/config');
     $('settingsMode').textContent = settingsSummary(config.config);
     await refreshStatus();

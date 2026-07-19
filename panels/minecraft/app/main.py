@@ -29,6 +29,7 @@ app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="stati
 PANEL_VERSION = os.getenv("PANEL_VERSION", "1.0.0")
 STATIC_ASSET_VERSION = hashlib.sha256(
     (APP_DIR / "static" / "app.css").read_bytes()
+    + (APP_DIR / "static" / "panel-overrides.css").read_bytes()
     + (APP_DIR / "static" / "app.js").read_bytes()
 ).hexdigest()[:12]
 MINECRAFT_VERSION_MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
@@ -57,13 +58,20 @@ INSTALL_MARKER_FILE = DATA_DIR / "install-request.txt"
 CONTROL_LOG_FILE = DATA_DIR / "server-control.log"
 BACKUP_CONFIG_FILE = DATA_DIR / "backup-config.json"
 BACKUP_STATUS_FILE = DATA_DIR / "backup-status.json"
+RESTART_SCHEDULE_FILE = DATA_DIR / "restart-schedule.json"
 PANEL_UPDATE_STATUS_FILE = DATA_DIR / "panel-update-status.json"
 SESSION_COOKIE = "techtim_session"
 INSTALL_LOCK = threading.Lock()
 INSTALL_ACTIVE = False
 SERVER_STDIN_LOCK = threading.Lock()
-BACKUP_LOCK = threading.Lock()
+MAINTENANCE_LOCK = threading.Lock()
+BACKUP_LOCK = MAINTENANCE_LOCK
 BACKUP_ACTIVE = False
+RESTART_SCHEDULE_LOCK = threading.Lock()
+RESTART_OPERATION_LOCK = MAINTENANCE_LOCK
+RESTART_OPERATION_ACTIVE = False
+RESTART_SCHEDULER_STOP = threading.Event()
+RESTART_SCHEDULER_THREAD: threading.Thread | None = None
 PANEL_UPDATE_LOCK = threading.Lock()
 PANEL_UPDATE_ACTIVE = False
 PANEL_UPDATE_CHECK_LOCK = threading.Lock()
@@ -135,6 +143,11 @@ class BackupConfigRequest(BaseModel):
     enabled: bool = False
     interval_hours: int = Field(default=6, ge=1, le=168)
     retention_count: int = Field(default=7, ge=1, le=50)
+
+
+class RestartScheduleRequest(BaseModel):
+    enabled: bool = False
+    restart_time: str = Field(default="04:00", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
 
 class ConfigRequest(BaseModel):
@@ -542,7 +555,7 @@ def prune_backup_archives(retention_count: int) -> None:
 def claim_backup_operation() -> bool:
     global BACKUP_ACTIVE
     with BACKUP_LOCK:
-        if BACKUP_ACTIVE:
+        if BACKUP_ACTIVE or RESTART_OPERATION_ACTIVE:
             return False
         BACKUP_ACTIVE = True
         return True
@@ -692,6 +705,160 @@ def backup_scheduler() -> None:
                 start_backup("automatic")
         except Exception as error:
             write_backup_status("failed", f"자동 백업 스케줄 확인 실패: {clean_log(str(error))}")
+
+
+def default_restart_schedule() -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "restart_time": "04:00",
+        "last_run_date": "",
+        "last_run_at": "",
+        "last_result": "not_run",
+        "last_message": "예약 재시작 실행 기록이 없습니다.",
+    }
+
+
+def normalize_restart_schedule(raw: Any) -> dict[str, Any]:
+    defaults = default_restart_schedule()
+    stored = raw if isinstance(raw, dict) else {}
+    restart_time = str(stored.get("restart_time") or defaults["restart_time"]).strip()
+    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", restart_time):
+        restart_time = defaults["restart_time"]
+    return {
+        "enabled": bool(stored.get("enabled", defaults["enabled"])),
+        "restart_time": restart_time,
+        "last_run_date": str(stored.get("last_run_date") or ""),
+        "last_run_at": str(stored.get("last_run_at") or ""),
+        "last_result": str(stored.get("last_result") or defaults["last_result"]),
+        "last_message": str(stored.get("last_message") or defaults["last_message"]),
+    }
+
+
+def read_restart_schedule() -> dict[str, Any]:
+    with RESTART_SCHEDULE_LOCK:
+        return normalize_restart_schedule(read_json(RESTART_SCHEDULE_FILE, {}))
+
+
+def write_restart_schedule(schedule: dict[str, Any]) -> dict[str, Any]:
+    normalized = normalize_restart_schedule(schedule)
+    ensure_dirs()
+    with RESTART_SCHEDULE_LOCK:
+        write_json(RESTART_SCHEDULE_FILE, normalized)
+    return normalized
+
+
+def restart_schedule_response(schedule: dict[str, Any] | None = None) -> dict[str, Any]:
+    current = schedule or read_restart_schedule()
+    next_run_at = ""
+    if current["enabled"]:
+        hour, minute = (int(part) for part in current["restart_time"].split(":"))
+        now = datetime.now(KST)
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target <= now or current.get("last_run_date") == now.date().isoformat():
+            target += timedelta(days=1)
+        next_run_at = target.isoformat(timespec="minutes")
+    return {
+        **current,
+        "timezone": "Asia/Seoul",
+        "next_run_at": next_run_at,
+        "active": restart_operation_active(),
+    }
+
+
+def restart_operation_active() -> bool:
+    with RESTART_OPERATION_LOCK:
+        return RESTART_OPERATION_ACTIVE
+
+
+def claim_restart_operation() -> bool:
+    global RESTART_OPERATION_ACTIVE
+    with RESTART_OPERATION_LOCK:
+        if RESTART_OPERATION_ACTIVE or BACKUP_ACTIVE:
+            return False
+        RESTART_OPERATION_ACTIVE = True
+        return True
+
+
+def release_restart_operation() -> None:
+    global RESTART_OPERATION_ACTIVE
+    with RESTART_OPERATION_LOCK:
+        RESTART_OPERATION_ACTIVE = False
+
+
+def update_restart_schedule_result(result: str, message: str) -> None:
+    with RESTART_SCHEDULE_LOCK:
+        schedule = normalize_restart_schedule(read_json(RESTART_SCHEDULE_FILE, {}))
+        schedule["last_result"] = result
+        schedule["last_message"] = message
+        write_json(RESTART_SCHEDULE_FILE, schedule)
+
+
+def claim_due_restart(now: datetime) -> dict[str, Any] | None:
+    with RESTART_SCHEDULE_LOCK:
+        schedule = normalize_restart_schedule(read_json(RESTART_SCHEDULE_FILE, {}))
+        today = now.date().isoformat()
+        if (
+            not schedule["enabled"]
+            or now.strftime("%H:%M") != schedule["restart_time"]
+            or schedule["last_run_date"] == today
+        ):
+            return None
+        schedule["last_run_date"] = today
+        schedule["last_run_at"] = now.isoformat(timespec="seconds")
+        schedule["last_result"] = "running"
+        schedule["last_message"] = "예약된 Minecraft 서버 재시작을 처리하고 있습니다."
+        write_json(RESTART_SCHEDULE_FILE, schedule)
+        return schedule
+
+
+def run_scheduled_restart_if_due() -> None:
+    schedule = claim_due_restart(datetime.now(KST))
+    if not schedule:
+        return
+    if not claim_restart_operation():
+        message = "백업 또는 복원 작업이 진행 중이어서 이번 예약 재시작을 건너뛰었습니다."
+        append_log(CONTROL_LOG_FILE, message)
+        update_restart_schedule_result("skipped", message)
+        return
+
+    try:
+        container = get_container()
+        if not container:
+            message = "예약 시각에 게임 서버 컨테이너가 없어 재시작을 건너뛰었습니다."
+            append_log(CONTROL_LOG_FILE, message)
+            update_restart_schedule_result("skipped", message)
+            return
+        container.reload()
+        if container.status != "running":
+            message = "예약 시각에 Minecraft 서버가 실행 중이 아니어서 재시작을 건너뛰었습니다."
+            append_log(CONTROL_LOG_FILE, message)
+            update_restart_schedule_result("skipped", message)
+            return
+
+        append_log(
+            CONTROL_LOG_FILE,
+            f"매일 {schedule['restart_time']} 한국표준시 예약에 따라 Minecraft 게임 컨테이너를 재시작합니다.",
+        )
+        try:
+            send_backup_console_command(container, "save-all flush")
+            time.sleep(2)
+        except (docker.errors.DockerException, OSError, RuntimeError) as error:
+            append_log(CONTROL_LOG_FILE, f"예약 재시작 전 월드 저장 확인 필요: {clean_log(str(error))}")
+        container.restart(timeout=60)
+        message = "예약된 Minecraft 게임 컨테이너 재시작이 완료되었습니다."
+        append_log(CONTROL_LOG_FILE, message)
+        update_restart_schedule_result("success", message)
+    except Exception as error:
+        message = f"예약 재시작 중 오류가 발생했습니다: {clean_log(str(error))}"
+        append_log(CONTROL_LOG_FILE, message)
+        update_restart_schedule_result("error", message)
+    finally:
+        release_restart_operation()
+
+
+def restart_scheduler_loop() -> None:
+    while not RESTART_SCHEDULER_STOP.wait(5):
+        run_scheduled_restart_if_due()
 
 
 def public_server_ip() -> str:
@@ -1361,9 +1528,25 @@ initialize_auth()
 
 
 @app.on_event("startup")
-def start_backup_scheduler() -> None:
+def start_background_schedulers() -> None:
+    global RESTART_SCHEDULER_THREAD
     ensure_dirs()
     threading.Thread(target=backup_scheduler, daemon=True, name="minecraft-backup-scheduler").start()
+    if not RESTART_SCHEDULER_THREAD or not RESTART_SCHEDULER_THREAD.is_alive():
+        RESTART_SCHEDULER_STOP.clear()
+        RESTART_SCHEDULER_THREAD = threading.Thread(
+            target=restart_scheduler_loop,
+            daemon=True,
+            name="minecraft-restart-scheduler",
+        )
+        RESTART_SCHEDULER_THREAD.start()
+
+
+@app.on_event("shutdown")
+def stop_background_schedulers() -> None:
+    RESTART_SCHEDULER_STOP.set()
+    if RESTART_SCHEDULER_THREAD and RESTART_SCHEDULER_THREAD.is_alive():
+        RESTART_SCHEDULER_THREAD.join(timeout=6)
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -1596,6 +1779,8 @@ def delete_server_icon(request: Request):
 @app.post("/api/server/start")
 def start_server(payload: StartServerRequest, request: Request):
     require_auth(request)
+    if restart_operation_active():
+        raise HTTPException(status_code=409, detail="예약 재시작이 완료된 후 서버를 시작해주세요.")
     if backup_operation_active():
         raise HTTPException(status_code=409, detail="백업 또는 복원 작업 중에는 서버를 시작할 수 없습니다.")
     if not payload.eula_accepted:
@@ -1657,6 +1842,8 @@ def start_server(payload: StartServerRequest, request: Request):
 @app.post("/api/server/stop")
 def stop_server(request: Request):
     require_auth(request)
+    if restart_operation_active():
+        raise HTTPException(status_code=409, detail="예약 재시작이 완료된 후 서버를 중지해주세요.")
     if backup_operation_active():
         raise HTTPException(status_code=409, detail="백업 또는 복원 작업이 끝난 후 서버를 중지해주세요.")
     container = get_container()
@@ -1684,6 +1871,8 @@ def stop_server(request: Request):
 @app.post("/api/server/restart")
 def restart_server(request: Request):
     require_auth(request)
+    if restart_operation_active():
+        raise HTTPException(status_code=409, detail="예약 재시작이 이미 진행 중입니다.")
     if backup_operation_active():
         raise HTTPException(status_code=409, detail="백업 또는 복원 작업이 끝난 후 서버를 재시작해주세요.")
     container = get_container()
@@ -1797,9 +1986,7 @@ def server_resources(request: Request):
     return resources
 
 
-@app.get("/api/server/log")
-def server_log(request: Request):
-    require_auth(request)
+def read_server_log() -> str:
     container = get_container()
     logs = ""
     if container:
@@ -1810,7 +1997,21 @@ def server_log(request: Request):
     control = clean_log(CONTROL_LOG_FILE.read_text(encoding="utf-8")) if CONTROL_LOG_FILE.exists() else ""
     if control:
         logs = f"[패널 제어 로그]\n{control.rstrip()}\n\n{logs.lstrip()}".strip()
-    return {"log": logs}
+    return logs
+
+
+@app.get("/api/server/log")
+def server_log(request: Request):
+    require_auth(request)
+    return {"log": read_server_log()}
+
+
+@app.get("/api/log")
+def combined_log(request: Request):
+    require_auth(request)
+    install = clean_log(INSTALL_LOG_FILE.read_text(encoding="utf-8")).strip() if INSTALL_LOG_FILE.exists() else ""
+    server = read_server_log().strip()
+    return {"log": "\n\n".join(part for part in (install, server) if part)}
 
 
 @app.post("/api/server/command")
@@ -2023,6 +2224,42 @@ def delete_backup(filename: str, request: Request):
     path = backup_archive_path(filename)
     path.unlink()
     return {"status": "deleted", "message": "백업 파일을 삭제했습니다."}
+
+
+@app.get("/api/restart-schedule")
+def get_restart_schedule(request: Request):
+    require_auth(request)
+    return {
+        "status": "ok",
+        "schedule": restart_schedule_response(),
+    }
+
+
+@app.post("/api/restart-schedule")
+def save_restart_schedule(payload: RestartScheduleRequest, request: Request):
+    require_auth(request)
+    existing = read_restart_schedule()
+    changed = (
+        existing["enabled"] != payload.enabled
+        or existing["restart_time"] != payload.restart_time
+    )
+    schedule = {
+        **existing,
+        "enabled": payload.enabled,
+        "restart_time": payload.restart_time,
+    }
+    if changed:
+        schedule["last_result"] = "not_run"
+        schedule["last_message"] = "새 예약이 저장되었습니다."
+        schedule["last_run_date"] = ""
+        schedule["last_run_at"] = ""
+    saved = write_restart_schedule(schedule)
+    state = "활성화" if saved["enabled"] else "비활성화"
+    return {
+        "status": "ok",
+        "message": f"게임 서버 예약 재시작이 {state}되었습니다.",
+        "schedule": restart_schedule_response(saved),
+    }
 
 
 @app.get("/api/files")

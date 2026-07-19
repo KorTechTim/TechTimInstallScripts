@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>TechTim Minecraft Server Panel</title>
   <link rel="stylesheet" href="/static/app.css?v={{ASSET_VERSION}}">
+  <link rel="stylesheet" href="/static/panel-overrides.css?v={{ASSET_VERSION}}">
 </head>
 <body>
   <main class="shell">
@@ -42,8 +43,7 @@
 
     <section class="terminal-band">
       <div class="section-head">
-        <div><h2>실시간 로그</h2><span id="logCaption">설치 로그</span></div>
-        <div class="segmented"><button class="active" data-log="install">설치 로그</button><button data-log="server">서버 로그</button></div>
+        <div><h2>실시간 로그</h2><span>통합 로그</span></div>
       </div>
       <pre id="terminal" aria-live="polite">로그를 불러오는 중입니다.</pre>
       <form class="console-command" id="consoleCommandForm">
@@ -68,7 +68,7 @@
               <span class="management-shortcut-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"></ellipse><path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5"></path><path d="M4 11v6c0 1.66 3.58 3 8 3 1.46 0 2.83-.15 4-.42"></path><path d="m17 16 2 2 3-4"></path></svg></span>
               <span class="management-shortcut-copy"><b>자동 백업/복원</b><small>월드 데이터 보호</small></span>
             </button>
-            <button class="management-shortcut" type="button" data-placeholder-menu>
+            <button class="management-shortcut restart-schedule-shortcut" id="restartScheduleButton" type="button">
               <span class="management-shortcut-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4"></path><path d="M16 2v4"></path><rect width="18" height="18" x="3" y="4" rx="2"></rect><path d="M3 10h18"></path><circle cx="12" cy="15" r="3"></circle><path d="M12 13.5V15l1 1"></path></svg></span>
               <span class="management-shortcut-copy"><b>예약 재시작</b><small>운영 시간 자동화</small></span>
             </button>
@@ -275,6 +275,27 @@
         <header><div><h3>저장된 백업</h3><small>복원은 Minecraft 서버를 중지한 상태에서만 가능합니다.</small></div><span id="backupCount">0</span></header>
         <div class="backup-list" id="backupList"></div>
       </section>
+    </div>
+  </dialog>
+
+  <dialog id="restartScheduleDialog" class="modal restart-schedule-modal">
+    <div class="modal-head"><div><small>SCHEDULED RESTART</small><h2>예약 재시작</h2></div><button class="close" type="button" data-close="restartScheduleDialog" aria-label="닫기">×</button></div>
+    <div class="restart-schedule-body">
+      <div class="restart-schedule-intro">
+        <span class="restart-schedule-intro-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.34 5.66"></path><path d="M20 5v6h-6"></path><path d="M12 7v5l3 2"></path></svg></span>
+        <div><strong>Minecraft 게임 컨테이너 예약 관리</strong><p>매일 지정한 한국표준 시각에 실행 중인 게임 서버 컨테이너만 재시작합니다.</p></div>
+      </div>
+      <div class="restart-schedule-summary">
+        <span class="restart-schedule-state" id="restartScheduleState">상태 확인 중</span>
+        <div><strong id="restartScheduleSummary">예약 정보를 불러오고 있습니다.</strong><small id="restartScheduleNextRun">다음 실행 시각을 확인하고 있습니다.</small></div>
+        <button class="player-refresh" id="restartScheduleRefresh" type="button" title="예약 상태 새로고침" aria-label="예약 상태 새로고침"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5"></path><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"></path></svg></button>
+      </div>
+      <form class="restart-schedule-form" id="restartScheduleForm">
+        <label class="backup-toggle-field"><span>자동 재시작</span><span class="backup-toggle"><input id="restartScheduleEnabled" type="checkbox"><span aria-hidden="true"></span><b id="restartScheduleEnabledLabel">사용 안 함</b></span></label>
+        <label>재시작 시각<span class="restart-time-input"><input id="restartScheduleTime" type="time" value="04:00" step="60"><b>한국표준시</b></span><small>서버가 꺼져 있으면 자동으로 시작하지 않습니다.</small></label>
+        <button class="restart-schedule-save" id="restartScheduleSave" type="submit">예약 저장</button>
+      </form>
+      <div class="restart-schedule-result" id="restartScheduleResult" data-status="not_run" role="status" aria-live="polite">예약 재시작 실행 기록이 없습니다.</div>
     </div>
   </dialog>
 
