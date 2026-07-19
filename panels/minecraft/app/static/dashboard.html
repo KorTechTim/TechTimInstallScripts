@@ -68,9 +68,9 @@
               <span class="management-shortcut-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m21 8-9-5-9 5 9 5 9-5Z"></path><path d="m3 8 9 5 9-5"></path><path d="M3 8v8l9 5 9-5V8"></path><path d="M12 13v8"></path></svg></span>
               <span class="management-shortcut-copy"><b>리소스팩 관리</b><small>접속 리소스 설정</small></span>
             </button>
-            <button class="management-shortcut discord-shortcut" type="button" data-placeholder-menu>
+            <button class="management-shortcut discord-shortcut" id="discordIntegrationButton" type="button">
               <span class="management-shortcut-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M8 12h.01"></path><path d="M12 12h.01"></path><path d="M16 12h.01"></path><path d="M21 15a4 4 0 0 1-4 4H8l-5 3v-7a4 4 0 0 1-1-2.65V7a4 4 0 0 1 4-4h11a4 4 0 0 1 4 4Z"></path></svg></span>
-              <span class="management-shortcut-copy"><b>디스코드 연동</b><small>준비 중</small></span>
+              <span class="management-shortcut-copy"><b>디스코드 연동</b><small>서버 운영 알림</small></span>
             </button>
             <button class="management-shortcut server-identity-shortcut" id="serverIdentityButton" type="button">
               <span class="management-shortcut-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="14" x="3" y="5" rx="2"></rect><path d="M7 9h.01"></path><path d="M7 13h.01"></path><path d="M11 9h6"></path><path d="M11 13h4"></path></svg></span>
@@ -276,6 +276,43 @@
       </form>
       <div class="restart-schedule-result" id="restartScheduleResult" data-status="not_run" role="status" aria-live="polite">예약 재시작 실행 기록이 없습니다.</div>
     </div>
+  </dialog>
+
+  <dialog id="discordIntegrationDialog" class="modal discord-integration-modal">
+    <div class="modal-head"><div><small>DISCORD WEBHOOK</small><h2>디스코드 연동</h2></div><button class="close" type="button" data-close="discordIntegrationDialog" aria-label="닫기">×</button></div>
+    <form class="discord-integration-form" id="discordIntegrationForm">
+      <div class="discord-integration-summary">
+        <span class="discord-integration-logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M20.32 4.37a19.8 19.8 0 0 0-4.93-1.53 13.7 13.7 0 0 0-.63 1.3 18.3 18.3 0 0 0-5.52 0 12.6 12.6 0 0 0-.64-1.3c-1.73.3-3.38.82-4.93 1.54C.55 9.05-.3 13.6.13 18.09a19.9 19.9 0 0 0 6.05 3.06 14.7 14.7 0 0 0 1.48-2.42 12.9 12.9 0 0 1-2.33-1.13l.57-.44c4.49 2.08 9.36 2.08 13.8 0l.57.44c-.74.44-1.52.82-2.33 1.13.42.85.91 1.66 1.48 2.42a19.8 19.8 0 0 0 6.04-3.06c.51-5.2-.87-9.7-5.14-13.72ZM8.02 15.33c-1.35 0-2.45-1.25-2.45-2.79s1.08-2.8 2.45-2.8 2.47 1.27 2.45 2.8c0 1.54-1.08 2.79-2.45 2.79Zm7.96 0c-1.35 0-2.45-1.25-2.45-2.79s1.08-2.8 2.45-2.8 2.47 1.27 2.45 2.8c0 1.54-1.08 2.79-2.45 2.79Z" transform="scale(.96) translate(.5 .2)"></path></svg></span>
+        <div><span class="discord-integration-state" id="discordIntegrationState">상태 확인 중</span><strong>Discord 채널 운영 알림</strong><small id="discordWebhookHint">등록된 웹훅을 확인하고 있습니다.</small></div>
+        <label class="discord-master-toggle"><span>연동 사용</span><span class="backup-toggle"><input id="discordEnabled" type="checkbox"><span aria-hidden="true"></span><b id="discordEnabledLabel">사용 안 함</b></span></label>
+      </div>
+
+      <section class="discord-config-section">
+        <div class="discord-field-grid">
+          <label class="discord-webhook-field">웹훅 URL<input id="discordWebhookUrl" type="password" maxlength="500" autocomplete="new-password" placeholder="https://discord.com/api/webhooks/..."><small>비워두면 기존 웹훅을 유지합니다.</small></label>
+          <label>표시 이름<input id="discordUsername" maxlength="80" value="TechTim Minecraft Server"><small>Discord 메시지 작성자 이름</small></label>
+        </div>
+        <label class="discord-clear-webhook"><input id="discordClearWebhook" type="checkbox"><span>저장된 웹훅 URL 삭제</span></label>
+      </section>
+
+      <section class="discord-events-section">
+        <header><div><h3>알림 항목</h3><small>Discord로 받을 서버 운영 이벤트를 선택합니다.</small></div></header>
+        <div class="discord-event-grid">
+          <label><input id="discordNotifyStart" type="checkbox"><span><b>서버 시작</b><small>게임 컨테이너 시작 요청</small></span></label>
+          <label><input id="discordNotifyStop" type="checkbox"><span><b>서버 중지</b><small>관리자 종료 요청 완료</small></span></label>
+          <label><input id="discordNotifyRestart" type="checkbox"><span><b>서버 재시작</b><small>수동 및 예약 재시작</small></span></label>
+          <label><input id="discordNotifyBackup" type="checkbox"><span><b>백업 및 복원</b><small>작업 완료 결과</small></span></label>
+          <label><input id="discordNotifyErrors" type="checkbox"><span><b>오류 감지</b><small>비정상 종료와 작업 실패</small></span></label>
+        </div>
+      </section>
+
+      <div class="discord-integration-note"><span>i</span><p>채팅 양방향 연동은 DiscordSRV 등 서버 유형에 맞는 별도 플러그인이 필요합니다.</p><a href="https://docs.discord.com/developers/resources/webhook" target="_blank" rel="noopener noreferrer">웹훅 안내</a></div>
+      <div class="discord-integration-status" id="discordIntegrationStatus" data-status="idle" role="status" aria-live="polite">Discord 연동 설정을 불러오고 있습니다.</div>
+      <div class="discord-integration-actions">
+        <button id="discordTestButton" type="button">테스트 전송</button>
+        <button class="primary" id="discordSaveButton" type="submit">설정 저장</button>
+      </div>
+    </form>
   </dialog>
 
   <dialog id="resourceMonitorDialog" class="modal resource-monitor-modal">

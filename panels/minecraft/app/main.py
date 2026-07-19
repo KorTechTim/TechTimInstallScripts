@@ -32,6 +32,12 @@ from app.game_metrics import (
     parse_tick_query,
     version_at_least,
 )
+from app.discord_webhook import (
+    build_webhook_payload,
+    execute_webhook,
+    masked_webhook_url,
+    normalize_webhook_url,
+)
 
 
 app = FastAPI(title="TechTim Minecraft Server Panel")
@@ -71,6 +77,7 @@ CONTROL_LOG_FILE = DATA_DIR / "server-control.log"
 BACKUP_CONFIG_FILE = DATA_DIR / "backup-config.json"
 BACKUP_STATUS_FILE = DATA_DIR / "backup-status.json"
 RESTART_SCHEDULE_FILE = DATA_DIR / "restart-schedule.json"
+DISCORD_CONFIG_FILE = DATA_DIR / "discord-config.json"
 PANEL_UPDATE_STATUS_FILE = DATA_DIR / "panel-update-status.json"
 SESSION_COOKIE = "techtim_session"
 INSTALL_LOCK = threading.Lock()
@@ -85,6 +92,14 @@ RESTART_OPERATION_ACTIVE = False
 RESTART_SCHEDULER_STOP = threading.Event()
 RESTART_SCHEDULER_THREAD: threading.Thread | None = None
 RESTART_SCHEDULER_THREAD_LOCK = threading.Lock()
+DISCORD_CONFIG_LOCK = threading.Lock()
+DISCORD_MONITOR_STOP = threading.Event()
+DISCORD_MONITOR_THREAD: threading.Thread | None = None
+DISCORD_MONITOR_THREAD_LOCK = threading.Lock()
+DISCORD_RUNTIME_STATE_LOCK = threading.Lock()
+DISCORD_RUNTIME_STATE: dict[str, Any] = {}
+DISCORD_RUNTIME_ALERTS_SUPPRESSED_UNTIL = 0.0
+DISCORD_RUNTIME_LAST_ALERT_AT = 0.0
 PANEL_UPDATE_LOCK = threading.Lock()
 PANEL_UPDATE_ACTIVE = False
 PANEL_UPDATE_CHECK_LOCK = threading.Lock()
@@ -119,6 +134,21 @@ SERVER_TYPES = {
 MODPACK_URL_TYPES = {"FORGE", "NEOFORGE", "FABRIC"}
 JAVA_VERSIONS = {"AUTO", "8", "11", "16", "17", "21", "25"}
 STOPPABLE_SERVER_STATUSES = {"running", "restarting", "paused"}
+DISCORD_EVENT_SETTINGS = {
+    "server_start": "notify_server_start",
+    "server_stop": "notify_server_stop",
+    "server_restart": "notify_server_restart",
+    "backup": "notify_backup",
+    "error": "notify_errors",
+}
+DISCORD_EVENT_COLORS = {
+    "server_start": 0x57A65A,
+    "server_stop": 0x9A594D,
+    "server_restart": 0xD29A45,
+    "backup": 0x4B8495,
+    "error": 0xC34B43,
+    "test": 0x5865F2,
+}
 
 FALLBACK_MINECRAFT_VERSIONS = [
     "26.2", "26.1.2", "26.1.1", "26.1",
@@ -164,6 +194,18 @@ class BackupConfigRequest(BaseModel):
 class RestartScheduleRequest(BaseModel):
     enabled: bool = False
     restart_time: str = Field(default="04:00", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+
+
+class DiscordConfigRequest(BaseModel):
+    enabled: bool = False
+    webhook_url: str = Field(default="", max_length=500)
+    clear_webhook: bool = False
+    username: str = Field(default="TechTim Minecraft Server", min_length=1, max_length=80)
+    notify_server_start: bool = True
+    notify_server_stop: bool = True
+    notify_server_restart: bool = True
+    notify_backup: bool = True
+    notify_errors: bool = True
 
 
 class ConfigRequest(BaseModel):
@@ -345,6 +387,74 @@ def read_config() -> dict:
 def write_config(config: dict) -> None:
     ensure_dirs()
     write_json(CONFIG_FILE, normalize_config(config))
+
+
+def default_discord_config() -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "webhook_url": "",
+        "username": "TechTim Minecraft Server",
+        "notify_server_start": True,
+        "notify_server_stop": True,
+        "notify_server_restart": True,
+        "notify_backup": True,
+        "notify_errors": True,
+    }
+
+
+def normalize_discord_config(raw: Any) -> dict[str, Any]:
+    stored = raw if isinstance(raw, dict) else {}
+    defaults = default_discord_config()
+    webhook_url = str(stored.get("webhook_url") or "").strip()
+    if webhook_url:
+        try:
+            webhook_url = normalize_webhook_url(webhook_url)
+        except ValueError:
+            webhook_url = ""
+    username = str(stored.get("username") or defaults["username"]).strip()[:80]
+    return {
+        "enabled": bool(stored.get("enabled", defaults["enabled"])),
+        "webhook_url": webhook_url,
+        "username": username or defaults["username"],
+        "notify_server_start": bool(stored.get("notify_server_start", True)),
+        "notify_server_stop": bool(stored.get("notify_server_stop", True)),
+        "notify_server_restart": bool(stored.get("notify_server_restart", True)),
+        "notify_backup": bool(stored.get("notify_backup", True)),
+        "notify_errors": bool(stored.get("notify_errors", True)),
+    }
+
+
+def read_discord_config() -> dict[str, Any]:
+    ensure_dirs()
+    with DISCORD_CONFIG_LOCK:
+        return normalize_discord_config(read_json(DISCORD_CONFIG_FILE, {}))
+
+
+def write_discord_config(config: dict[str, Any]) -> dict[str, Any]:
+    normalized = normalize_discord_config(config)
+    ensure_dirs()
+    with DISCORD_CONFIG_LOCK:
+        write_json(DISCORD_CONFIG_FILE, normalized)
+        try:
+            os.chmod(DISCORD_CONFIG_FILE, 0o600)
+        except OSError:
+            pass
+    return normalized
+
+
+def discord_config_response(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    current = config or read_discord_config()
+    return {
+        "enabled": current["enabled"],
+        "username": current["username"],
+        "webhook_configured": bool(current["webhook_url"]),
+        "webhook_hint": masked_webhook_url(current["webhook_url"]),
+        "notify_server_start": current["notify_server_start"],
+        "notify_server_stop": current["notify_server_stop"],
+        "notify_server_restart": current["notify_server_restart"],
+        "notify_backup": current["notify_backup"],
+        "notify_errors": current["notify_errors"],
+    }
 
 
 def player_entries(filename: str) -> list[dict[str, Any]]:
@@ -631,6 +741,12 @@ def backup_job(reason: str) -> None:
             console_transport=console_transport,
         )
         append_log(CONTROL_LOG_FILE, f"Minecraft 서버 백업 완료: {filename} ({console_transport} 콘솔)")
+        notify_discord_event(
+            "backup",
+            "Minecraft 백업 완료",
+            "서버 데이터 백업이 정상적으로 완료되었습니다.",
+            [{"name": "백업 파일", "value": filename, "inline": False}],
+        )
     except Exception as error:
         destination.unlink(missing_ok=True)
         config = read_backup_config()
@@ -640,6 +756,7 @@ def backup_job(reason: str) -> None:
             ).isoformat(timespec="seconds")
             write_backup_config(config)
         write_backup_status("failed", f"백업에 실패했습니다: {clean_log(str(error))}", filename=filename, reason=reason)
+        notify_discord_event("error", "Minecraft 백업 실패", clean_log(str(error)))
     finally:
         if writes_paused and container:
             try:
@@ -679,6 +796,12 @@ def restore_backup_job(source: Path) -> None:
             raise
         write_backup_status("restored", "백업 복원이 완료되었습니다. 서버를 시작해주세요.", filename=source.name)
         append_log(CONTROL_LOG_FILE, f"Minecraft 서버 백업 복원 완료: {source.name}")
+        notify_discord_event(
+            "backup",
+            "Minecraft 백업 복원 완료",
+            "선택한 서버 데이터 백업을 정상적으로 복원했습니다.",
+            [{"name": "백업 파일", "value": source.name, "inline": False}],
+        )
         if previous.exists():
             try:
                 shutil.rmtree(previous)
@@ -689,6 +812,7 @@ def restore_backup_job(source: Path) -> None:
                 )
     except Exception as error:
         write_backup_status("failed", f"백업 복원에 실패했습니다: {clean_log(str(error))}", filename=source.name)
+        notify_discord_event("error", "Minecraft 백업 복원 실패", clean_log(str(error)))
     finally:
         if staging.exists():
             shutil.rmtree(staging)
@@ -860,14 +984,21 @@ def run_scheduled_restart_if_due() -> None:
             time.sleep(2)
         except (docker.errors.DockerException, OSError, RuntimeError) as error:
             append_log(CONTROL_LOG_FILE, f"예약 재시작 전 월드 저장 확인 필요: {clean_log(str(error))}")
+        suppress_discord_runtime_alerts()
         container.restart(timeout=60)
         message = "예약된 Minecraft 게임 컨테이너 재시작이 완료되었습니다."
         append_log(CONTROL_LOG_FILE, message)
         update_restart_schedule_result("success", message)
+        notify_discord_event(
+            "server_restart",
+            "Minecraft 예약 재시작 완료",
+            f"매일 {schedule['restart_time']} 한국표준시 예약에 따라 게임 컨테이너를 재시작했습니다.",
+        )
     except Exception as error:
         message = f"예약 재시작 중 오류가 발생했습니다: {clean_log(str(error))}"
         append_log(CONTROL_LOG_FILE, message)
         update_restart_schedule_result("error", message)
+        notify_discord_event("error", "Minecraft 예약 재시작 실패", clean_log(str(error)))
     finally:
         release_restart_operation()
 
@@ -923,6 +1054,146 @@ def public_server_ip() -> str:
         PUBLIC_IP_CACHE["value"] = value
         PUBLIC_IP_CACHE["expires_at"] = now + (300 if value else 60)
         return value
+
+
+def discord_event_fields(extra_fields: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    config = read_config()
+    address = public_server_ip()
+    fields = [
+        {"name": "서버", "value": config.get("ServerName") or "Minecraft Server", "inline": True},
+        {"name": "발생 시각", "value": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S KST"), "inline": True},
+    ]
+    if address:
+        fields.append({"name": "접속 주소", "value": address, "inline": True})
+    fields.extend(extra_fields or [])
+    return fields
+
+
+def deliver_discord_event(
+    config: dict[str, Any],
+    *,
+    event: str,
+    title: str,
+    message: str,
+    fields: list[dict[str, Any]] | None = None,
+) -> None:
+    payload = build_webhook_payload(
+        username=config["username"],
+        title=title,
+        description=message,
+        color=DISCORD_EVENT_COLORS.get(event, DISCORD_EVENT_COLORS["test"]),
+        fields=discord_event_fields(fields),
+    )
+    execute_webhook(config["webhook_url"], payload)
+
+
+def notify_discord_event(
+    event: str,
+    title: str,
+    message: str,
+    fields: list[dict[str, Any]] | None = None,
+) -> None:
+    config = read_discord_config()
+    setting = DISCORD_EVENT_SETTINGS.get(event)
+    if not config["enabled"] or not config["webhook_url"] or (setting and not config.get(setting, False)):
+        return
+
+    def send() -> None:
+        try:
+            deliver_discord_event(config, event=event, title=title, message=message, fields=fields)
+        except Exception as error:
+            append_log(CONTROL_LOG_FILE, f"Discord 알림 전송 실패: {clean_log(str(error))}")
+
+    threading.Thread(target=send, daemon=True, name=f"discord-notify-{event}").start()
+
+
+def suppress_discord_runtime_alerts(seconds: int = 120) -> None:
+    global DISCORD_RUNTIME_ALERTS_SUPPRESSED_UNTIL
+    with DISCORD_RUNTIME_STATE_LOCK:
+        DISCORD_RUNTIME_ALERTS_SUPPRESSED_UNTIL = max(
+            DISCORD_RUNTIME_ALERTS_SUPPRESSED_UNTIL,
+            time.monotonic() + seconds,
+        )
+
+
+def claim_discord_runtime_alert() -> bool:
+    global DISCORD_RUNTIME_LAST_ALERT_AT
+    now = time.monotonic()
+    with DISCORD_RUNTIME_STATE_LOCK:
+        if now < DISCORD_RUNTIME_ALERTS_SUPPRESSED_UNTIL or now - DISCORD_RUNTIME_LAST_ALERT_AT < 300:
+            return False
+        DISCORD_RUNTIME_LAST_ALERT_AT = now
+        return True
+
+
+def current_discord_runtime_state() -> dict[str, Any]:
+    container = get_container()
+    if not container:
+        return {"container_id": "", "status": "not_created", "restart_count": 0, "exit_code": 0}
+    try:
+        container.reload()
+        attrs = container.attrs or {}
+        state = attrs.get("State") or {}
+        return {
+            "container_id": container.id,
+            "status": str(container.status or "unknown"),
+            "restart_count": int(attrs.get("RestartCount") or 0),
+            "exit_code": int(state.get("ExitCode") or 0),
+        }
+    except (docker.errors.DockerException, TypeError, ValueError):
+        return {"container_id": "", "status": "unknown", "restart_count": 0, "exit_code": 0}
+
+
+def discord_runtime_monitor_loop() -> None:
+    while not DISCORD_MONITOR_STOP.wait(5):
+        current = current_discord_runtime_state()
+        with DISCORD_RUNTIME_STATE_LOCK:
+            previous = dict(DISCORD_RUNTIME_STATE)
+            DISCORD_RUNTIME_STATE.clear()
+            DISCORD_RUNTIME_STATE.update(current)
+            suppressed = time.monotonic() < DISCORD_RUNTIME_ALERTS_SUPPRESSED_UNTIL
+
+        if suppressed or not previous or previous.get("container_id") != current.get("container_id"):
+            continue
+        restart_count = int(current.get("restart_count") or 0)
+        previous_restart_count = int(previous.get("restart_count") or 0)
+        if restart_count > previous_restart_count and claim_discord_runtime_alert():
+            notify_discord_event(
+                "error",
+                "Minecraft 서버 자동 재기동 감지",
+                "게임 컨테이너가 비정상 종료된 후 Docker 정책에 따라 자동으로 다시 시작되었습니다.",
+                [{"name": "재시작 횟수", "value": str(restart_count), "inline": True}],
+            )
+            continue
+        if (
+            previous.get("status") == "running"
+            and current.get("status") in {"exited", "dead"}
+            and int(current.get("exit_code") or 0) != 0
+            and claim_discord_runtime_alert()
+        ):
+            notify_discord_event(
+                "error",
+                "Minecraft 서버 비정상 종료",
+                "게임 컨테이너가 예상하지 못한 상태로 종료되었습니다.",
+                [{"name": "Exit Code", "value": str(current.get("exit_code")), "inline": True}],
+            )
+
+
+def ensure_discord_monitor_running() -> None:
+    global DISCORD_MONITOR_THREAD
+    with DISCORD_MONITOR_THREAD_LOCK:
+        if DISCORD_MONITOR_THREAD and DISCORD_MONITOR_THREAD.is_alive():
+            return
+        DISCORD_MONITOR_STOP.clear()
+        with DISCORD_RUNTIME_STATE_LOCK:
+            DISCORD_RUNTIME_STATE.clear()
+            DISCORD_RUNTIME_STATE.update(current_discord_runtime_state())
+        DISCORD_MONITOR_THREAD = threading.Thread(
+            target=discord_runtime_monitor_loop,
+            daemon=True,
+            name="minecraft-discord-monitor",
+        )
+        DISCORD_MONITOR_THREAD.start()
 
 
 def parse_os_cpu_stat(value: str) -> dict[int, tuple[int, int]]:
@@ -1684,13 +1955,17 @@ def start_background_schedulers() -> None:
     ensure_dirs()
     threading.Thread(target=backup_scheduler, daemon=True, name="minecraft-backup-scheduler").start()
     ensure_restart_scheduler_running()
+    ensure_discord_monitor_running()
 
 
 @app.on_event("shutdown")
 def stop_background_schedulers() -> None:
     RESTART_SCHEDULER_STOP.set()
+    DISCORD_MONITOR_STOP.set()
     if RESTART_SCHEDULER_THREAD and RESTART_SCHEDULER_THREAD.is_alive():
         RESTART_SCHEDULER_THREAD.join(timeout=6)
+    if DISCORD_MONITOR_THREAD and DISCORD_MONITOR_THREAD.is_alive():
+        DISCORD_MONITOR_THREAD.join(timeout=6)
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -1951,6 +2226,11 @@ def start_server(payload: StartServerRequest, request: Request):
             append_log(CONTROL_LOG_FILE, "재설치 없이 기존 Minecraft 서버를 시작합니다.")
             old.start()
             append_log(CONTROL_LOG_FILE, f"Minecraft 서버 시작 요청 완료: {old.short_id}")
+            notify_discord_event(
+                "server_start",
+                "Minecraft 서버 시작",
+                "기존 서버 데이터와 게임 컨테이너를 사용해 서버 시작을 요청했습니다.",
+            )
             return {
                 "status": "started",
                 "message": "기존 Minecraft 서버를 시작했습니다.",
@@ -1976,6 +2256,11 @@ def start_server(payload: StartServerRequest, request: Request):
     if not old:
         append_log(CONTROL_LOG_FILE, "영구 저장 폴더를 연결하고 Minecraft 서버를 처음 시작합니다.")
     append_log(CONTROL_LOG_FILE, f"Minecraft 서버 시작 요청 완료: {container.short_id}")
+    notify_discord_event(
+        "server_start",
+        "Minecraft 서버 시작",
+        "Minecraft 게임 컨테이너 시작을 요청했습니다.",
+    )
     return {
         "status": "started",
         "message": "Minecraft 서버를 시작했습니다.",
@@ -1997,6 +2282,7 @@ def stop_server(request: Request):
     if container.status not in STOPPABLE_SERVER_STATUSES:
         return {"status": "stopped", "message": "Minecraft 서버가 이미 종료되어 있습니다."}
     append_log(CONTROL_LOG_FILE, "Minecraft 서버 즉시 종료를 요청했습니다.")
+    suppress_discord_runtime_alerts()
     try:
         try:
             container.stop(timeout=0)
@@ -2009,6 +2295,11 @@ def stop_server(request: Request):
     except docker.errors.DockerException as error:
         raise HTTPException(status_code=500, detail=f"서버 즉시 종료에 실패했습니다: {error}") from error
     append_log(CONTROL_LOG_FILE, "Minecraft 서버가 즉시 종료되었습니다.")
+    notify_discord_event(
+        "server_stop",
+        "Minecraft 서버 중지",
+        "관리자 요청에 따라 게임 컨테이너를 종료했습니다.",
+    )
     return {"status": "stopped", "message": "Minecraft 서버가 즉시 종료되었습니다."}
 
 
@@ -2022,9 +2313,15 @@ def restart_server(request: Request):
     container = get_container()
     if not container:
         raise HTTPException(status_code=404, detail="먼저 서버를 시작해주세요.")
+    suppress_discord_runtime_alerts()
     container.restart(timeout=60)
     CONTROL_LOG_FILE.write_text("", encoding="utf-8")
     append_log(CONTROL_LOG_FILE, "Minecraft 서버를 재시작했습니다.")
+    notify_discord_event(
+        "server_restart",
+        "Minecraft 서버 재시작",
+        "관리자 요청에 따라 게임 컨테이너를 재시작했습니다.",
+    )
     return {"status": "restarted"}
 
 
@@ -2035,6 +2332,7 @@ def delete_server(request: Request):
         raise HTTPException(status_code=409, detail="백업 또는 복원 작업 중에는 서버 데이터를 삭제할 수 없습니다.")
     if server_running():
         raise HTTPException(status_code=409, detail="서버 기동 중에는 서버를 삭제할 수 없습니다.")
+    suppress_discord_runtime_alerts()
     global INSTALL_ACTIVE
     with INSTALL_LOCK:
         if INSTALL_ACTIVE:
@@ -2430,6 +2728,66 @@ def save_restart_schedule(payload: RestartScheduleRequest, request: Request):
         "message": f"게임 서버 예약 재시작이 {state}되었습니다.",
         "schedule": restart_schedule_response(saved),
     }
+
+
+@app.get("/api/discord")
+def get_discord_config(request: Request):
+    require_auth(request)
+    return {
+        "status": "ok",
+        "config": discord_config_response(),
+    }
+
+
+@app.post("/api/discord")
+def save_discord_config(payload: DiscordConfigRequest, request: Request):
+    require_auth(request)
+    existing = read_discord_config()
+    webhook_url = existing["webhook_url"]
+    if payload.clear_webhook:
+        webhook_url = ""
+    elif payload.webhook_url.strip():
+        try:
+            webhook_url = normalize_webhook_url(payload.webhook_url)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+    if payload.enabled and not webhook_url:
+        raise HTTPException(status_code=400, detail="Discord 연동을 사용하려면 웹훅 URL을 먼저 등록해주세요.")
+
+    saved = write_discord_config({
+        "enabled": payload.enabled,
+        "webhook_url": webhook_url,
+        "username": payload.username,
+        "notify_server_start": payload.notify_server_start,
+        "notify_server_stop": payload.notify_server_stop,
+        "notify_server_restart": payload.notify_server_restart,
+        "notify_backup": payload.notify_backup,
+        "notify_errors": payload.notify_errors,
+    })
+    return {
+        "status": "ok",
+        "message": "Discord 연동 설정이 저장되었습니다.",
+        "config": discord_config_response(saved),
+    }
+
+
+@app.post("/api/discord/test")
+def test_discord_webhook(request: Request):
+    require_auth(request)
+    config = read_discord_config()
+    if not config["webhook_url"]:
+        raise HTTPException(status_code=400, detail="테스트할 Discord 웹훅 URL을 먼저 저장해주세요.")
+    try:
+        deliver_discord_event(
+            config,
+            event="test",
+            title="Discord 연동 테스트 성공",
+            message="TechTim Minecraft Server Panel과 Discord 채널이 정상적으로 연결되었습니다.",
+            fields=[{"name": "알림 상태", "value": "정상", "inline": True}],
+        )
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=clean_log(str(error))) from error
+    return {"status": "sent", "message": "Discord 테스트 메시지를 전송했습니다."}
 
 
 @app.get("/api/files")

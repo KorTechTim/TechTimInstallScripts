@@ -13,12 +13,15 @@
 - 서버 실행 중 설정/파일 쓰기 잠금
 - `/data` 전체 서버 디렉터리 탐색기
 - 한국표준시 기준 매일 예약 재시작 및 최근 실행 결과 확인
+- Discord Incoming Webhook 서버 시작·중지·재시작·백업·오류 알림
 - CPU, 메모리, 디스크, 네트워크 리소스 5초 주기 모니터링
 - Docker 이미지 Pull 진행 로그, 웹패널 업데이트 진행률 및 VM 재부팅 후 자동 복구
 
 게임 데이터는 호스트의 `/opt/techtim/minecraft/data/server`에 유지되고 게임 컨테이너의 `/data`에 마운트됩니다.
 
 예약 재시작 설정은 호스트의 `/opt/techtim/minecraft/data/restart-schedule.json`에 저장됩니다. 예약 시각에 서버가 실행 중일 때만 월드 저장 후 게임 컨테이너를 재시작하며, 서버가 꺼져 있거나 백업·복원이 진행 중이면 해당 회차를 건너뜁니다.
+
+Discord 연동 설정은 호스트의 `/opt/techtim/minecraft/data/discord-config.json`에 저장되며 웹훅 URL은 API 응답에서 마스킹됩니다. 이 기능은 운영 알림을 Discord 채널로 전송하며, 게임 채팅 양방향 연동은 DiscordSRV와 같은 별도 플러그인이 필요합니다.
 
 ## Local Docker Build
 

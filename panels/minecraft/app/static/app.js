@@ -6,6 +6,7 @@ const filesDialog = $('filesDialog');
 const playerManagerDialog = $('playerManagerDialog');
 const backupManagerDialog = $('backupManagerDialog');
 const restartScheduleDialog = $('restartScheduleDialog');
+const discordIntegrationDialog = $('discordIntegrationDialog');
 const resourceMonitorDialog = $('resourceMonitorDialog');
 const eulaDialog = $('eulaDialog');
 const deleteServerDialog = $('deleteServerDialog');
@@ -26,6 +27,8 @@ let backupPollTimer = null;
 let restartScheduleBusy = false;
 let restartSchedulePollTimer = null;
 let restartScheduleDirty = false;
+let discordIntegrationBusy = false;
+let discordWebhookConfigured = false;
 let resourceDetailPollTimer = null;
 let resourceDetailRequestActive = false;
 let gameMetricsPollTimer = null;
@@ -567,6 +570,123 @@ restartScheduleDialog.addEventListener('close', () => {
   restartScheduleDirty = false;
   stopRestartSchedulePolling();
 });
+
+function setDiscordIntegrationDisabled(disabled) {
+  discordIntegrationDialog.querySelectorAll('input,button').forEach(control => {
+    if (control.dataset.close === 'discordIntegrationDialog') return;
+    control.disabled = disabled;
+  });
+  $('discordWebhookUrl').disabled = disabled || $('discordClearWebhook').checked;
+  if (!disabled) $('discordTestButton').disabled = !discordWebhookConfigured;
+}
+
+function renderDiscordIntegration(data) {
+  const config = data.config || {};
+  discordWebhookConfigured = Boolean(config.webhook_configured);
+  $('discordEnabled').checked = Boolean(config.enabled);
+  $('discordEnabledLabel').textContent = config.enabled ? '사용 중' : '사용 안 함';
+  $('discordUsername').value = config.username || 'TechTim Minecraft Server';
+  $('discordWebhookUrl').value = '';
+  $('discordWebhookUrl').placeholder = discordWebhookConfigured
+    ? '새 URL을 입력하면 기존 웹훅이 교체됩니다.'
+    : 'https://discord.com/api/webhooks/...';
+  $('discordClearWebhook').checked = false;
+  $('discordNotifyStart').checked = Boolean(config.notify_server_start);
+  $('discordNotifyStop').checked = Boolean(config.notify_server_stop);
+  $('discordNotifyRestart').checked = Boolean(config.notify_server_restart);
+  $('discordNotifyBackup').checked = Boolean(config.notify_backup);
+  $('discordNotifyErrors').checked = Boolean(config.notify_errors);
+  $('discordWebhookHint').textContent = discordWebhookConfigured
+    ? config.webhook_hint
+    : 'Discord 채널 웹훅 URL이 등록되지 않았습니다.';
+  const state = $('discordIntegrationState');
+  state.textContent = config.enabled ? '연동 사용 중' : discordWebhookConfigured ? '웹훅 등록됨' : '연동 꺼짐';
+  state.classList.toggle('online', Boolean(config.enabled && discordWebhookConfigured));
+  setDiscordIntegrationDisabled(discordIntegrationBusy);
+}
+
+async function loadDiscordIntegration() {
+  try {
+    renderDiscordIntegration(await api('/api/discord'));
+    const status = $('discordIntegrationStatus');
+    status.dataset.status = 'idle';
+    status.textContent = discordWebhookConfigured
+      ? '저장된 웹훅으로 Discord 알림을 전송할 수 있습니다.'
+      : 'Discord 채널에서 생성한 웹훅 URL을 등록해주세요.';
+  } catch (error) {
+    $('discordIntegrationStatus').dataset.status = 'error';
+    $('discordIntegrationStatus').textContent = error.message;
+  }
+}
+
+$('discordIntegrationButton').onclick = () => {
+  showDialog(discordIntegrationDialog);
+  loadDiscordIntegration();
+};
+
+$('discordEnabled').onchange = event => {
+  $('discordEnabledLabel').textContent = event.target.checked ? '사용 중' : '사용 안 함';
+};
+
+$('discordClearWebhook').onchange = event => {
+  $('discordWebhookUrl').disabled = event.target.checked || discordIntegrationBusy;
+};
+
+$('discordIntegrationForm').onsubmit = async event => {
+  event.preventDefault();
+  if (discordIntegrationBusy) return;
+  discordIntegrationBusy = true;
+  setDiscordIntegrationDisabled(true);
+  const status = $('discordIntegrationStatus');
+  status.dataset.status = 'idle';
+  status.textContent = 'Discord 연동 설정을 저장하고 있습니다.';
+  try {
+    const data = await api('/api/discord', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        enabled: $('discordEnabled').checked,
+        webhook_url: $('discordWebhookUrl').value.trim(),
+        clear_webhook: $('discordClearWebhook').checked,
+        username: $('discordUsername').value.trim() || 'TechTim Minecraft Server',
+        notify_server_start: $('discordNotifyStart').checked,
+        notify_server_stop: $('discordNotifyStop').checked,
+        notify_server_restart: $('discordNotifyRestart').checked,
+        notify_backup: $('discordNotifyBackup').checked,
+        notify_errors: $('discordNotifyErrors').checked
+      })
+    });
+    renderDiscordIntegration(data);
+    status.dataset.status = 'success';
+    status.textContent = data.message || 'Discord 연동 설정이 저장되었습니다.';
+  } catch (error) {
+    status.dataset.status = 'error';
+    status.textContent = error.message;
+  } finally {
+    discordIntegrationBusy = false;
+    setDiscordIntegrationDisabled(false);
+  }
+};
+
+$('discordTestButton').onclick = async () => {
+  if (discordIntegrationBusy || !discordWebhookConfigured) return;
+  discordIntegrationBusy = true;
+  setDiscordIntegrationDisabled(true);
+  const status = $('discordIntegrationStatus');
+  status.dataset.status = 'idle';
+  status.textContent = 'Discord 테스트 메시지를 전송하고 있습니다.';
+  try {
+    const data = await api('/api/discord/test', {method: 'POST'});
+    status.dataset.status = 'success';
+    status.textContent = data.message || 'Discord 테스트 메시지를 전송했습니다.';
+  } catch (error) {
+    status.dataset.status = 'error';
+    status.textContent = error.message;
+  } finally {
+    discordIntegrationBusy = false;
+    setDiscordIntegrationDisabled(false);
+  }
+};
 
 $('consoleCommandForm').onsubmit = async event => {
   event.preventDefault();
