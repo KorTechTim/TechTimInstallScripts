@@ -662,15 +662,15 @@ function setResourceMeter(valueId, barId, percent) {
   $(barId).style.width = `${value}%`;
 }
 
-function renderCpuThreads(threads, running) {
+function renderCpuThreads(threads) {
   const root = $('resourceCpuThreads');
   const values = Array.isArray(threads) ? threads : [];
   root.textContent = '';
-  $('resourceCpuThreadCount').textContent = values.length ? `${values.length} Threads` : (running ? '미지원' : '대기');
+  $('resourceCpuThreadCount').textContent = values.length ? `${values.length} Threads` : '미지원';
   if (!values.length) {
     const empty = document.createElement('span');
     empty.className = 'cpu-thread-empty';
-    empty.textContent = running ? '스레드별 통계를 지원하지 않습니다.' : '서버 시작 후 표시';
+    empty.textContent = 'OS CPU 통계를 불러올 수 없습니다.';
     root.append(empty);
     return;
   }
@@ -736,7 +736,7 @@ $('resourcePublicAddress').onclick = async event => {
 async function refreshResources() {
   try {
     const data = await api('/api/server/resources');
-    renderCpuThreads(data.cpu_threads, data.running);
+    renderCpuThreads(data.cpu_threads);
     setResourceMeter('resourceMemory', 'resourceMemoryBar', data.memory_percent);
     setResourceMeter('resourceDisk', 'resourceDiskBar', data.disk_percent);
     $('resourceMemoryDetail').textContent = data.memory_limit

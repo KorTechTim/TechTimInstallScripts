@@ -65,6 +65,9 @@ RESOURCE_NETWORK_SAMPLE: dict[str, Any] = {
     "received": 0,
     "sent": 0,
 }
+OS_CPU_LOCK = threading.Lock()
+OS_CPU_SAMPLE: dict[int, tuple[int, int]] = {}
+PROC_STAT_FILE = Path(os.getenv("PROC_STAT_FILE", "/proc/stat"))
 PUBLIC_IP_LOCK = threading.Lock()
 PUBLIC_IP_CACHE: dict[str, Any] = {"expires_at": 0.0, "value": ""}
 KST = timezone(timedelta(hours=9), name="KST")
@@ -372,25 +375,47 @@ def public_server_ip() -> str:
         return value
 
 
+def parse_os_cpu_stat(value: str) -> dict[int, tuple[int, int]]:
+    samples: dict[int, tuple[int, int]] = {}
+    for line in value.splitlines():
+        parts = line.split()
+        if not parts or not re.fullmatch(r"cpu\d+", parts[0]):
+            continue
+        try:
+            counters = [int(counter) for counter in parts[1:9]]
+        except ValueError:
+            continue
+        if len(counters) < 4:
+            continue
+        idle = counters[3] + (counters[4] if len(counters) > 4 else 0)
+        samples[int(parts[0][3:])] = (sum(counters), idle)
+    return samples
+
+
+def os_cpu_usage() -> tuple[float, list[dict[str, Any]]]:
+    try:
+        current = parse_os_cpu_stat(PROC_STAT_FILE.read_text(encoding="ascii", errors="ignore"))
+    except OSError:
+        current = {}
+    with OS_CPU_LOCK:
+        previous = dict(OS_CPU_SAMPLE)
+        OS_CPU_SAMPLE.clear()
+        OS_CPU_SAMPLE.update(current)
+
+    threads = []
+    for index in sorted(current):
+        total, idle = current[index]
+        previous_total, previous_idle = previous.get(index, (total, idle))
+        total_delta = total - previous_total
+        idle_delta = idle - previous_idle
+        percent = (total_delta - idle_delta) / total_delta * 100 if total_delta > 0 else 0.0
+        threads.append({"thread": index + 1, "percent": round(min(100.0, max(0.0, percent)), 1)})
+    average = sum(thread["percent"] for thread in threads) / len(threads) if threads else 0.0
+    return round(average, 1), threads
+
+
 def container_resource_usage(container) -> dict[str, Any]:
     stats = container.stats(stream=False)
-    cpu_stats = stats.get("cpu_stats") or {}
-    previous_cpu_stats = stats.get("precpu_stats") or {}
-    cpu_usage = cpu_stats.get("cpu_usage") or {}
-    previous_cpu_usage = previous_cpu_stats.get("cpu_usage") or {}
-    cpu_delta = float(cpu_usage.get("total_usage") or 0) - float(previous_cpu_usage.get("total_usage") or 0)
-    system_delta = float(cpu_stats.get("system_cpu_usage") or 0) - float(previous_cpu_stats.get("system_cpu_usage") or 0)
-    cpu_percent = max(0.0, min(100.0, cpu_delta / system_delta * 100)) if system_delta > 0 and cpu_delta >= 0 else 0.0
-    current_per_cpu = cpu_usage.get("percpu_usage") or []
-    previous_per_cpu = previous_cpu_usage.get("percpu_usage") or []
-    online_cpus = max(1, int(cpu_stats.get("online_cpus") or len(current_per_cpu) or os.cpu_count() or 1))
-    cpu_threads = []
-    if system_delta > 0 and len(current_per_cpu) == len(previous_per_cpu):
-        for index, (current, previous) in enumerate(zip(current_per_cpu, previous_per_cpu), start=1):
-            thread_delta = float(current or 0) - float(previous or 0)
-            thread_percent = thread_delta / system_delta * online_cpus * 100 if thread_delta >= 0 else 0.0
-            cpu_threads.append({"thread": index, "percent": round(min(100.0, max(0.0, thread_percent)), 1)})
-
     memory = stats.get("memory_stats") or {}
     memory_stats = memory.get("stats") or {}
     memory_cache = int(memory_stats.get("total_inactive_file") or memory_stats.get("inactive_file") or 0)
@@ -420,8 +445,6 @@ def container_resource_usage(container) -> dict[str, Any]:
         })
 
     return {
-        "cpu_percent": round(cpu_percent, 1),
-        "cpu_threads": cpu_threads,
         "memory_percent": round(min(100.0, max(0.0, memory_percent)), 1),
         "memory_used": memory_used,
         "memory_limit": memory_limit,
@@ -1165,10 +1188,11 @@ def server_resources(request: Request):
     require_auth(request)
     ensure_dirs()
     disk = shutil.disk_usage(SERVER_DIR)
+    cpu_percent, cpu_threads = os_cpu_usage()
     resources: dict[str, Any] = {
         "running": False,
-        "cpu_percent": 0.0,
-        "cpu_threads": [],
+        "cpu_percent": cpu_percent,
+        "cpu_threads": cpu_threads,
         "memory_percent": 0.0,
         "memory_used": 0,
         "memory_limit": 0,
