@@ -66,6 +66,30 @@ class PanelUpdateCheckTests(unittest.TestCase):
         self.assertEqual(payload["status"], "ok")
         self.assertTrue(payload["update_available"])
 
+    def test_normalizes_registry_prefixed_digest(self):
+        client = FakeDockerClient(
+            "sha256:same",
+            f"{main.PANEL_IMAGE.split(':')[0]}@sha256:same",
+        )
+
+        with patch.object(main.docker, "from_env", return_value=client):
+            payload = main.panel_update_check_payload()
+
+        self.assertFalse(payload["update_available"])
+
+    def test_force_check_bypasses_cached_result(self):
+        main.PANEL_UPDATE_CHECK_CACHE.update({
+            "expires_at": float("inf"),
+            "payload": {"status": "ok", "update_available": False},
+        })
+        client = FakeDockerClient("sha256:current", "sha256:new")
+
+        with patch.object(main.docker, "from_env", return_value=client):
+            payload = main.panel_update_check_payload(force=True)
+
+        self.assertTrue(payload["update_available"])
+        self.assertEqual(client.requested_image, main.PANEL_IMAGE)
+
     def test_registry_failure_does_not_show_false_update_notice(self):
         with patch.object(main.docker, "from_env", side_effect=RuntimeError("registry offline")):
             payload = main.panel_update_check_payload()

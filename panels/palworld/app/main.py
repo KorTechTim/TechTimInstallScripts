@@ -850,11 +850,15 @@ def read_panel_update_status() -> dict:
     return status
 
 
-def panel_update_check_payload() -> dict:
+def normalize_registry_digest(value: Any) -> str:
+    return str(value or "").strip().rsplit("@", 1)[-1].lower()
+
+
+def panel_update_check_payload(force: bool = False) -> dict:
     now = time.monotonic()
     with PANEL_UPDATE_CHECK_LOCK:
         cached = PANEL_UPDATE_CHECK_CACHE.get("payload")
-        if cached and now < float(PANEL_UPDATE_CHECK_CACHE.get("expires_at") or 0):
+        if not force and cached and now < float(PANEL_UPDATE_CHECK_CACHE.get("expires_at") or 0):
             return dict(cached)
 
         try:
@@ -865,11 +869,13 @@ def panel_update_check_payload() -> dict:
             current_image.reload()
             current_image_id = current_image.id
             current_digests = {
-                str(value).rsplit("@", 1)[-1].lower()
+                normalize_registry_digest(value)
                 for value in (current_image.attrs.get("RepoDigests") or [])
                 if "@" in str(value)
             }
-            latest_image_id = str(client.images.get_registry_data(PANEL_IMAGE).id or "").lower()
+            latest_image_id = normalize_registry_digest(
+                client.images.get_registry_data(PANEL_IMAGE).id
+            )
 
             if not latest_image_id or not current_digests:
                 raise RuntimeError("실행 중인 패널 이미지의 digest를 확인할 수 없습니다.")
@@ -2535,7 +2541,7 @@ def dashboard(request: Request):
     .ini-editor-modal { width: min(920px, 100%); }
     .ini-editor-body { display: grid; min-height: 0; gap: 10px; padding: 18px 20px; background: #f8fafc; }
     .ini-editor-path { overflow: hidden; color: #475569; font: 12px/1.4 Consolas, Monaco, monospace; text-overflow: ellipsis; white-space: nowrap; }
-    .ini-editor-textarea { width: 100%; min-height: min(54vh, 560px); box-sizing: border-box; overflow: auto; resize: vertical; border: 1px solid #94a3b8; border-radius: 8px; padding: 14px; background: #0f172a; color: #e2e8f0; font: 13px/1.55 Consolas, Monaco, monospace; tab-size: 2; white-space: pre; }
+    .ini-editor-textarea { width: 100%; min-height: min(54vh, 560px); box-sizing: border-box; overflow-x: hidden; overflow-y: auto; resize: vertical; border: 1px solid #94a3b8; border-radius: 8px; padding: 14px; background: #0f172a; color: #e2e8f0; font: 13px/1.55 Consolas, Monaco, monospace; overflow-wrap: anywhere; tab-size: 2; white-space: pre-wrap; word-break: break-word; }
     .ini-editor-textarea:focus { outline: 2px solid #14b8a6; outline-offset: 1px; border-color: #0f766e; }
     .ini-editor-status { min-height: 18px; color: #64748b; font-size: 12px; }
     .ini-editor-status.success { color: #047857; font-weight: bold; }
@@ -3061,7 +3067,7 @@ def dashboard(request: Request):
         </div>
         <div class="ini-editor-body">
           <div id="iniEditorPath" class="ini-editor-path">파일을 불러오는 중입니다.</div>
-          <textarea id="iniEditorContent" class="ini-editor-textarea" wrap="off" spellcheck="false" aria-label="INI 파일 내용" onkeydown="handleIniEditorKeydown(event)"></textarea>
+          <textarea id="iniEditorContent" class="ini-editor-textarea" wrap="soft" spellcheck="false" aria-label="INI 파일 내용" onkeydown="handleIniEditorKeydown(event)"></textarea>
           <div id="iniEditorStatus" class="ini-editor-status" role="status" aria-live="polite"></div>
         </div>
         <div class="modal-foot">
@@ -3084,6 +3090,7 @@ def dashboard(request: Request):
     let panelUpdateRequested = false;
     let panelUpdateProgressVisible = false;
     let panelUpdatePollTimer = null;
+    let panelUpdateCheckTimer = null;
     let panelUpdateReloadScheduled = false;
     let resourceDetailPollTimer = null;
     let resourceRequestActive = false;
@@ -4953,20 +4960,42 @@ def dashboard(request: Request):
       loadPanelUpdateStatus();
     }
 
-    async function checkPanelUpdateOnLoad() {
+    function schedulePanelUpdateCheck(delay) {
+      if (panelUpdateCheckTimer) {
+        window.clearTimeout(panelUpdateCheckTimer);
+      }
+
+      panelUpdateCheckTimer = window.setTimeout(function () {
+        checkPanelUpdateOnLoad(true);
+      }, delay);
+    }
+
+    async function checkPanelUpdateOnLoad(force) {
       const notice = document.getElementById("panelUpdateNotice");
+      const updateButton = document.getElementById("panelUpdateButton");
 
       try {
-        const response = await fetch("/api/panel/update/check", { cache: "no-store" });
+        const query = force ? "?force=true" : "";
+        const response = await fetch("/api/panel/update/check" + query, { cache: "no-store" });
         const data = await response.json();
 
         if (!response.ok) {
           throw new Error(data.detail || "업데이트 확인 실패");
         }
 
-        notice.classList.toggle("show", Boolean(data.update_available));
+        if ((data.status || "").toLowerCase() !== "ok") {
+          throw new Error(data.message || "업데이트 정보를 확인할 수 없습니다.");
+        }
+
+        const updateAvailable = Boolean(data.update_available);
+        notice.classList.toggle("show", updateAvailable);
+        updateButton.title = updateAvailable
+          ? "업데이트가 있습니다. TechTim 구동기를 업그레이드하세요"
+          : "TechTim 구동기 업데이트";
+        schedulePanelUpdateCheck(5 * 60 * 1000);
       } catch (err) {
-        notice.classList.remove("show");
+        updateButton.title = "업데이트 자동 확인을 잠시 후 다시 시도합니다";
+        schedulePanelUpdateCheck(60 * 1000);
       }
     }
 
@@ -5114,7 +5143,7 @@ def dashboard(request: Request):
     }
 
     async function initializeDashboard() {
-      checkPanelUpdateOnLoad();
+      checkPanelUpdateOnLoad(true);
       await loadStatus();
       const serverStatus = await loadServerStatus();
       const shouldShowServerLog = (serverStatus || "").toLowerCase() === "running";
@@ -5255,9 +5284,9 @@ def panel_update_status(request: Request):
 
 
 @app.get("/api/panel/update/check")
-def panel_update_check(request: Request):
+def panel_update_check(request: Request, force: bool = False):
     require_auth(request)
-    return panel_update_check_payload()
+    return panel_update_check_payload(force=force)
 
 
 @app.get("/api/docker/status")
