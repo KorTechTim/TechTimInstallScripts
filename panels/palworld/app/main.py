@@ -30,7 +30,7 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 GAME_CODE = os.getenv("GAME_CODE", "palworld")
-PANEL_VERSION = os.getenv("PANEL_VERSION", "1.1.0")
+PANEL_VERSION = "1.1.0"
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 HOST_DATA_DIR = Path(os.getenv("HOST_DATA_DIR", "/opt/techtim/palworld/data"))
@@ -802,6 +802,7 @@ def default_panel_update_status() -> dict:
     return {
         "status": "idle",
         "message": "TechTim 구동기 업데이트를 확인할 수 있습니다.",
+        "progress": 0,
         "current_image_id": "",
         "latest_image_id": "",
         "updated_at": "",
@@ -901,6 +902,65 @@ def is_panel_updater_running() -> bool:
         return False
 
 
+def panel_pull_event_progress(status: str, progress_detail: dict[str, Any]) -> float | None:
+    normalized = status.strip().lower()
+    current = float(progress_detail.get("current") or 0)
+    total = float(progress_detail.get("total") or 0)
+    ratio = min(1.0, current / total) if total > 0 else 0.0
+    if normalized in {"already exists", "pull complete"}:
+        return 1.0
+    if normalized == "extracting":
+        return 0.7 + ratio * 0.3
+    if normalized in {"download complete", "verifying checksum"}:
+        return 0.7
+    if normalized == "downloading":
+        return ratio * 0.7
+    if normalized in {"pulling fs layer", "waiting"}:
+        return 0.0
+    return None
+
+
+def pull_panel_image_with_progress(client, current_image_id: str):
+    repository, tag = docker.utils.parse_repository_tag(PANEL_IMAGE)
+    tag = tag or "latest"
+    layers: dict[str, float] = {}
+    last_progress = 10
+    for event in client.api.pull(repository, tag=tag, stream=True, decode=True):
+        if not isinstance(event, dict):
+            continue
+        if event.get("error"):
+            raise RuntimeError(str(event["error"]))
+        layer = str(event.get("id") or "").strip()
+        layer_progress = panel_pull_event_progress(
+            sanitize_log_text(event.get("status", "")),
+            event.get("progressDetail") if isinstance(event.get("progressDetail"), dict) else {},
+        )
+        if layer and layer_progress is not None:
+            layers[layer] = max(layers.get(layer, 0.0), layer_progress)
+        if not layers:
+            continue
+        progress = min(84, 10 + int(74 * sum(layers.values()) / len(layers)))
+        if progress <= last_progress:
+            continue
+        last_progress = progress
+        write_panel_update_status(
+            "downloading",
+            "최신 TechTim 구동기 이미지를 다운로드하고 있습니다.",
+            progress=progress,
+            current_image_id=current_image_id,
+        )
+
+    image = client.images.get(PANEL_IMAGE)
+    write_panel_update_status(
+        "downloading",
+        "최신 이미지 다운로드가 완료되어 무결성을 확인하고 있습니다.",
+        progress=85,
+        current_image_id=current_image_id,
+        latest_image_id=image.id,
+    )
+    return image
+
+
 def panel_update_job() -> None:
     global PANEL_UPDATE_ACTIVE
 
@@ -908,6 +968,7 @@ def panel_update_job() -> None:
         write_panel_update_status(
             "checking",
             "현재 TechTim 구동기 이미지와 최신 이미지를 비교하고 있습니다.",
+            progress=5,
         )
         client = docker.from_env()
         current_container = client.containers.get(PANEL_CONTAINER_NAME)
@@ -917,15 +978,17 @@ def panel_update_job() -> None:
         write_panel_update_status(
             "downloading",
             "최신 TechTim 구동기 이미지를 확인하고 있습니다. 이미지 다운로드에는 시간이 걸릴 수 있습니다.",
+            progress=10,
             current_image_id=current_image_id,
         )
-        latest_image = client.images.pull(PANEL_IMAGE)
+        latest_image = pull_panel_image_with_progress(client, current_image_id)
         latest_image_id = latest_image.id
 
         if current_image_id == latest_image_id:
             write_panel_update_status(
                 "not_required",
                 "이미 최신 버전의 TechTim 구동기를 사용하고 있어 업데이트가 필요하지 않습니다.",
+                progress=100,
                 current_image_id=current_image_id,
                 latest_image_id=latest_image_id,
             )
@@ -947,6 +1010,7 @@ def panel_update_job() -> None:
         write_panel_update_status(
             "restarting",
             "최신 이미지 다운로드가 완료되었습니다. 패널 컨테이너를 교체하고 있습니다.",
+            progress=90,
             current_image_id=current_image_id,
             latest_image_id=latest_image_id,
         )
@@ -975,9 +1039,11 @@ def panel_update_job() -> None:
             },
         )
     except Exception as error:
+        failed_progress = int(read_panel_update_status().get("progress") or 0)
         write_panel_update_status(
             "failed",
             f"TechTim 구동기 업데이트에 실패했습니다: {error}",
+            progress=failed_progress,
         )
     finally:
         with PANEL_UPDATE_LOCK:
@@ -2284,17 +2350,18 @@ def dashboard(request: Request):
     .advanced-button img { width: 46px; height: 46px; display: block; object-fit: cover; border-radius: 12px; }
     .advanced-button svg { width: 44px; height: 44px; display: block; padding: 8px; border-radius: 12px; background: linear-gradient(145deg, #0f766e, #155e75); color: #ffffff; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.24); }
     .advanced-button-label { color: #0f3f3d; font-size: 12px; font-weight: bold; line-height: 1; }
-    .management-shortcuts { display: grid; grid-template-columns: minmax(0, 1fr); gap: 9px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.24); }
-    .management-shortcut { min-width: 0; min-height: 58px; display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 9px 12px; border: 1px solid rgba(205, 239, 230, 0.30); border-radius: 7px; background: rgba(7, 53, 52, 0.74); color: #ffffff; text-align: left; box-shadow: inset 0 1px 0 rgba(255,255,255,0.06); }
+    .management-shortcuts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.24); }
+    .management-shortcut { min-width: 0; min-height: 68px; display: grid; grid-template-columns: 42px minmax(0, 1fr); align-items: center; gap: 11px; padding: 9px 12px; border: 1px solid rgba(205, 239, 230, 0.30); border-radius: 7px; background: rgba(7, 53, 52, 0.74); color: #ffffff; text-align: left; box-shadow: inset 0 1px 0 rgba(255,255,255,0.06); }
     .management-shortcut:hover { border-color: #99f6e4; background: rgba(15, 118, 110, 0.86); transform: translateY(-1px); }
     .management-shortcut-icon { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 7px; background: #9a594d; color: #ffffff; }
+    .discord-shortcut .management-shortcut-icon { background: #5865f2; }
     .management-shortcut-icon svg { width: 23px; height: 23px; }
     .management-shortcut-copy { min-width: 0; display: grid; gap: 4px; }
     .management-shortcut-copy b { font-size: 13px; }
     .management-shortcut-copy small { overflow: hidden; color: rgba(255,255,255,0.72); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-    .restart-hub-summary { color: #a7f3d0; font-size: 10px; font-weight: bold; white-space: nowrap; }
-    .resource-monitor { position: relative; z-index: 1; min-width: 0; display: flex; flex-direction: column; gap: 13px; padding: 24px 26px; border-left: 1px solid rgba(255,255,255,0.26); background: rgba(4, 36, 39, 0.58); cursor: pointer; transition: background 0.18s ease, box-shadow 0.18s ease; }
-    .resource-monitor:hover { background: rgba(5, 55, 55, 0.72); box-shadow: inset 0 0 0 1px rgba(153,246,228,0.2); }
+    .restart-hub-summary { grid-column: 2; margin-top: -8px; color: #a7f3d0; font-size: 9px; font-weight: bold; white-space: nowrap; }
+    .resource-monitor { position: relative; z-index: 1; min-width: 0; display: flex; flex-direction: column; gap: 13px; padding: 24px 26px; border-left: 1px solid rgba(255,255,255,0.46); background: transparent; cursor: pointer; }
+    .resource-monitor:hover { background: transparent; }
     .resource-monitor:focus-visible { outline: 2px solid #99f6e4; outline-offset: -4px; }
     .resource-monitor-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
     .resource-monitor-head h3 { margin: 0 0 4px; font-size: 17px; }
@@ -2322,18 +2389,19 @@ def dashboard(request: Request):
     .resource-live-state { background: #b91c1c; color: #ffffff; }
     .resource-live-state.online { background: #0f766e; }
     .resource-refresh-badge { border: 1px solid #99f6e4; background: #ccfbf1; color: #115e59; }
-    .resource-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .resource-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: auto auto; align-items: stretch; gap: 12px; }
     .resource-detail-card { min-width: 0; min-height: 176px; display: flex; flex-direction: column; gap: 12px; padding: 15px; border: 1px solid #cbd5e1; border-radius: 10px; background: rgba(255,255,255,0.9); color: #1f2937; }
+    .resource-detail-card:nth-child(n+3) { min-height: 0; }
     .resource-detail-card header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
     .resource-detail-card header > div { display: grid; gap: 3px; }
     .resource-detail-card header span { color: #0f172a; font-size: 13px; font-weight: 800; }
     .resource-detail-card header small { color: #64748b; font-size: 9px; }
     .resource-detail-card header strong { font: 800 18px/1 Consolas, Monaco, monospace; }
     .resource-detail-card footer { margin-top: auto; color: #64748b; font-size: 10px; }
-    .resource-detail-card .resource-meter { background: #dbe7e7; }
+    .resource-detail-card .resource-meter { height: 27px; background: #dbe7e7; }
     .cpu-thread-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; }
     .cpu-thread-item { min-width: 0; display: grid; grid-template-columns:auto 1fr auto; align-items: center; gap: 7px; font-size: 9px; }
-    .cpu-thread-item i { height: 6px; overflow: hidden; border-radius: 999px; background: #dbe7e7; }
+    .cpu-thread-item i { height: 12px; overflow: hidden; border-radius: 999px; background: #dbe7e7; }
     .cpu-thread-item i span { display: block; height: 100%; border-radius: inherit; background: #14b8a6; }
     .resource-detail-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
     .resource-detail-stats div { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px; border: 1px solid #e2e8f0; border-radius: 7px; background: #f8fafc; font-size: 9px; }
@@ -2370,7 +2438,23 @@ def dashboard(request: Request):
     .panel-update-status { min-height: 48px; padding: 14px 16px; border: 1px solid #dbe4ea; border-radius: 10px; background: #ffffff; color: #475569; font-size: 13px; line-height: 1.55; }
     .panel-update-status[data-status="completed"], .panel-update-status[data-status="not_required"] { border-color: #a7d8c7; background: #ecfdf5; color: #166534; }
     .panel-update-status[data-status="failed"] { border-color: #fecaca; background: #fef2f2; color: #b91c1c; }
+    .panel-update-progress { display: grid; gap: 8px; }
+    .panel-update-progress[hidden] { display: none; }
+    .panel-update-progress-head { display: flex; align-items: center; justify-content: space-between; color: #475569; font-size: 12px; }
+    .panel-update-progress-head strong { color: #0f766e; font-size: 14px; }
+    .panel-update-progress-track { height: 12px; overflow: hidden; border: 1px solid #cbd5e1; border-radius: 6px; background: #e5e7eb; }
+    .panel-update-progress-track span { display: block; width: 0; height: 100%; background: #23836f; transition: width 0.35s ease; }
+    .panel-update-progress[data-status="completed"] .panel-update-progress-track span, .panel-update-progress[data-status="not_required"] .panel-update-progress-track span { background: #3f914f; }
+    .panel-update-progress[data-status="failed"] .panel-update-progress-track span { background: #b91c1c; }
+    .panel-update-progress[data-status="failed"] .panel-update-progress-head strong { color: #b91c1c; }
     .panel-update-actions { display: flex; justify-content: flex-end; gap: 10px; }
+    .coming-soon-modal { width: min(430px, 100%); }
+    .coming-soon-body { display: grid; justify-items: center; gap: 14px; padding: 28px 24px 22px; text-align: center; background: #f8fafc; }
+    .coming-soon-icon { display: grid; place-items: center; width: 58px; height: 58px; border-radius: 14px; background: #5865f2; color: #ffffff; box-shadow: 0 12px 28px rgba(88,101,242,0.26); }
+    .coming-soon-icon svg { width: 30px; height: 30px; }
+    .coming-soon-body strong { color: #1f2937; font-size: 19px; }
+    .coming-soon-body p { margin: 0; color: #64748b; font-size: 13px; line-height: 1.55; }
+    .coming-soon-body button { min-width: 110px; margin-top: 4px; }
     .server-stop-backdrop { background: rgba(10, 18, 28, 0.56); backdrop-filter: blur(7px); -webkit-backdrop-filter: blur(7px); }
     .server-stop-modal { width: min(470px, 100%); }
     .server-stop-body { display: grid; justify-items: center; gap: 16px; padding: 30px 26px 24px; text-align: center; background: #f8fafc; }
@@ -2482,6 +2566,7 @@ def dashboard(request: Request):
       .restart-hub-summary { grid-column: 2; white-space: normal; }
       .resource-monitor-modal-summary { align-items: flex-start; flex-direction: column; }
       .resource-detail-stats, .cpu-thread-grid { grid-template-columns: 1fr; }
+      .management-shortcuts { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -2657,10 +2742,18 @@ def dashboard(request: Request):
                 <span class="management-shortcut-copy"><b>예약 재시작</b><small>매일 지정한 한국표준 시각에 게임 서버를 재시작합니다.</small></span>
                 <span id="restartScheduleSummary" class="restart-hub-summary">예약 정보 확인 중</span>
               </button>
+              <button id="discordIntegrationBtn" class="management-shortcut discord-shortcut" type="button" onclick="openDiscordComingSoon()" title="디스코드 연동">
+                <span class="management-shortcut-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M8 12h.01" /><path d="M12 12h.01" /><path d="M16 12h.01" /><path d="M21 15a4 4 0 0 1-4 4H8l-5 3v-7a4 4 0 0 1-1-2.65V7a4 4 0 0 1 4-4h11a4 4 0 0 1 4 4Z" />
+                  </svg>
+                </span>
+                <span class="management-shortcut-copy"><b>디스코드 연동</b><small>서버 운영 알림과 상태 연동</small></span>
+              </button>
             </nav>
           </div>
           <aside id="resourceMonitorEntry" class="resource-monitor" role="button" tabindex="0" aria-haspopup="dialog" aria-controls="resourceMonitorModal" aria-label="상세 서버 성능 모니터링 열기" onclick="openResourceMonitor()" onkeydown="handleResourceMonitorKey(event)">
-            <div class="resource-monitor-head"><div><h3>서버 리소스</h3><p>Ubuntu OS 및 Palworld 게임 컨테이너</p></div><span id="resourceStatus">새로고침 : 5초</span></div>
+            <div class="resource-monitor-head"><div><h3>서버 리소스</h3><p>Linux OS 및 Palworld 게임 컨테이너</p></div><span id="resourceStatus">새로고침 : 5초</span></div>
             <div class="resource-summary-card">
               <div class="resource-summary-row"><div><span>CPU</span><small>OS 전체 사용률</small></div><strong id="resourceCpuSummary">0%</strong></div>
               <div class="resource-meter"><span id="resourceCpuSummaryBar"></span></div>
@@ -2704,6 +2797,10 @@ def dashboard(request: Request):
             </strong>
           </div>
           <div id="panelUpdateStatus" class="panel-update-status" data-status="idle" role="status" aria-live="polite">업데이트 상태를 확인하고 있습니다.</div>
+          <div id="panelUpdateProgress" class="panel-update-progress" data-status="idle" hidden>
+            <div class="panel-update-progress-head"><span>업데이트 진행률</span><strong id="panelUpdatePercent">0%</strong></div>
+            <div class="panel-update-progress-track" role="progressbar" aria-label="TechTim 구동기 업데이트 진행률" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="panelUpdateProgressBar"></span></div>
+          </div>
           <div class="panel-update-actions">
             <button class="secondary" type="button" onclick="closePanelUpdateModal()">닫기</button>
             <button id="panelUpdateBtn" type="button" onclick="requestPanelUpdate()">업데이트 확인 및 설치</button>
@@ -2792,7 +2889,7 @@ def dashboard(request: Request):
         </div>
         <div class="resource-monitor-modal-body">
           <div class="resource-monitor-modal-summary">
-            <div><span class="resource-live-state" id="resourceDetailServerState">상태 확인 중</span><strong>Ubuntu OS 및 Palworld 게임 컨테이너</strong><small id="resourceDetailUpdatedAt">리소스 정보를 불러오고 있습니다.</small></div>
+            <div><span class="resource-live-state" id="resourceDetailServerState">상태 확인 중</span><strong>Linux OS 및 Palworld 게임 컨테이너</strong><small id="resourceDetailUpdatedAt">리소스 정보를 불러오고 있습니다.</small></div>
             <span class="resource-refresh-badge" id="resourceDetailStatus">새로고침 : 1초</span>
           </div>
           <div class="resource-detail-grid">
@@ -2824,6 +2921,25 @@ def dashboard(request: Request):
               <footer>Palworld 게임 컨테이너 기준 실시간 전송량</footer>
             </section>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="discordComingSoonModal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal coming-soon-modal" role="dialog" aria-modal="true" aria-labelledby="discordComingSoonTitle">
+        <div class="modal-head">
+          <h2 id="discordComingSoonTitle">디스코드 연동</h2>
+          <button class="modal-close" type="button" onclick="closeDiscordComingSoon()" title="닫기" aria-label="닫기">×</button>
+        </div>
+        <div class="coming-soon-body">
+          <div class="coming-soon-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M8 12h.01" /><path d="M12 12h.01" /><path d="M16 12h.01" /><path d="M21 15a4 4 0 0 1-4 4H8l-5 3v-7a4 4 0 0 1-1-2.65V7a4 4 0 0 1 4-4h11a4 4 0 0 1 4 4Z" />
+            </svg>
+          </div>
+          <strong>현재 구현 중입니다.</strong>
+          <p>디스코드 서버 알림과 운영 연동 기능을 준비하고 있습니다.</p>
+          <button type="button" onclick="closeDiscordComingSoon()">확인</button>
         </div>
       </div>
     </div>
@@ -2887,6 +3003,7 @@ def dashboard(request: Request):
     let gameServerIsRunning = false;
     let pendingUpdateResult = false;
     let panelUpdateRequested = false;
+    let panelUpdateProgressVisible = false;
     let panelUpdatePollTimer = null;
     let panelUpdateReloadScheduled = false;
     let resourceDetailPollTimer = null;
@@ -4425,6 +4542,21 @@ def dashboard(request: Request):
       openResourceMonitor();
     }
 
+    function openDiscordComingSoon() {
+      const modal = document.getElementById("discordComingSoonModal");
+      if (modal.parentElement !== document.body) {
+        document.body.appendChild(modal);
+      }
+      modal.classList.add("show");
+      modal.setAttribute("aria-hidden", "false");
+    }
+
+    function closeDiscordComingSoon() {
+      const modal = document.getElementById("discordComingSoonModal");
+      modal.classList.remove("show");
+      modal.setAttribute("aria-hidden", "true");
+    }
+
     function readConfigForm() {
       return {
         ServerName: document.getElementById("cfgServerName").value.trim() || "TechTim Palworld Server",
@@ -4639,6 +4771,21 @@ def dashboard(request: Request):
       panelUpdatePollTimer = window.setTimeout(loadPanelUpdateStatus, delay || 2000);
     }
 
+    function setPanelUpdateProgress(progress, status) {
+      const value = Math.max(0, Math.min(100, Math.round(Number(progress) || 0)));
+      const wrapper = document.getElementById("panelUpdateProgress");
+      const track = wrapper.querySelector('[role="progressbar"]');
+      wrapper.dataset.status = status || "idle";
+      document.getElementById("panelUpdatePercent").innerText = value + "%";
+      document.getElementById("panelUpdateProgressBar").style.width = value + "%";
+      track.setAttribute("aria-valuenow", String(value));
+    }
+
+    function setPanelUpdateProgressVisible(visible) {
+      panelUpdateProgressVisible = Boolean(visible);
+      document.getElementById("panelUpdateProgress").hidden = !panelUpdateProgressVisible;
+    }
+
     async function loadPanelUpdateStatus() {
       const statusBox = document.getElementById("panelUpdateStatus");
       const updateButton = document.getElementById("panelUpdateBtn");
@@ -4655,6 +4802,9 @@ def dashboard(request: Request):
         const active = ["checking", "downloading", "restarting", "running", "started"].includes(status);
         statusBox.dataset.status = status;
         statusBox.innerText = data.message || "업데이트 상태를 확인할 수 없습니다.";
+        const fallbackProgress = { started: 2, running: 5, checking: 5, downloading: 10, restarting: 90, completed: 100, not_required: 100 };
+        const reportedProgress = Number(data.progress);
+        setPanelUpdateProgress(reportedProgress > 0 ? reportedProgress : (fallbackProgress[status] || 0), status);
         updateButton.disabled = active;
         updateButton.innerText = active ? "업데이트 진행 중" : "업데이트 확인 및 설치";
 
@@ -4674,6 +4824,7 @@ def dashboard(request: Request):
           panelUpdateRequested = false;
           panelUpdateReloadScheduled = true;
           statusBox.innerText = "TechTim 구동기 업데이트가 완료되었습니다. 화면을 새로고침합니다.";
+          setPanelUpdateProgress(100, "completed");
           window.setTimeout(function () { window.location.reload(); }, 1800);
           return;
         }
@@ -4685,12 +4836,15 @@ def dashboard(request: Request):
         if (panelUpdateRequested) {
           statusBox.dataset.status = "restarting";
           statusBox.innerText = "패널 컨테이너를 교체하고 있습니다. 잠시 후 자동으로 다시 연결합니다.";
+          const currentProgress = Number(document.querySelector('#panelUpdateProgress [role="progressbar"]').getAttribute("aria-valuenow")) || 0;
+          setPanelUpdateProgress(Math.max(currentProgress, 92), "restarting");
           updateButton.disabled = true;
           updateButton.innerText = "업데이트 진행 중";
           schedulePanelUpdateStatus(1800);
         } else {
           statusBox.dataset.status = "failed";
           statusBox.innerText = "업데이트 상태 조회 실패: " + err;
+          setPanelUpdateProgress(0, "failed");
         }
       }
     }
@@ -4705,11 +4859,13 @@ def dashboard(request: Request):
 
       panelUpdateRequested = true;
       panelUpdateReloadScheduled = false;
+      setPanelUpdateProgressVisible(true);
       document.getElementById("panelUpdateNotice").classList.remove("show");
       updateButton.disabled = true;
       updateButton.innerText = "업데이트 확인 중";
       statusBox.dataset.status = "checking";
       statusBox.innerText = "TechTim 구동기 업데이트 확인을 요청하고 있습니다.";
+      setPanelUpdateProgress(2, "checking");
 
       try {
         const response = await fetch("/api/panel/update", { method: "POST" });
@@ -4728,6 +4884,7 @@ def dashboard(request: Request):
         updateButton.innerText = "업데이트 확인 및 설치";
         statusBox.dataset.status = "failed";
         statusBox.innerText = "TechTim 구동기 업데이트 요청 실패: " + err;
+        setPanelUpdateProgress(0, "failed");
       }
     }
 
@@ -4853,6 +5010,7 @@ def request_panel_update(request: Request, background_tasks: BackgroundTasks):
         write_panel_update_status(
             "failed",
             "이전에 중단된 구동기 업데이트 작업을 정리했습니다. 업데이트를 다시 시작합니다.",
+            progress=int(current_status.get("progress") or 0),
         )
 
     with PANEL_UPDATE_LOCK:
@@ -4867,6 +5025,7 @@ def request_panel_update(request: Request, background_tasks: BackgroundTasks):
     write_panel_update_status(
         "checking",
         "TechTim 구동기 업데이트 확인 작업을 시작합니다.",
+        progress=2,
     )
     background_tasks.add_task(panel_update_job)
 

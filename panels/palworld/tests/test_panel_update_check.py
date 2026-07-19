@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from panels.palworld.app import main
+from panels.palworld.app import main, self_update
 
 
 class FakeImage:
@@ -73,6 +73,50 @@ class PanelUpdateCheckTests(unittest.TestCase):
         self.assertEqual(payload["status"], "unavailable")
         self.assertFalse(payload["update_available"])
         self.assertIn("registry offline", payload["message"])
+
+
+class PanelUpdateProgressTests(unittest.TestCase):
+    def test_default_status_starts_with_zero_progress(self):
+        self.assertEqual(main.default_panel_update_status()["progress"], 0)
+
+    def test_docker_download_and_extract_progress_are_weighted(self):
+        self.assertEqual(
+            main.panel_pull_event_progress("Downloading", {"current": 50, "total": 100}),
+            0.35,
+        )
+        self.assertEqual(
+            main.panel_pull_event_progress("Extracting", {"current": 50, "total": 100}),
+            0.85,
+        )
+
+    def test_completed_layer_reports_full_progress(self):
+        self.assertEqual(main.panel_pull_event_progress("Pull complete", {}), 1.0)
+        self.assertIsNone(main.panel_pull_event_progress("Unknown status", {}))
+
+
+class PanelVersionUpgradeTests(unittest.TestCase):
+    def test_release_version_is_not_overridden_by_legacy_container_value(self):
+        self.assertEqual(main.PANEL_VERSION, "1.1.0")
+
+    def test_self_update_drops_legacy_panel_version_environment(self):
+        container = type(
+            "Container",
+            (),
+            {
+                "attrs": {
+                    "Config": {
+                        "Env": ["PANEL_VERSION=1.0.0", "DATA_DIR=/data"],
+                        "Labels": {},
+                    },
+                    "HostConfig": {},
+                }
+            },
+        )()
+
+        options = self_update.container_run_options(container)
+
+        self.assertNotIn("PANEL_VERSION=1.0.0", options["environment"])
+        self.assertIn("DATA_DIR=/data", options["environment"])
 
 
 if __name__ == "__main__":

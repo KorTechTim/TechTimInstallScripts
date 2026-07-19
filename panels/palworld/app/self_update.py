@@ -36,10 +36,15 @@ def container_run_options(container) -> dict:
     config = attrs.get("Config") or {}
     host_config = attrs.get("HostConfig") or {}
     network_mode = str(host_config.get("NetworkMode") or "").strip()
+    environment = [
+        value
+        for value in (config.get("Env") or [])
+        if not str(value).startswith("PANEL_VERSION=")
+    ]
     options = {
         "detach": True,
         "name": TARGET_CONTAINER,
-        "environment": config.get("Env") or [],
+        "environment": environment,
         "labels": config.get("Labels") or {},
         "tty": bool(config.get("Tty")),
         "stdin_open": bool(config.get("OpenStdin")),
@@ -126,6 +131,7 @@ def main() -> None:
     write_status(
         "restarting",
         "기존 TechTim 구동기 컨테이너를 중지하고 최신 이미지로 교체하고 있습니다.",
+        progress=92,
         current_image_id=old_image_id,
         latest_image_id=latest_image_id,
     )
@@ -135,10 +141,18 @@ def main() -> None:
     try:
         replacement = client.containers.run(TARGET_IMAGE, **options)
         wait_until_running(replacement)
+        write_status(
+            "restarting",
+            "새 TechTim 구동기 컨테이너가 시작되었습니다. 연결을 마무리하고 있습니다.",
+            progress=97,
+            current_image_id=old_image_id,
+            latest_image_id=latest_image_id,
+        )
         restart_proxy_if_present(client)
         write_status(
             "completed",
             "TechTim 구동기 업데이트가 완료되었습니다.",
+            progress=100,
             current_image_id=latest_image_id,
             latest_image_id=latest_image_id,
         )
@@ -152,6 +166,7 @@ def main() -> None:
             write_status(
                 "failed",
                 f"업데이트에 실패하여 기존 TechTim 구동기로 복구했습니다: {update_error}",
+                progress=100,
                 current_image_id=old_image_id,
                 latest_image_id=latest_image_id,
                 rollback="completed",
@@ -160,6 +175,7 @@ def main() -> None:
             write_status(
                 "failed",
                 f"업데이트와 기존 버전 복구에 모두 실패했습니다: {update_error}; 복구 오류: {rollback_error}",
+                progress=97,
                 current_image_id=old_image_id,
                 latest_image_id=latest_image_id,
                 rollback="failed",
@@ -180,6 +196,7 @@ if __name__ == "__main__":
             write_status(
                 "failed",
                 f"TechTim 구동기 교체 작업에 실패했습니다: {error}",
+                progress=int(existing.get("progress") or 0),
             )
 
         raise
