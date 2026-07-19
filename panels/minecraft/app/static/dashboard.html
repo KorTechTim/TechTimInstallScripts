@@ -86,23 +86,14 @@
             </button>
           </nav>
         </div>
-        <aside class="resource-monitor" aria-label="서버 리소스 모니터링">
-          <div class="resource-monitor-head"><div><h3>서버 리소스</h3><p>Ubuntu OS · 게임 컨테이너 · 데이터 디스크</p></div><span id="resourceStatus">새로고침 : 5초</span></div>
-          <div class="resource-grid">
-            <div class="resource-item cpu-resource"><div class="resource-item-head"><span>CPU Threads</span><strong id="resourceCpuThreadCount">대기</strong></div><div class="cpu-thread-grid" id="resourceCpuThreads"><span class="cpu-thread-empty">OS 사용률 확인 중</span></div><small>OS 논리 CPU별 전체 사용률</small></div>
-            <div class="resource-item memory-resource">
-              <div class="resource-item-head"><span>MEM</span><strong id="resourceMemory">0%</strong></div>
-              <div class="resource-meter"><span id="resourceMemoryBar"></span></div>
-              <div class="memory-stat-grid">
-                <div><span>전체</span><strong id="resourceMemoryTotal">0 B</strong></div>
-                <div><span>사용</span><strong id="resourceMemoryUsed">0 B</strong></div>
-                <div><span>사용 가능</span><strong id="resourceMemoryAvailable">0 B</strong></div>
-                <div><span>가상 메모리</span><strong id="resourceSwapDetail">사용 안 함</strong></div>
-              </div>
-              <small id="resourceMemoryDetail">게임 서버 메모리 확인 중</small>
-            </div>
-            <div class="resource-item"><div class="resource-item-head"><span>Disk</span><strong id="resourceDisk">0%</strong></div><div class="resource-meter"><span id="resourceDiskBar"></span></div><small id="resourceDiskDetail">0 B / 0 B</small></div>
-            <div class="resource-item network"><div class="resource-item-head"><span>Network</span><strong id="resourceNetworkState">대기</strong></div><div class="network-rates"><span id="resourceNetworkDown">↓ 0 B/s</span><span id="resourceNetworkUp">↑ 0 B/s</span></div><small>게임 서버 수신 / 송신</small><button class="public-address" id="resourcePublicAddress" type="button" title="클릭하여 공인 IP 복사" disabled><span>공인 IP</span><strong id="resourcePublicAddressText">확인 중</strong><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg></button></div>
+        <aside class="resource-monitor resource-monitor-entry" id="resourceMonitorEntry" role="button" tabindex="0" aria-haspopup="dialog" aria-controls="resourceMonitorDialog" aria-label="상세 서버 리소스 모니터링 열기">
+          <div class="resource-monitor-head"><div><h3>서버 리소스</h3><p>Ubuntu OS 전체 사용률</p></div><span id="resourceStatus">새로고침 : 5초</span></div>
+          <div class="resource-summary-card">
+            <div class="resource-summary-row"><div><span>CPU</span><small>OS 전체 사용률</small></div><strong id="resourceCpuSummary">0%</strong></div>
+            <div class="resource-meter"><span id="resourceCpuSummaryBar"></span></div>
+            <div class="resource-summary-row"><div><span>MEM</span><small>전체 메모리 사용률</small></div><strong id="resourceMemorySummary">0%</strong></div>
+            <div class="resource-meter memory"><span id="resourceMemorySummaryBar"></span></div>
+            <div class="resource-summary-foot"><span id="resourceServerState">게임 서버 대기</span><b>클릭하여 상세 보기</b></div>
           </div>
         </aside>
       </section>
@@ -296,6 +287,45 @@
         <button class="restart-schedule-save" id="restartScheduleSave" type="submit">예약 저장</button>
       </form>
       <div class="restart-schedule-result" id="restartScheduleResult" data-status="not_run" role="status" aria-live="polite">예약 재시작 실행 기록이 없습니다.</div>
+    </div>
+  </dialog>
+
+  <dialog id="resourceMonitorDialog" class="modal resource-monitor-modal">
+    <div class="modal-head"><div><small>LIVE MONITORING</small><h2>상세 서버 모니터링</h2></div><button class="close" type="button" data-close="resourceMonitorDialog" aria-label="닫기">×</button></div>
+    <div class="resource-monitor-modal-body">
+      <div class="resource-monitor-modal-summary">
+        <div><span class="resource-live-state" id="resourceDetailServerState">상태 확인 중</span><strong>Ubuntu OS 및 Minecraft 게임 컨테이너</strong><small id="resourceDetailUpdatedAt">리소스 정보를 불러오고 있습니다.</small></div>
+        <span class="resource-refresh-badge" id="resourceDetailStatus">새로고침 : 1초</span>
+      </div>
+      <div class="resource-detail-grid">
+        <section class="resource-detail-card cpu-detail-card">
+          <header><div><span>CPU</span><small>OS 논리 CPU별 전체 사용률</small></div><strong id="resourceDetailCpu">0%</strong></header>
+          <div class="resource-meter"><span id="resourceDetailCpuBar"></span></div>
+          <div class="cpu-thread-grid" id="resourceDetailCpuThreads"><span class="cpu-thread-empty">OS CPU 통계를 불러오는 중입니다.</span></div>
+          <footer id="resourceDetailCpuCount">논리 CPU 확인 중</footer>
+        </section>
+        <section class="resource-detail-card memory-detail-card">
+          <header><div><span>MEMORY</span><small>OS 및 게임 컨테이너 메모리</small></div><strong id="resourceDetailMemory">0%</strong></header>
+          <div class="resource-meter memory"><span id="resourceDetailMemoryBar"></span></div>
+          <div class="resource-detail-stats">
+            <div><span>전체</span><strong id="resourceDetailMemoryTotal">0 B</strong></div>
+            <div><span>사용</span><strong id="resourceDetailMemoryUsed">0 B</strong></div>
+            <div><span>사용 가능</span><strong id="resourceDetailMemoryAvailable">0 B</strong></div>
+            <div><span>가상 메모리</span><strong id="resourceDetailSwap">사용 안 함</strong></div>
+          </div>
+          <footer id="resourceDetailGameMemory">게임 서버 메모리 확인 중</footer>
+        </section>
+        <section class="resource-detail-card compact-detail-card">
+          <header><div><span>DISK</span><small>서버 데이터 디스크</small></div><strong id="resourceDetailDisk">0%</strong></header>
+          <div class="resource-meter disk"><span id="resourceDetailDiskBar"></span></div>
+          <footer id="resourceDetailDiskUsage">0 B / 0 B</footer>
+        </section>
+        <section class="resource-detail-card compact-detail-card network-detail-card">
+          <header><div><span>NETWORK</span><small>게임 컨테이너 수신 및 송신</small></div><strong id="resourceDetailNetworkState">대기</strong></header>
+          <div class="resource-detail-network"><span id="resourceDetailNetworkDown">↓ 0 B/s</span><span id="resourceDetailNetworkUp">↑ 0 B/s</span></div>
+          <button class="public-address" id="resourceDetailPublicAddress" type="button" title="클릭하여 공인 IP 복사" disabled><span>공인 IP</span><strong id="resourceDetailPublicAddressText">확인 중</strong><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg></button>
+        </section>
+      </div>
     </div>
   </dialog>
 

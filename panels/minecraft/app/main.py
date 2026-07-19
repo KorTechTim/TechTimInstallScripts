@@ -72,6 +72,7 @@ RESTART_OPERATION_LOCK = MAINTENANCE_LOCK
 RESTART_OPERATION_ACTIVE = False
 RESTART_SCHEDULER_STOP = threading.Event()
 RESTART_SCHEDULER_THREAD: threading.Thread | None = None
+RESTART_SCHEDULER_THREAD_LOCK = threading.Lock()
 PANEL_UPDATE_LOCK = threading.Lock()
 PANEL_UPDATE_ACTIVE = False
 PANEL_UPDATE_CHECK_LOCK = threading.Lock()
@@ -858,7 +859,27 @@ def run_scheduled_restart_if_due() -> None:
 
 def restart_scheduler_loop() -> None:
     while not RESTART_SCHEDULER_STOP.wait(5):
-        run_scheduled_restart_if_due()
+        try:
+            run_scheduled_restart_if_due()
+        except Exception as error:
+            append_log(
+                CONTROL_LOG_FILE,
+                f"예약 재시작 스케줄 확인 중 오류가 발생했습니다: {clean_log(str(error))}",
+            )
+
+
+def ensure_restart_scheduler_running() -> None:
+    global RESTART_SCHEDULER_THREAD
+    with RESTART_SCHEDULER_THREAD_LOCK:
+        if RESTART_SCHEDULER_THREAD and RESTART_SCHEDULER_THREAD.is_alive():
+            return
+        RESTART_SCHEDULER_STOP.clear()
+        RESTART_SCHEDULER_THREAD = threading.Thread(
+            target=restart_scheduler_loop,
+            daemon=True,
+            name="minecraft-restart-scheduler",
+        )
+        RESTART_SCHEDULER_THREAD.start()
 
 
 def public_server_ip() -> str:
@@ -1529,17 +1550,9 @@ initialize_auth()
 
 @app.on_event("startup")
 def start_background_schedulers() -> None:
-    global RESTART_SCHEDULER_THREAD
     ensure_dirs()
     threading.Thread(target=backup_scheduler, daemon=True, name="minecraft-backup-scheduler").start()
-    if not RESTART_SCHEDULER_THREAD or not RESTART_SCHEDULER_THREAD.is_alive():
-        RESTART_SCHEDULER_STOP.clear()
-        RESTART_SCHEDULER_THREAD = threading.Thread(
-            target=restart_scheduler_loop,
-            daemon=True,
-            name="minecraft-restart-scheduler",
-        )
-        RESTART_SCHEDULER_THREAD.start()
+    ensure_restart_scheduler_running()
 
 
 @app.on_event("shutdown")
@@ -2254,6 +2267,8 @@ def save_restart_schedule(payload: RestartScheduleRequest, request: Request):
         schedule["last_run_date"] = ""
         schedule["last_run_at"] = ""
     saved = write_restart_schedule(schedule)
+    if saved["enabled"]:
+        ensure_restart_scheduler_running()
     state = "활성화" if saved["enabled"] else "비활성화"
     return {
         "status": "ok",

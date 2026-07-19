@@ -6,6 +6,7 @@ const filesDialog = $('filesDialog');
 const playerManagerDialog = $('playerManagerDialog');
 const backupManagerDialog = $('backupManagerDialog');
 const restartScheduleDialog = $('restartScheduleDialog');
+const resourceMonitorDialog = $('resourceMonitorDialog');
 const eulaDialog = $('eulaDialog');
 const deleteServerDialog = $('deleteServerDialog');
 const panelUpdateDialog = $('panelUpdateDialog');
@@ -24,6 +25,9 @@ let backupManagerBusy = false;
 let backupPollTimer = null;
 let restartScheduleBusy = false;
 let restartSchedulePollTimer = null;
+let restartScheduleDirty = false;
+let resourceDetailPollTimer = null;
+let resourceDetailRequestActive = false;
 let serverIconObjectUrl = '';
 let serverIconBusy = false;
 
@@ -470,11 +474,14 @@ function renderRestartSchedule(data, fillControls = true) {
   const schedule = data.schedule || {};
   const enabled = Boolean(schedule.enabled);
   const restartTime = schedule.restart_time || '04:00';
-  if (fillControls) {
+  if (fillControls || !restartScheduleDirty) {
     $('restartScheduleEnabled').checked = enabled;
     $('restartScheduleTime').value = restartTime;
+    if (fillControls) restartScheduleDirty = false;
   }
-  $('restartScheduleEnabledLabel').textContent = enabled ? '사용 중' : '사용 안 함';
+  const pendingEnabled = restartScheduleDirty ? $('restartScheduleEnabled').checked : enabled;
+  $('restartScheduleEnabledLabel').textContent = pendingEnabled ? '사용 중' : '사용 안 함';
+  $('restartScheduleSave').textContent = restartScheduleDirty ? '변경사항 저장' : '예약 저장';
   const state = $('restartScheduleState');
   state.textContent = schedule.active ? '재시작 처리 중' : (enabled ? '예약 사용 중' : '예약 꺼짐');
   state.classList.toggle('online', enabled && !schedule.active);
@@ -514,13 +521,23 @@ function stopRestartSchedulePolling() {
 }
 
 $('restartScheduleButton').onclick = () => {
+  restartScheduleDirty = false;
   showDialog(restartScheduleDialog);
   loadRestartSchedule();
   startRestartSchedulePolling();
 };
-$('restartScheduleRefresh').onclick = () => loadRestartSchedule(false);
+$('restartScheduleRefresh').onclick = () => {
+  restartScheduleDirty = false;
+  loadRestartSchedule(true);
+};
 $('restartScheduleEnabled').onchange = event => {
+  restartScheduleDirty = true;
   $('restartScheduleEnabledLabel').textContent = event.target.checked ? '사용 중' : '사용 안 함';
+  $('restartScheduleSave').textContent = '변경사항 저장';
+};
+$('restartScheduleTime').onchange = () => {
+  restartScheduleDirty = true;
+  $('restartScheduleSave').textContent = '변경사항 저장';
 };
 $('restartScheduleForm').onsubmit = async event => {
   event.preventDefault();
@@ -534,16 +551,20 @@ $('restartScheduleForm').onsubmit = async event => {
         restart_time: $('restartScheduleTime').value || '04:00'
       })
     });
+    restartScheduleDirty = false;
     renderRestartSchedule(data);
     toast(data.message || '예약 재시작 설정이 저장되었습니다.');
   } catch (error) {
     toast(error.message, true);
   } finally {
     restartScheduleBusy = false;
-    await loadRestartSchedule();
+    await loadRestartSchedule(!restartScheduleDirty);
   }
 };
-restartScheduleDialog.addEventListener('close', stopRestartSchedulePolling);
+restartScheduleDialog.addEventListener('close', () => {
+  restartScheduleDirty = false;
+  stopRestartSchedulePolling();
+});
 
 $('consoleCommandForm').onsubmit = async event => {
   event.preventDefault();
@@ -1212,11 +1233,11 @@ function setResourceMeter(valueId, barId, percent) {
   $(barId).style.width = `${value}%`;
 }
 
-function renderCpuThreads(threads) {
-  const root = $('resourceCpuThreads');
+function renderCpuThreads(threads, rootId, countId) {
+  const root = $(rootId);
   const values = Array.isArray(threads) ? threads : [];
   root.textContent = '';
-  $('resourceCpuThreadCount').textContent = values.length ? `${values.length} Threads` : '미지원';
+  $(countId).textContent = values.length ? `${values.length} Threads` : 'CPU 통계 미지원';
   if (!values.length) {
     const empty = document.createElement('span');
     empty.className = 'cpu-thread-empty';
@@ -1271,7 +1292,7 @@ async function copyToClipboard(value) {
   if (!copied) throw new Error('클립보드 복사를 지원하지 않는 브라우저입니다.');
 }
 
-$('resourcePublicAddress').onclick = async event => {
+$('resourceDetailPublicAddress').onclick = async event => {
   const button = event.currentTarget;
   const address = button.dataset.address || '';
   if (!address) return;
@@ -1283,35 +1304,86 @@ $('resourcePublicAddress').onclick = async event => {
   }
 };
 
+function renderResourceSummary(data) {
+  setResourceMeter('resourceCpuSummary', 'resourceCpuSummaryBar', data.cpu_percent);
+  setResourceMeter('resourceMemorySummary', 'resourceMemorySummaryBar', data.memory_percent);
+  $('resourceServerState').textContent = data.running ? '게임 서버 실행 중' : '게임 서버 대기';
+  $('resourceStatus').textContent = data.error ? '일부 조회 실패 : 5초' : '새로고침 : 5초';
+}
+
+function renderResourceDetails(data) {
+  setResourceMeter('resourceDetailCpu', 'resourceDetailCpuBar', data.cpu_percent);
+  setResourceMeter('resourceDetailMemory', 'resourceDetailMemoryBar', data.memory_percent);
+  setResourceMeter('resourceDetailDisk', 'resourceDetailDiskBar', data.disk_percent);
+  renderCpuThreads(data.cpu_threads, 'resourceDetailCpuThreads', 'resourceDetailCpuCount');
+  $('resourceDetailMemoryTotal').textContent = formatResourceBytes(data.memory_total);
+  $('resourceDetailMemoryUsed').textContent = formatResourceBytes(data.memory_used);
+  $('resourceDetailMemoryAvailable').textContent = formatResourceBytes(data.memory_available);
+  $('resourceDetailSwap').textContent = data.swap_total
+    ? `${formatResourceBytes(data.swap_used)} / ${formatResourceBytes(data.swap_total)}`
+    : '사용 안 함';
+  $('resourceDetailGameMemory').textContent = data.running && data.game_memory_limit
+    ? `게임 서버 ${formatResourceBytes(data.game_memory_used)} / ${formatResourceBytes(data.game_memory_limit)}`
+    : '게임 서버 중지됨';
+  $('resourceDetailDiskUsage').textContent = `${formatResourceBytes(data.disk_used)} / ${formatResourceBytes(data.disk_total)}`;
+  $('resourceDetailNetworkDown').textContent = `↓ ${formatResourceBytes(data.network_received_per_second, true)}`;
+  $('resourceDetailNetworkUp').textContent = `↑ ${formatResourceBytes(data.network_sent_per_second, true)}`;
+  $('resourceDetailNetworkState').textContent = data.running ? '활성' : '대기';
+  const publicAddress = data.public_ip || publicAddressFallback();
+  const publicAddressButton = $('resourceDetailPublicAddress');
+  publicAddressButton.dataset.address = publicAddress;
+  publicAddressButton.disabled = !publicAddress;
+  $('resourceDetailPublicAddressText').textContent = publicAddress || '확인 불가';
+  const state = $('resourceDetailServerState');
+  state.textContent = data.running ? '게임 서버 실행 중' : '게임 서버 중지됨';
+  state.classList.toggle('online', Boolean(data.running));
+  $('resourceDetailUpdatedAt').textContent = data.updated_at
+    ? `최근 갱신 ${new Date(data.updated_at).toLocaleString('ko-KR', {timeZone: 'Asia/Seoul', hour12: false})}`
+    : '최근 갱신 시각을 확인할 수 없습니다.';
+  $('resourceDetailStatus').textContent = data.error ? '일부 조회 실패 : 1초' : '새로고침 : 1초';
+}
+
 async function refreshResources() {
   try {
-    const data = await api('/api/server/resources');
-    renderCpuThreads(data.cpu_threads);
-    setResourceMeter('resourceMemory', 'resourceMemoryBar', data.memory_percent);
-    setResourceMeter('resourceDisk', 'resourceDiskBar', data.disk_percent);
-    $('resourceMemoryTotal').textContent = formatResourceBytes(data.memory_total);
-    $('resourceMemoryUsed').textContent = formatResourceBytes(data.memory_used);
-    $('resourceMemoryAvailable').textContent = formatResourceBytes(data.memory_available);
-    $('resourceSwapDetail').textContent = data.swap_total
-      ? `${formatResourceBytes(data.swap_used)} / ${formatResourceBytes(data.swap_total)}`
-      : '사용 안 함';
-    $('resourceMemoryDetail').textContent = data.running && data.game_memory_limit
-      ? `게임 서버 ${formatResourceBytes(data.game_memory_used)} / ${formatResourceBytes(data.game_memory_limit)}`
-      : '게임 서버 중지됨';
-    $('resourceDiskDetail').textContent = `${formatResourceBytes(data.disk_used)} / ${formatResourceBytes(data.disk_total)}`;
-    $('resourceNetworkDown').textContent = `↓ ${formatResourceBytes(data.network_received_per_second, true)}`;
-    $('resourceNetworkUp').textContent = `↑ ${formatResourceBytes(data.network_sent_per_second, true)}`;
-    $('resourceNetworkState').textContent = data.running ? '활성' : '대기';
-    const publicAddress = data.public_ip || publicAddressFallback();
-    const publicAddressButton = $('resourcePublicAddress');
-    publicAddressButton.dataset.address = publicAddress;
-    publicAddressButton.disabled = !publicAddress;
-    $('resourcePublicAddressText').textContent = publicAddress || '확인 불가';
-    $('resourceStatus').textContent = data.error ? '일부 조회 실패 : 5초' : '새로고침 : 5초';
+    renderResourceSummary(await api('/api/server/resources'));
   } catch (_) {
     $('resourceStatus').textContent = '조회 실패 : 5초';
   }
 }
+
+async function refreshResourceDetails() {
+  if (resourceDetailRequestActive || !resourceMonitorDialog.open) return;
+  resourceDetailRequestActive = true;
+  try {
+    const data = await api('/api/server/resources');
+    renderResourceSummary(data);
+    renderResourceDetails(data);
+  } catch (_) {
+    $('resourceDetailStatus').textContent = '조회 실패 : 1초';
+  } finally {
+    resourceDetailRequestActive = false;
+  }
+}
+
+function openResourceMonitor() {
+  showDialog(resourceMonitorDialog);
+  refreshResourceDetails();
+  if (!resourceDetailPollTimer) resourceDetailPollTimer = setInterval(refreshResourceDetails, 1000);
+}
+
+function stopResourceDetailPolling() {
+  if (!resourceDetailPollTimer) return;
+  clearInterval(resourceDetailPollTimer);
+  resourceDetailPollTimer = null;
+}
+
+$('resourceMonitorEntry').onclick = openResourceMonitor;
+$('resourceMonitorEntry').onkeydown = event => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  event.preventDefault();
+  openResourceMonitor();
+};
+resourceMonitorDialog.addEventListener('close', stopResourceDetailPolling);
 
 async function initialize() {
   loadMinecraftVersions();
