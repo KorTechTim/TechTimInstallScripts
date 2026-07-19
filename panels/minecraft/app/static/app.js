@@ -1,6 +1,7 @@
 const $ = id => document.getElementById(id);
 const terminal = $('terminal');
 const settingsDialog = $('settingsDialog');
+const serverIdentityDialog = $('serverIdentityDialog');
 const filesDialog = $('filesDialog');
 const playerManagerDialog = $('playerManagerDialog');
 const backupManagerDialog = $('backupManagerDialog');
@@ -753,6 +754,42 @@ $('serverIconDelete').onclick = async () => {
   }
 };
 
+async function openServerIdentity() {
+  const button = $('serverIdentityButton');
+  try {
+    const data = await api('/api/config');
+    if (data.locked) {
+      showButtonBubble(button, '서버 실행 중에는 목록 디자인을 변경할 수 없습니다.');
+      return;
+    }
+    $('Motd').value = data.config.Motd ?? '';
+    $('ServerName').value = data.config.ServerName ?? 'Minecraft Server';
+    updateMotdPreview();
+    showDialog(serverIdentityDialog);
+    await refreshServerIconPreview();
+  } catch (error) {
+    showButtonBubble(button, error.message);
+  }
+}
+
+$('serverIdentityButton').onclick = openServerIdentity;
+$('serverIdentityForm').onsubmit = async event => {
+  event.preventDefault();
+  try {
+    const data = await api('/api/config');
+    if (data.locked) throw new Error('서버 실행 중에는 목록 디자인을 변경할 수 없습니다.');
+    const body = {...data.config, Motd: $('Motd').value};
+    await api('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    $('identitySaveToast').classList.add('show');
+    setTimeout(() => {
+      $('identitySaveToast').classList.remove('show');
+      closeDialog(serverIdentityDialog);
+    }, 1000);
+  } catch (error) {
+    toast(error.message, true);
+  }
+};
+
 function updateTypeFields() {
   $('loaderModpackSection').classList.toggle('visible', ['FORGE', 'NEOFORGE', 'FABRIC'].includes($('Type').value));
 }
@@ -784,9 +821,7 @@ async function openSettings(targetId = '') {
     });
     $('JavaVersion').disabled = Boolean(data.engine_installed);
     updateTypeFields();
-    updateMotdPreview();
     showDialog(settingsDialog);
-    refreshServerIconPreview();
     if (targetId) {
       requestAnimationFrame(() => {
         const target = $(targetId);
