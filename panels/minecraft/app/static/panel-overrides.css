@@ -2,6 +2,18 @@
   display: grid;
 }
 
+.restart-schedule-modal .modal-head {
+  height: auto;
+  min-height: 92px;
+}
+
+.restart-schedule-description {
+  margin: 5px 0 0;
+  color: #b8c7ba;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .settings-entry {
   grid-template-columns: minmax(0, 1.18fr) minmax(0, .82fr);
 }
@@ -11,8 +23,14 @@
 }
 
 @media (min-width: 901px) {
+  .server-management-hub .settings-primary,
+  .server-management-hub .resource-monitor {
+    height: 100%;
+    padding: 18px 20px;
+  }
+
   .server-management-hub .settings-primary > * {
-    transform: translateY(-10px);
+    transform: none;
   }
 }
 
@@ -218,6 +236,17 @@
   padding-top: 10px;
   color: #9fb0a2;
   font-size: 9px;
+}
+
+.resource-detail-card .resource-meter {
+  flex: 0 0 18px;
+  height: 18px;
+  border-radius: 5px;
+}
+
+.resource-detail-card .cpu-thread-meter {
+  height: 12px;
+  border-radius: 4px;
 }
 
 .resource-detail-card .cpu-thread-grid {
