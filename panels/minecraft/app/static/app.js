@@ -1076,7 +1076,6 @@ async function openSettings(targetId = '') {
       else input.value = data.config[key] ?? '';
       updateRange(input);
     });
-    $('JavaVersion').disabled = Boolean(data.engine_installed);
     updateTypeFields();
     showDialog(settingsDialog);
     if (targetId) {
@@ -1104,6 +1103,7 @@ $('settingsForm').onsubmit = async event => {
     if (!/^[1-9]\d*$/.test($('Memory').value)) throw new Error('메모리는 1 이상의 숫자로 입력해주세요.');
     await api('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
     $('settingsMode').textContent = settingsSummary(body);
+    await refreshStatus();
     $('saveToast').classList.add('show');
     setTimeout(() => { $('saveToast').classList.remove('show'); settingsDialog.close(); }, 1000);
   } catch (error) { toast(error.message, true); }

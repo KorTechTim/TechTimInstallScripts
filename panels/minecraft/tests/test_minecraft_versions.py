@@ -39,6 +39,18 @@ class MinecraftVersionListTests(unittest.TestCase):
             "itzg/minecraft-server:java8",
         )
 
+    def test_install_marker_only_locks_matching_java_runtime(self):
+        main.INSTALL_MARKER_FILE.parent.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(main.INSTALL_MARKER_FILE.unlink, missing_ok=True)
+        main.INSTALL_MARKER_FILE.write_text(
+            "distribution=itzg-docker\n"
+            "runtime_image=itzg/minecraft-server:java25\n",
+            encoding="utf-8",
+        )
+
+        self.assertTrue(main.installed({"JavaVersion": "25"}))
+        self.assertFalse(main.installed({"JavaVersion": "8"}))
+
 
 if __name__ == "__main__":
     unittest.main()

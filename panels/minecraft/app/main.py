@@ -2086,14 +2086,15 @@ def request_install(request: Request, tasks: BackgroundTasks):
     require_auth(request)
     if server_running():
         raise HTTPException(status_code=409, detail="서버 기동 중에는 엔진을 설치할 수 없습니다.")
+    config = read_config()
+    runtime_image = runtime_image_for_config(config)
     global INSTALL_ACTIVE
     with INSTALL_LOCK:
-        if INSTALL_MARKER_FILE.exists():
-            raise HTTPException(status_code=409, detail="게임 엔진이 이미 설치되어 있습니다. 다시 설치하려면 서버를 먼저 삭제해주세요.")
+        if installed(config):
+            raise HTTPException(status_code=409, detail="선택한 Java 버전의 게임 엔진이 이미 설치되어 있습니다.")
         if INSTALL_ACTIVE:
             raise HTTPException(status_code=409, detail="설치 작업이 이미 진행 중입니다.")
         INSTALL_ACTIVE = True
-    runtime_image = runtime_image_for_config(read_config())
     tasks.add_task(install_job, runtime_image)
     return {"status": "started"}
 
@@ -2105,7 +2106,7 @@ def install_status(request: Request):
     is_installed = installed()
     if status == "completed" and not is_installed:
         status = "not_started"
-    return {"status": status, "installed": is_installed, "install_locked": INSTALL_MARKER_FILE.exists()}
+    return {"status": status, "installed": is_installed, "install_locked": is_installed}
 
 
 @app.get("/api/install/log")
@@ -2121,7 +2122,7 @@ def get_config(request: Request):
     return {
         "config": config,
         "locked": server_running(),
-        "engine_installed": INSTALL_MARKER_FILE.exists(),
+        "engine_installed": installed(config),
         "types": sorted(SERVER_TYPES),
     }
 
@@ -2138,8 +2139,6 @@ def save_config(payload: ConfigRequest, request: Request):
     if server_running():
         raise HTTPException(status_code=409, detail="서버 실행 중에는 설정을 변경할 수 없습니다.")
     config = normalize_config(payload.model_dump())
-    if INSTALL_MARKER_FILE.exists() and config["JavaVersion"] != read_config()["JavaVersion"]:
-        raise HTTPException(status_code=409, detail="엔진 설치 후에는 Java 버전을 변경할 수 없습니다. 서버 삭제 후 다시 설정해주세요.")
     validate_start(config)
     write_config(config)
     return {"status": "ok", "message": "설정이 저장되었습니다."}
