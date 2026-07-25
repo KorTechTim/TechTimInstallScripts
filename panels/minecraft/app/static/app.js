@@ -1014,8 +1014,39 @@ $('serverIdentityForm').onsubmit = async event => {
   }
 };
 
-function updateTypeFields() {
+function recommendedJavaVersion(version, serverType) {
+  const normalized = String(version || '').trim().toUpperCase();
+  if (!normalized || normalized === 'LATEST') return 'AUTO';
+
+  const match = normalized.match(/^(\d+)\.(\d+)(?:\.(\d+))?/);
+  if (!match) return 'AUTO';
+
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  const patch = Number(match[3] || 0);
+  const type = String(serverType || '').toUpperCase();
+
+  if (major >= 26) return '25';
+  if (major !== 1) return 'AUTO';
+  if (type === 'FORGE' && minor < 18) return '8';
+  if (minor >= 21) return '21';
+  if (minor === 20) return patch >= 5 ? '21' : '17';
+  if (minor >= 18) return '17';
+  if (minor === 17) return '16';
+  if (type === 'PAPER' && minor === 16 && patch === 5) return '16';
+  if (minor >= 12) return '8';
+  return 'AUTO';
+}
+
+function applyRecommendedJavaVersion() {
+  const javaSelect = $('JavaVersion');
+  if (!javaSelect || javaSelect.disabled) return;
+  javaSelect.value = recommendedJavaVersion($('Version').value, $('Type').value);
+}
+
+function updateTypeFields(applyJavaRecommendation = false) {
   $('loaderModpackSection').classList.toggle('visible', ['FORGE', 'NEOFORGE', 'FABRIC'].includes($('Type').value));
+  if (applyJavaRecommendation) applyRecommendedJavaVersion();
 }
 
 function updateRange(input) {
@@ -1027,9 +1058,11 @@ $('minecraftVersionSelect').onchange = event => {
   if (!event.target.value) return;
   $('Version').value = event.target.value;
   event.target.value = '';
+  applyRecommendedJavaVersion();
 };
+$('Version').onchange = applyRecommendedJavaVersion;
 $('Memory').oninput = event => { event.target.value = event.target.value.replace(/\D/g, ''); };
-$('Type').onchange = updateTypeFields;
+$('Type').onchange = () => updateTypeFields(true);
 
 async function openSettings(targetId = '') {
   try {
