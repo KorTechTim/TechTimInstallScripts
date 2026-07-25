@@ -159,6 +159,10 @@ FALLBACK_MINECRAFT_VERSIONS = [
     "1.18.2", "1.18.1", "1.18",
     "1.17.1", "1.17",
     "1.16.5", "1.16.4", "1.16.3", "1.16.2", "1.16.1", "1.16",
+    "1.15.2", "1.15.1", "1.15",
+    "1.14.4", "1.14.3", "1.14.2", "1.14.1", "1.14",
+    "1.13.2", "1.13.1", "1.13",
+    "1.12.2", "1.12.1",
 ]
 
 
@@ -310,7 +314,7 @@ def default_config() -> dict:
     return ConfigRequest().model_dump()
 
 
-def releases_since_1_16(manifest: dict) -> list[str]:
+def releases_since_1_12_1(manifest: dict) -> list[str]:
     releases = []
     for version in manifest.get("versions") or []:
         if not isinstance(version, dict) or version.get("type") != "release":
@@ -319,7 +323,7 @@ def releases_since_1_16(manifest: dict) -> list[str]:
         if not version_id or version_id in releases:
             continue
         releases.append(version_id)
-        if version_id == "1.16":
+        if version_id == "1.12.1":
             return releases
     return FALLBACK_MINECRAFT_VERSIONS.copy()
 
@@ -335,7 +339,7 @@ def minecraft_version_payload() -> dict:
     try:
         with urlopen(MINECRAFT_VERSION_MANIFEST_URL, timeout=5) as response:
             manifest = json.load(response)
-        releases = releases_since_1_16(manifest)
+        releases = releases_since_1_12_1(manifest)
         latest = str((manifest.get("latest") or {}).get("release") or releases[0])
     except (OSError, ValueError, json.JSONDecodeError, TypeError):
         source = "fallback"
