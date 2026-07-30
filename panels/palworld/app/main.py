@@ -532,6 +532,55 @@ def pull_docker_image_with_progress(client, image: str) -> None:
     write_log("[docker] 공식 Palworld 이미지가 Docker Engine에 정상 등록되었습니다.")
 
 
+def format_storage_bytes(value: int) -> str:
+    size = max(0, int(value or 0))
+    units = ("B", "KB", "MB", "GB", "TB")
+    amount = float(size)
+    unit = units[0]
+
+    for candidate in units:
+        unit = candidate
+
+        if amount < 1024 or candidate == units[-1]:
+            break
+
+        amount /= 1024
+
+    precision = 0 if unit == "B" else 1
+    return f"{amount:.{precision}f} {unit}"
+
+
+def cleanup_obsolete_palworld_runtime_data(client, keep_image_id: str) -> dict[str, Any]:
+    result = {
+        "container_removed": False,
+        "images_deleted": 0,
+        "space_reclaimed": 0,
+    }
+
+    try:
+        container = client.containers.get(PALWORLD_SERVER_CONTAINER)
+        container.reload()
+        status = str(getattr(container, "status", "") or "").lower()
+        container_image = getattr(container, "image", None)
+        container_image_id = str(getattr(container_image, "id", "") or "")
+
+        if (
+            status not in {"running", "restarting", "paused", "removing"}
+            and container_image_id
+            and container_image_id != keep_image_id
+        ):
+            container.remove(force=True)
+            result["container_removed"] = True
+    except docker.errors.NotFound:
+        pass
+
+    prune_result = client.images.prune(filters={"dangling": True}) or {}
+    deleted = prune_result.get("ImagesDeleted") or []
+    result["images_deleted"] = len(deleted)
+    result["space_reclaimed"] = max(0, int(prune_result.get("SpaceReclaimed") or 0))
+    return result
+
+
 def write_server_control_log(message: str) -> None:
     ensure_data_dirs()
     now = datetime.now().isoformat(timespec="seconds")
@@ -2057,6 +2106,30 @@ def install_palworld_job() -> None:
             f"completed_at={datetime.now().isoformat(timespec='seconds')}\n",
             encoding="utf-8",
         )
+
+        if is_update:
+            write_log("업데이트 완료 후 사용하지 않는 Docker 데이터를 정리합니다.")
+
+            try:
+                cleanup_result = cleanup_obsolete_palworld_runtime_data(
+                    client,
+                    installed_image_id,
+                )
+
+                if cleanup_result["container_removed"]:
+                    write_log("이전 게임 이미지가 연결된 중지 컨테이너를 제거했습니다.")
+
+                write_log(
+                    "미사용 Docker 이미지 정리 완료: "
+                    f"이미지 항목 {cleanup_result['images_deleted']}개, "
+                    f"확보 공간 {format_storage_bytes(cleanup_result['space_reclaimed'])}"
+                )
+                write_log("세이브 데이터와 Docker 볼륨은 정리 대상에서 제외했습니다.")
+            except Exception as cleanup_error:
+                write_log(
+                    "WARNING: 서버 업데이트는 완료되었지만 미사용 Docker 데이터 정리에 실패했습니다: "
+                    f"{cleanup_error}"
+                )
 
         write_log(f"Pocketpair 공식 Palworld 서버 {operation_name}가 완료되었습니다.")
         write_log(f"세이브 및 설정 경로: {SAVED_ROOT_DIR}")
