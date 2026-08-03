@@ -2637,6 +2637,7 @@ def dashboard(request: Request):
     .server-stop-indicator svg { width: 32px; height: 32px; }
     .server-stop-indicator[data-state="stopping"] svg { animation: server-stop-spin 1s linear infinite; }
     .server-stop-indicator[data-state="failed"] { background: #fef2f2; color: #b91c1c; border-color: #fecaca; }
+    .server-stop-indicator[data-state="unavailable"] { background: #fff7ed; color: #c2410c; border-color: #fed7aa; }
     .server-stop-title { margin: 0; color: #1f2937; font-size: 22px; }
     .server-stop-message { min-height: 22px; margin: 0; color: #64748b; font-size: 14px; line-height: 1.55; }
     .server-stop-confirm { min-width: 120px; }
@@ -2954,17 +2955,6 @@ def dashboard(request: Request):
         </div>
     </div>
 
-    <div id="serverStopModal" class="modal-backdrop server-stop-backdrop" aria-hidden="true">
-      <div class="modal server-stop-modal" role="dialog" aria-modal="true" aria-labelledby="serverStopTitle">
-        <div class="server-stop-body">
-          <div id="serverStopIndicator" class="server-stop-indicator" data-state="stopping" aria-hidden="true"></div>
-          <h2 id="serverStopTitle" class="server-stop-title">서버 중지 중</h2>
-          <p id="serverStopMessage" class="server-stop-message" role="status" aria-live="assertive">Palworld 서버를 안전하게 종료하고 있습니다.</p>
-          <button id="serverStopConfirmBtn" class="server-stop-confirm" type="button" onclick="confirmServerStopModal()" hidden>확인</button>
-        </div>
-      </div>
-    </div>
-
     <div id="panelUpdateModal" class="modal-backdrop" aria-hidden="true">
       <div class="modal panel-update-modal" role="dialog" aria-modal="true" aria-labelledby="panelUpdateModalTitle">
         <div class="modal-head">
@@ -3234,6 +3224,16 @@ def dashboard(request: Request):
 
     <div id="result" class="result" hidden></div>
 
+  </div>
+  <div id="serverStopModal" class="modal-backdrop server-stop-backdrop" aria-hidden="true">
+    <div class="modal server-stop-modal" role="dialog" aria-modal="true" aria-labelledby="serverStopTitle">
+      <div class="server-stop-body">
+        <div id="serverStopIndicator" class="server-stop-indicator" data-state="stopping" aria-hidden="true"></div>
+        <h2 id="serverStopTitle" class="server-stop-title">서버 중지 중</h2>
+        <p id="serverStopMessage" class="server-stop-message" role="status" aria-live="assertive">Palworld 서버를 안전하게 종료하고 있습니다.</p>
+        <button id="serverStopConfirmBtn" class="server-stop-confirm" type="button" onclick="confirmServerStopModal()" hidden>확인</button>
+      </div>
+    </div>
   </div>
   <footer class="panel-copyright">© 2026 TechTim. All rights reserved. 무단 복제 및 배포를 금합니다.</footer>
 
@@ -3627,7 +3627,7 @@ def dashboard(request: Request):
         }
 
         if (!installData.installed) {
-          alert(notInstalledMessage);
+          setServerStopModalState("unavailable", notInstalledMessage);
           return;
         }
       } catch (err) {
@@ -3656,6 +3656,11 @@ def dashboard(request: Request):
         const data = await response.json();
 
         if (!response.ok) {
+          if (response.status === 409 && data.detail === notInstalledMessage) {
+            setServerStopModalState("unavailable", notInstalledMessage);
+            result.innerText = "";
+            return;
+          }
           alert(data.detail || "서버 시작 요청에 실패했습니다.");
           result.innerText = "서버 시작 요청 실패: " + (data.detail || "알 수 없는 오류");
           return;
@@ -3699,6 +3704,7 @@ def dashboard(request: Request):
       const icons = {
         stopping: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.64-6.36" /></svg>',
         completed: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.2 4.2L19 7" /></svg>',
+        unavailable: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 8v5" /><path d="M12 16.5h.01" /></svg>',
         failed: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M7 7 17 17" /><path d="m17 7-10 10" /></svg>'
       };
 
@@ -3706,10 +3712,14 @@ def dashboard(request: Request):
       indicator.innerHTML = icons[state] || icons.failed;
       title.innerText = state === "stopping"
         ? "서버 중지 중"
-        : (state === "completed" ? "서버 종료 완료" : "서버 중지 실패");
+        : (state === "completed"
+          ? "서버 종료 완료"
+          : (state === "unavailable" ? "서버 시작 불가" : "서버 중지 실패"));
       messageBox.innerText = message || "";
       confirmButton.hidden = state === "stopping";
-      stopButton.disabled = true;
+      if (state !== "unavailable") {
+        stopButton.disabled = true;
+      }
       modal.classList.add("show");
       modal.setAttribute("aria-hidden", "false");
       document.body.style.overflow = "hidden";

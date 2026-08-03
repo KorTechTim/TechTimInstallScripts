@@ -32,6 +32,11 @@ class ServerStartGuardTests(unittest.TestCase):
 
         self.assertIn('fetch("/api/install/status")', function_source)
         self.assertIn("아직 서버를 설치하지 않았으므로 서버를 기동할 수 없습니다.", function_source)
+        self.assertIn(
+            'setServerStopModalState("unavailable", notInstalledMessage)',
+            function_source,
+        )
+        self.assertNotIn("alert(notInstalledMessage)", function_source)
         self.assertLess(
             function_source.index('fetch("/api/install/status")'),
             function_source.index('fetch("/api/server/start"'),
