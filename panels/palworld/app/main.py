@@ -3416,14 +3416,6 @@ def dashboard(request: Request):
         ]
       },
       {
-        title: "음성 채팅",
-        fields: [
-          { key: "bEnableVoiceChat", label: "근접 음성 채팅", type: "checkbox" },
-          { key: "VoiceChatMaxVolumeDistance", label: "음량 감쇠 시작 거리", type: "number", step: "100", min: "0" },
-          { key: "VoiceChatZeroVolumeDistance", label: "음량 소멸 거리", type: "number", step: "100", min: "0" }
-        ]
-      },
-      {
         title: "랜덤라이저",
         fields: [
           { key: "RandomizerType", label: "랜덤라이저 방식", type: "select", options: ["None", "Region", "All"] },
@@ -3624,6 +3616,25 @@ def dashboard(request: Request):
 
     async function startServer() {
       const result = document.getElementById("result");
+      const notInstalledMessage = "아직 서버를 설치하지 않았으므로 서버를 기동할 수 없습니다.";
+
+      try {
+        const installResponse = await fetch("/api/install/status");
+        const installData = await installResponse.json();
+
+        if (!installResponse.ok) {
+          throw new Error(installData.detail || "설치 상태 확인 실패");
+        }
+
+        if (!installData.installed) {
+          alert(notInstalledMessage);
+          return;
+        }
+      } catch (err) {
+        alert("서버 설치 상태를 확인할 수 없습니다. 잠시 후 다시 시도해주세요.");
+        return;
+      }
+
       const currentStatus = await loadServerStatus();
 
       if (isRunningStatus(currentStatus)) {
@@ -3643,6 +3654,12 @@ def dashboard(request: Request):
         });
 
         const data = await response.json();
+
+        if (!response.ok) {
+          alert(data.detail || "서버 시작 요청에 실패했습니다.");
+          result.innerText = "서버 시작 요청 실패: " + (data.detail || "알 수 없는 오류");
+          return;
+        }
 
         if ((data.status || "").toLowerCase() === "running") {
           alert("이미 서버가 동작중입니다.");
@@ -5640,6 +5657,8 @@ def docker_status(request: Request):
             ],
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         return {
             "status": "error",
@@ -5814,11 +5833,17 @@ def start_server(request: Request):
     require_auth(request)
 
     try:
+        if not has_any_official_runtime_install_marker():
+            raise HTTPException(
+                status_code=409,
+                detail="아직 서버를 설치하지 않았으므로 서버를 기동할 수 없습니다.",
+            )
+
         if get_effective_install_status() != "completed":
-            return {
-                "status": "error",
-                "message": "공식 Palworld 최신 서버 이미지가 준비되지 않았습니다. 서버 업데이트를 먼저 진행해주세요.",
-            }
+            raise HTTPException(
+                status_code=409,
+                detail="공식 Palworld 최신 서버 이미지가 준비되지 않았습니다. 서버 업데이트를 먼저 진행해주세요.",
+            )
 
         ensure_official_runtime_files()
         config_path = create_default_config()
@@ -5927,6 +5952,8 @@ def start_server(request: Request):
             "community_server": community_server,
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         return {
             "status": "error",

@@ -17,6 +17,12 @@ PRIMARY_OPTION_KEYS = {
     "RCONPort",
 }
 
+DEDICATED_OPTION_KEYS = {
+    "bEnableVoiceChat",
+    "VoiceChatMaxVolumeDistance",
+    "VoiceChatZeroVolumeDistance",
+}
+
 
 class PalworldOptionInventoryTests(unittest.TestCase):
     def setUp(self):
@@ -36,13 +42,14 @@ class PalworldOptionInventoryTests(unittest.TestCase):
             set(main.PALWORLD_OPTION_DEFAULTS) - PRIMARY_OPTION_KEYS,
         )
 
-    def test_every_advanced_option_is_exposed_in_the_existing_gui(self):
+    def test_every_advanced_option_is_exposed_in_a_settings_gui(self):
         source = Path(main.__file__).read_text(encoding="utf-8")
         start = source.index("const advancedOptionGroups = [")
         end = source.index("    function getLogBox()", start)
         ui_keys = set(re.findall(r'\{ key: "([^"]+)"', source[start:end]))
 
-        self.assertEqual(ui_keys, main.PALWORLD_ADVANCED_KEYS)
+        self.assertEqual(ui_keys, main.PALWORLD_ADVANCED_KEYS - DEDICATED_OPTION_KEYS)
+        self.assertEqual(ui_keys | DEDICATED_OPTION_KEYS, main.PALWORLD_ADVANCED_KEYS)
 
     def test_generated_ini_serializes_all_options_and_empty_technology_list(self):
         config_path = main.write_config(main.default_config())
