@@ -120,7 +120,7 @@ class PanelUpdateProgressTests(unittest.TestCase):
 
 class PanelVersionUpgradeTests(unittest.TestCase):
     def test_release_version_is_not_overridden_by_legacy_container_value(self):
-        self.assertEqual(main.PANEL_VERSION, "1.1.0")
+        self.assertEqual(main.PANEL_VERSION, "1.2.0")
 
     def test_self_update_drops_legacy_panel_version_environment(self):
         container = type(

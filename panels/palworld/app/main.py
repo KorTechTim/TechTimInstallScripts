@@ -30,7 +30,7 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 GAME_CODE = os.getenv("GAME_CODE", "palworld")
-PANEL_VERSION = "1.1.0"
+PANEL_VERSION = "1.2.0"
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 HOST_DATA_DIR = Path(os.getenv("HOST_DATA_DIR", "/opt/techtim/palworld/data"))
@@ -2626,7 +2626,7 @@ def dashboard(request: Request):
     .voice-chat-distance-field { padding: 15px; border: 1px solid #cbd5e1; border-radius: 12px; background: #ffffff; }
     .voice-chat-distance-field span { display: block; color: #334155; font-size: 13px; font-weight: 800; }
     .voice-chat-distance-field input { margin-top: 9px; }
-    input[type="range"].voice-chat-distance-range { margin-top: 12px; }
+    input[type="range"].voice-chat-distance-range { margin-top: 22px; }
     .voice-chat-distance-field small { display: block; min-height: 31px; margin-top: 7px; color: #64748b; font-size: 10px; line-height: 1.45; }
     .voice-chat-status { min-height: 20px; padding: 12px 14px; border-radius: 10px; background: #e6f4ef; color: #315f55; font-size: 12px; line-height: 1.5; }
     .voice-chat-save-wrap { position: relative; display: inline-flex; }
