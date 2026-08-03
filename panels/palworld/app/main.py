@@ -118,6 +118,12 @@ class RestartScheduleRequest(BaseModel):
     restart_time: str | None = None
 
 
+class VoiceChatSettingsRequest(BaseModel):
+    enabled: bool = False
+    max_volume_distance: float = Field(default=3000.0, ge=0)
+    zero_volume_distance: float = Field(default=15000.0, ge=0)
+
+
 class FileExplorerCreateDirRequest(BaseModel):
     path: str = ""
     name: str
@@ -1673,6 +1679,21 @@ def read_config() -> dict:
     return config
 
 
+def read_voice_chat_settings(config: dict | None = None) -> dict:
+    source = config or read_config()
+    advanced = source.get("AdvancedOptions") or {}
+
+    return {
+        "enabled": normalize_boolean(advanced.get("bEnableVoiceChat"), False),
+        "max_volume_distance": float(
+            advanced.get("VoiceChatMaxVolumeDistance", 3000.0) or 0
+        ),
+        "zero_volume_distance": float(
+            advanced.get("VoiceChatZeroVolumeDistance", 15000.0) or 0
+        ),
+    }
+
+
 def build_server_command(config: dict) -> list[str]:
     effective_server_port = int(config.get("PublicPort", SERVER_PORT))
     command = [
@@ -2480,7 +2501,7 @@ def dashboard(request: Request):
     .management-shortcut { min-width: 0; min-height: 68px; display: grid; grid-template-columns: 42px minmax(0, 1fr); align-items: center; column-gap: 11px; row-gap: 4px; padding: 9px 12px; border: 1px solid rgba(205, 239, 230, 0.30); border-radius: 7px; background: rgba(7, 53, 52, 0.74); color: #ffffff; text-align: left; box-shadow: inset 0 1px 0 rgba(255,255,255,0.06); }
     .management-shortcut:hover { border-color: #99f6e4; background: rgba(15, 118, 110, 0.86); transform: translateY(-1px); }
     .management-shortcut-icon { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 7px; background: #9a594d; color: #ffffff; }
-    .discord-shortcut .management-shortcut-icon { background: #5865f2; }
+    .voice-chat-shortcut .management-shortcut-icon { background: #168b83; }
     .management-shortcut-icon svg { width: 23px; height: 23px; }
     .management-shortcut-copy { min-width: 0; display: grid; gap: 4px; }
     .management-shortcut-copy b { font-size: 13px; }
@@ -2488,6 +2509,9 @@ def dashboard(request: Request):
     #restartSettingsBtn .management-shortcut-icon { grid-row: 1 / span 2; align-self: center; }
     #restartSettingsBtn .management-shortcut-copy { align-self: end; }
     .restart-hub-summary { grid-column: 2; align-self: start; margin: 0; color: #a7f3d0; font-size: 9px; font-weight: bold; line-height: 1.2; white-space: nowrap; }
+    #voiceChatSettingsBtn .management-shortcut-icon { grid-row: 1 / span 2; align-self: center; }
+    #voiceChatSettingsBtn .management-shortcut-copy { align-self: end; }
+    .voice-chat-hub-summary { grid-column: 2; align-self: start; margin: 0; color: #99f6e4; font-size: 9px; font-weight: bold; line-height: 1.2; white-space: nowrap; }
     .resource-monitor { position: relative; z-index: 1; min-width: 0; display: flex; flex-direction: column; gap: 13px; padding: 24px 26px; background: transparent; cursor: pointer; }
     .resource-monitor::before { content: ""; position: absolute; top: 8px; bottom: 8px; left: 0; width: 1px; background: rgba(255,255,255,0.46); pointer-events: none; }
     .resource-monitor:hover { background: transparent; }
@@ -2577,13 +2601,33 @@ def dashboard(request: Request):
     .panel-update-progress[data-status="failed"] .panel-update-progress-track span { background: #b91c1c; }
     .panel-update-progress[data-status="failed"] .panel-update-progress-head strong { color: #b91c1c; }
     .panel-update-actions { display: flex; justify-content: flex-end; gap: 10px; }
-    .coming-soon-modal { width: min(430px, 100%); }
-    .coming-soon-body { display: grid; justify-items: center; gap: 14px; padding: 28px 24px 22px; text-align: center; background: #f8fafc; }
-    .coming-soon-icon { display: grid; place-items: center; width: 58px; height: 58px; border-radius: 14px; background: #5865f2; color: #ffffff; box-shadow: 0 12px 28px rgba(88,101,242,0.26); }
-    .coming-soon-icon svg { width: 30px; height: 30px; }
-    .coming-soon-body strong { color: #1f2937; font-size: 19px; }
-    .coming-soon-body p { margin: 0; color: #64748b; font-size: 13px; line-height: 1.55; }
-    .coming-soon-body button { min-width: 110px; margin-top: 4px; }
+    .voice-chat-modal { width: min(720px, 100%); }
+    .voice-chat-body { min-height: 0; display: grid; gap: 16px; overflow: auto; padding: 22px; background: linear-gradient(145deg, rgba(240,253,250,0.98), rgba(239,246,255,0.98)); }
+    .voice-chat-intro { display: grid; grid-template-columns: 58px minmax(0, 1fr); align-items: center; gap: 14px; padding: 16px; border: 1px solid #99d9d3; border-radius: 12px; background: rgba(255,255,255,0.88); }
+    .voice-chat-intro-icon { display: grid; place-items: center; width: 58px; height: 58px; border-radius: 12px; background: #168b83; color: #ffffff; box-shadow: 0 10px 22px rgba(22,139,131,0.22); }
+    .voice-chat-intro-icon svg { width: 38px; height: 38px; }
+    .voice-chat-intro strong { display: block; margin-bottom: 5px; color: #134e4a; font-size: 16px; }
+    .voice-chat-intro p { margin: 0; color: #64748b; font-size: 12px; line-height: 1.5; }
+    .voice-chat-toggle-card { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 16px; border: 1px solid #cbd5e1; border-radius: 12px; background: #ffffff; }
+    .voice-chat-toggle-copy { min-width: 0; display: grid; gap: 4px; }
+    .voice-chat-toggle-copy strong { color: #1f2937; font-size: 14px; }
+    .voice-chat-toggle-copy small { color: #64748b; font-size: 11px; line-height: 1.45; }
+    .voice-chat-switch { position: relative; display: inline-flex; flex: 0 0 auto; width: 70px; height: 34px; margin: 0; cursor: pointer; }
+    .voice-chat-switch input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
+    .voice-chat-switch-track { position: relative; display: block; width: 70px; height: 34px; border: 1px solid #94a3b8; border-radius: 999px; background: #e2e8f0; transition: background 0.18s ease, border-color 0.18s ease; }
+    .voice-chat-switch-track::before { content: ""; position: absolute; top: 4px; left: 4px; width: 24px; height: 24px; border-radius: 50%; background: #ffffff; box-shadow: 0 2px 7px rgba(15,23,42,0.28); transition: transform 0.18s ease; }
+    .voice-chat-switch-track::after { content: "OFF"; position: absolute; top: 50%; right: 8px; color: #475569; font-size: 9px; font-weight: 800; transform: translateY(-50%); }
+    .voice-chat-switch input:checked + .voice-chat-switch-track { border-color: #0f766e; background: #0f766e; }
+    .voice-chat-switch input:checked + .voice-chat-switch-track::before { transform: translateX(36px); }
+    .voice-chat-switch input:checked + .voice-chat-switch-track::after { left: 9px; right: auto; color: #ffffff; content: "ON"; }
+    .voice-chat-switch input:focus-visible + .voice-chat-switch-track { outline: 3px solid rgba(20,184,166,0.25); outline-offset: 2px; }
+    .voice-chat-distance-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .voice-chat-distance-field { padding: 15px; border: 1px solid #cbd5e1; border-radius: 12px; background: #ffffff; }
+    .voice-chat-distance-field span { display: block; color: #334155; font-size: 13px; font-weight: 800; }
+    .voice-chat-distance-field input { margin-top: 9px; }
+    .voice-chat-distance-field small { display: block; min-height: 31px; margin-top: 7px; color: #64748b; font-size: 10px; line-height: 1.45; }
+    .voice-chat-status { min-height: 20px; padding: 12px 14px; border-radius: 10px; background: #e6f4ef; color: #315f55; font-size: 12px; line-height: 1.5; }
+    .voice-chat-save-wrap { position: relative; display: inline-flex; }
     .server-stop-backdrop { background: rgba(10, 18, 28, 0.56); backdrop-filter: blur(7px); -webkit-backdrop-filter: blur(7px); }
     .server-stop-modal { width: min(470px, 100%); }
     .server-stop-body { display: grid; justify-items: center; gap: 16px; padding: 30px 26px 24px; text-align: center; background: #f8fafc; }
@@ -2698,6 +2742,10 @@ def dashboard(request: Request):
       .restart-modal-controls { grid-template-columns: 1fr; }
       .restart-modal-intro { grid-template-columns: 46px minmax(0, 1fr); }
       .restart-modal-intro-icon { width: 46px; height: 46px; }
+      .voice-chat-distance-grid { grid-template-columns: 1fr; }
+      #voiceChatModal .modal-foot > button { width: auto; min-width: 100px; }
+      .voice-chat-save-wrap { min-width: 120px; }
+      .voice-chat-save-wrap button { white-space: nowrap; }
     }
     @media (max-width: 520px) {
       .settings-primary-row { grid-template-columns: 76px minmax(0, 1fr); }
@@ -2882,13 +2930,17 @@ def dashboard(request: Request):
                 <span class="management-shortcut-copy"><b>예약 재시작</b><small>매일 지정한 한국표준 시각에 게임 서버를 재시작합니다.</small></span>
                 <span id="restartScheduleSummary" class="restart-hub-summary">예약 정보 확인 중</span>
               </button>
-              <button id="discordIntegrationBtn" class="management-shortcut discord-shortcut" type="button" onclick="openDiscordComingSoon()" title="디스코드 연동">
+              <button id="voiceChatSettingsBtn" class="management-shortcut voice-chat-shortcut" type="button" onclick="openVoiceChatSettings()" title="보이스챗 설정 열기">
                 <span class="management-shortcut-icon" aria-hidden="true">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M8 12h.01" /><path d="M12 12h.01" /><path d="M16 12h.01" /><path d="M21 15a4 4 0 0 1-4 4H8l-5 3v-7a4 4 0 0 1-1-2.65V7a4 4 0 0 1 4-4h11a4 4 0 0 1 4 4Z" />
+                    <circle cx="7.5" cy="8" r="2.5" /><circle cx="16.5" cy="8" r="2.5" />
+                    <path d="M3.5 18v-1.5A3.5 3.5 0 0 1 7 13h1a3.5 3.5 0 0 1 2.8 1.4" />
+                    <path d="M20.5 18v-1.5A3.5 3.5 0 0 0 17 13h-1a3.5 3.5 0 0 0-2.8 1.4" />
+                    <path d="M10 5.2c1.25-1.15 2.75-1.15 4 0" /><path d="M9.5 20h5" />
                   </svg>
                 </span>
-                <span class="management-shortcut-copy"><b>디스코드 연동</b><small>서버 운영 알림과 상태 연동</small></span>
+                <span class="management-shortcut-copy"><b>보이스챗 설정</b><small>게임 내 근거리 음성 대화 관리</small></span>
+                <span id="voiceChatSummary" class="voice-chat-hub-summary">설정 정보 확인 중</span>
               </button>
             </nav>
           </div>
@@ -3065,21 +3117,57 @@ def dashboard(request: Request):
       </div>
     </div>
 
-    <div id="discordComingSoonModal" class="modal-backdrop" aria-hidden="true">
-      <div class="modal coming-soon-modal" role="dialog" aria-modal="true" aria-labelledby="discordComingSoonTitle">
+    <div id="voiceChatModal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal voice-chat-modal" role="dialog" aria-modal="true" aria-labelledby="voiceChatModalTitle">
         <div class="modal-head">
-          <h2 id="discordComingSoonTitle">디스코드 연동</h2>
-          <button class="modal-close" type="button" onclick="closeDiscordComingSoon()" title="닫기" aria-label="닫기">×</button>
+          <h2 id="voiceChatModalTitle">Palworld 보이스챗 설정</h2>
+          <button class="modal-close" type="button" onclick="closeVoiceChatSettings()" title="닫기" aria-label="닫기">×</button>
         </div>
-        <div class="coming-soon-body">
-          <div class="coming-soon-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M8 12h.01" /><path d="M12 12h.01" /><path d="M16 12h.01" /><path d="M21 15a4 4 0 0 1-4 4H8l-5 3v-7a4 4 0 0 1-1-2.65V7a4 4 0 0 1 4-4h11a4 4 0 0 1 4 4Z" />
-            </svg>
+        <div class="voice-chat-body">
+          <div class="voice-chat-intro">
+            <div class="voice-chat-intro-icon" aria-hidden="true">
+              <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="14" cy="16" r="5" /><circle cx="34" cy="16" r="5" />
+                <path d="M6 37v-3a8 8 0 0 1 8-8h1a8 8 0 0 1 6.4 3.2" />
+                <path d="M42 37v-3a8 8 0 0 0-8-8h-1a8 8 0 0 0-6.4 3.2" />
+                <path d="M19 8c3-3 7-3 10 0" /><path d="M21 4.5c1.8-1.2 4.2-1.2 6 0" />
+              </svg>
+            </div>
+            <div>
+              <strong>두 플레이어 사이의 근거리 음성 대화</strong>
+              <p>공식 보이스챗을 켜고, 거리에 따라 음량이 줄어드는 범위를 설정합니다.</p>
+            </div>
           </div>
-          <strong>현재 구현 중입니다.</strong>
-          <p>디스코드 서버 알림과 운영 연동 기능을 준비하고 있습니다.</p>
-          <button type="button" onclick="closeDiscordComingSoon()">확인</button>
+          <div class="voice-chat-toggle-card">
+            <div class="voice-chat-toggle-copy">
+              <strong>게임 내 보이스챗 사용</strong>
+              <small>활성화하면 가까운 플레이어끼리 음성으로 대화할 수 있습니다.</small>
+            </div>
+            <label class="voice-chat-switch" for="voiceChatEnabled" title="보이스챗 사용 여부">
+              <input id="voiceChatEnabled" type="checkbox" role="switch">
+              <span class="voice-chat-switch-track" aria-hidden="true"></span>
+            </label>
+          </div>
+          <div class="voice-chat-distance-grid">
+            <label class="voice-chat-distance-field">
+              <span>최대 음량 유지 거리</span>
+              <input id="voiceChatMaxVolumeDistance" type="number" min="0" step="100" inputmode="decimal">
+              <small>이 거리 안에서는 상대방의 음성이 최대 음량으로 들립니다.</small>
+            </label>
+            <label class="voice-chat-distance-field">
+              <span>음량이 0이 되는 거리</span>
+              <input id="voiceChatZeroVolumeDistance" type="number" min="0" step="100" inputmode="decimal">
+              <small>이 거리 이상 떨어지면 상대방의 음성이 들리지 않습니다.</small>
+            </label>
+          </div>
+          <div id="voiceChatStatus" class="voice-chat-status">보이스챗 설정을 불러오는 중입니다.</div>
+        </div>
+        <div class="modal-foot">
+          <button class="secondary" type="button" onclick="closeVoiceChatSettings()">취소</button>
+          <div class="voice-chat-save-wrap">
+            <button id="voiceChatSaveBtn" type="button" onclick="saveVoiceChatSettings()">설정 저장</button>
+            <div id="voiceChatSaveBubble" class="save-bubble" role="status" aria-live="polite">저장완료</div>
+          </div>
         </div>
       </div>
     </div>
@@ -3479,6 +3567,8 @@ def dashboard(request: Request):
         "advancedSettingsBtn",
         "advancedSaveBtn",
         "restartSettingsBtn",
+        "voiceChatSettingsBtn",
+        "voiceChatSaveBtn",
         "installBtn"
       ].forEach(function (id) {
         const element = document.getElementById(id);
@@ -3497,6 +3587,7 @@ def dashboard(request: Request):
 
       if (locked) {
         closeRestartScheduleSettings();
+        closeVoiceChatSettings();
       }
     }
 
@@ -4474,6 +4565,7 @@ def dashboard(request: Request):
       document.getElementById("cfgRconPort").value = config.RCONPort || 25575;
       document.getElementById("cfgCommunityServer").checked = Boolean(config.CommunityServer);
       fillAdvancedOptions(config.AdvancedOptions || {});
+      renderVoiceChatSummary(config.AdvancedOptions || {});
     }
 
     function fillWorldList(worlds) {
@@ -4835,19 +4927,137 @@ def dashboard(request: Request):
       openResourceMonitor();
     }
 
-    function openDiscordComingSoon() {
-      const modal = document.getElementById("discordComingSoonModal");
+    function voiceChatSettingsFromAdvanced(options) {
+      const source = options || {};
+      return {
+        enabled: Boolean(source.bEnableVoiceChat),
+        max_volume_distance: Number(source.VoiceChatMaxVolumeDistance ?? 3000),
+        zero_volume_distance: Number(source.VoiceChatZeroVolumeDistance ?? 15000)
+      };
+    }
+
+    function renderVoiceChatSummary(options) {
+      const settings = Object.prototype.hasOwnProperty.call(options || {}, "enabled")
+        ? options
+        : voiceChatSettingsFromAdvanced(options);
+      const summary = document.getElementById("voiceChatSummary");
+
+      if (summary) {
+        summary.innerText = settings.enabled ? "보이스챗 켜짐" : "보이스챗 꺼짐";
+      }
+    }
+
+    function fillVoiceChatControls(settings) {
+      const source = settings || {};
+      document.getElementById("voiceChatEnabled").checked = Boolean(source.enabled);
+      document.getElementById("voiceChatMaxVolumeDistance").value = Number(source.max_volume_distance ?? 3000);
+      document.getElementById("voiceChatZeroVolumeDistance").value = Number(source.zero_volume_distance ?? 15000);
+      document.getElementById("voiceChatStatus").innerText = source.enabled
+        ? "보이스챗이 활성화되어 있습니다. 변경사항은 다음 서버 시작부터 적용됩니다."
+        : "보이스챗이 비활성화되어 있습니다.";
+      renderVoiceChatSummary(source);
+    }
+
+    async function loadVoiceChatSettings() {
+      const response = await fetch("/api/voice-chat");
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.detail || "보이스챗 설정 조회 실패");
+      }
+
+      const settings = data.settings || {};
+      advancedOptions.bEnableVoiceChat = Boolean(settings.enabled);
+      advancedOptions.VoiceChatMaxVolumeDistance = Number(settings.max_volume_distance ?? 3000);
+      advancedOptions.VoiceChatZeroVolumeDistance = Number(settings.zero_volume_distance ?? 15000);
+      fillVoiceChatControls(settings);
+      return settings;
+    }
+
+    async function openVoiceChatSettings() {
+      if (gameServerIsRunning) {
+        return;
+      }
+
+      const modal = document.getElementById("voiceChatModal");
       if (modal.parentElement !== document.body) {
         document.body.appendChild(modal);
       }
       modal.classList.add("show");
       modal.setAttribute("aria-hidden", "false");
+
+      try {
+        await loadVoiceChatSettings();
+      } catch (err) {
+        document.getElementById("voiceChatStatus").innerText = "설정 조회 실패: " + err;
+      }
     }
 
-    function closeDiscordComingSoon() {
-      const modal = document.getElementById("discordComingSoonModal");
+    function closeVoiceChatSettings() {
+      const modal = document.getElementById("voiceChatModal");
       modal.classList.remove("show");
       modal.setAttribute("aria-hidden", "true");
+    }
+
+    let voiceChatSaveBubbleTimer = null;
+
+    function showVoiceChatSaveBubble() {
+      const bubble = document.getElementById("voiceChatSaveBubble");
+      window.clearTimeout(voiceChatSaveBubbleTimer);
+      bubble.classList.add("show");
+      voiceChatSaveBubbleTimer = window.setTimeout(function () {
+        bubble.classList.remove("show");
+        closeVoiceChatSettings();
+      }, 1000);
+    }
+
+    async function saveVoiceChatSettings() {
+      const button = document.getElementById("voiceChatSaveBtn");
+      const status = document.getElementById("voiceChatStatus");
+      const maxDistance = Number(document.getElementById("voiceChatMaxVolumeDistance").value);
+      const zeroDistance = Number(document.getElementById("voiceChatZeroVolumeDistance").value);
+
+      if (!Number.isFinite(maxDistance) || !Number.isFinite(zeroDistance) || maxDistance < 0 || zeroDistance < 0) {
+        status.innerText = "거리 값은 0 이상의 숫자로 입력해주세요.";
+        return;
+      }
+
+      if (zeroDistance < maxDistance) {
+        status.innerText = "음량이 0이 되는 거리는 최대 음량 유지 거리보다 크거나 같아야 합니다.";
+        return;
+      }
+
+      button.disabled = true;
+      status.innerText = "보이스챗 설정을 저장하는 중입니다.";
+
+      try {
+        const response = await fetch("/api/voice-chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            enabled: document.getElementById("voiceChatEnabled").checked,
+            max_volume_distance: maxDistance,
+            zero_volume_distance: zeroDistance
+          })
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.detail || "보이스챗 설정 저장 실패");
+        }
+
+        const settings = data.settings || {};
+        advancedOptions.bEnableVoiceChat = Boolean(settings.enabled);
+        advancedOptions.VoiceChatMaxVolumeDistance = Number(settings.max_volume_distance ?? 3000);
+        advancedOptions.VoiceChatZeroVolumeDistance = Number(settings.zero_volume_distance ?? 15000);
+        fillAdvancedOptions(advancedOptions);
+        fillVoiceChatControls(settings);
+        showVoiceChatSaveBubble();
+      } catch (err) {
+        status.innerText = "설정 저장 실패: " + err;
+      } finally {
+        button.disabled = gameServerIsRunning;
+      }
     }
 
     function readConfigForm() {
@@ -5400,6 +5610,49 @@ def get_config(request: Request):
         "path": str(get_config_path()),
         "exists": get_config_path().exists(),
         "config": read_config(),
+    }
+
+
+@app.get("/api/voice-chat")
+def get_voice_chat(request: Request):
+    require_auth(request)
+    return {
+        "status": "ok",
+        "settings": read_voice_chat_settings(),
+    }
+
+
+@app.post("/api/voice-chat")
+def save_voice_chat(payload: VoiceChatSettingsRequest, request: Request):
+    require_auth(request)
+
+    if is_server_container_running():
+        raise HTTPException(
+            status_code=409,
+            detail="서버 실행 중에는 보이스챗 설정을 변경할 수 없습니다. 서버를 중지한 뒤 다시 시도해주세요.",
+        )
+
+    if payload.zero_volume_distance < payload.max_volume_distance:
+        raise HTTPException(
+            status_code=400,
+            detail="음량이 0이 되는 거리는 최대 음량 유지 거리보다 크거나 같아야 합니다.",
+        )
+
+    config = read_config()
+    advanced = dict(config.get("AdvancedOptions") or {})
+    advanced.update({
+        "bEnableVoiceChat": payload.enabled,
+        "VoiceChatMaxVolumeDistance": payload.max_volume_distance,
+        "VoiceChatZeroVolumeDistance": payload.zero_volume_distance,
+    })
+    config["AdvancedOptions"] = advanced
+    config_path = write_config(config)
+
+    return {
+        "status": "ok",
+        "message": "Palworld 보이스챗 설정 저장 완료",
+        "path": str(config_path),
+        "settings": read_voice_chat_settings(),
     }
 
 
