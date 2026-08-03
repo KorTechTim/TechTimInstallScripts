@@ -107,6 +107,10 @@ class VoiceChatSettingsTests(unittest.TestCase):
 
         self.assertIn('id="voiceChatSettingsBtn"', source)
         self.assertIn('id="voiceChatModal"', source)
+        self.assertIn('/static/palworld-voice-chat-icon.png', source)
+        self.assertIn('id="voiceChatMaxVolumeDistanceRange"', source)
+        self.assertIn('id="voiceChatZeroVolumeDistanceRange"', source)
+        self.assertIn("bindVoiceChatDistanceControl", source)
         self.assertNotIn('id="discordIntegrationBtn"', source)
         self.assertNotIn('id="discordComingSoonModal"', source)
 

@@ -2501,8 +2501,9 @@ def dashboard(request: Request):
     .management-shortcut { min-width: 0; min-height: 68px; display: grid; grid-template-columns: 42px minmax(0, 1fr); align-items: center; column-gap: 11px; row-gap: 4px; padding: 9px 12px; border: 1px solid rgba(205, 239, 230, 0.30); border-radius: 7px; background: rgba(7, 53, 52, 0.74); color: #ffffff; text-align: left; box-shadow: inset 0 1px 0 rgba(255,255,255,0.06); }
     .management-shortcut:hover { border-color: #99f6e4; background: rgba(15, 118, 110, 0.86); transform: translateY(-1px); }
     .management-shortcut-icon { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 7px; background: #9a594d; color: #ffffff; }
-    .voice-chat-shortcut .management-shortcut-icon { background: #168b83; }
+    .voice-chat-shortcut .management-shortcut-icon { overflow: hidden; background: #0f172a; }
     .management-shortcut-icon svg { width: 23px; height: 23px; }
+    .management-shortcut-icon img { display: block; width: 100%; height: 100%; object-fit: cover; }
     .management-shortcut-copy { min-width: 0; display: grid; gap: 4px; }
     .management-shortcut-copy b { font-size: 13px; }
     .management-shortcut-copy small { overflow: hidden; color: rgba(255,255,255,0.72); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
@@ -2604,8 +2605,8 @@ def dashboard(request: Request):
     .voice-chat-modal { width: min(720px, 100%); }
     .voice-chat-body { min-height: 0; display: grid; gap: 16px; overflow: auto; padding: 22px; background: linear-gradient(145deg, rgba(240,253,250,0.98), rgba(239,246,255,0.98)); }
     .voice-chat-intro { display: grid; grid-template-columns: 58px minmax(0, 1fr); align-items: center; gap: 14px; padding: 16px; border: 1px solid #99d9d3; border-radius: 12px; background: rgba(255,255,255,0.88); }
-    .voice-chat-intro-icon { display: grid; place-items: center; width: 58px; height: 58px; border-radius: 12px; background: #168b83; color: #ffffff; box-shadow: 0 10px 22px rgba(22,139,131,0.22); }
-    .voice-chat-intro-icon svg { width: 38px; height: 38px; }
+    .voice-chat-intro-icon { display: grid; place-items: center; overflow: hidden; width: 58px; height: 58px; border-radius: 12px; background: #0f172a; color: #ffffff; box-shadow: 0 10px 22px rgba(22,139,131,0.22); }
+    .voice-chat-intro-icon img { display: block; width: 100%; height: 100%; object-fit: cover; }
     .voice-chat-intro strong { display: block; margin-bottom: 5px; color: #134e4a; font-size: 16px; }
     .voice-chat-intro p { margin: 0; color: #64748b; font-size: 12px; line-height: 1.5; }
     .voice-chat-toggle-card { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 16px; border: 1px solid #cbd5e1; border-radius: 12px; background: #ffffff; }
@@ -2625,6 +2626,7 @@ def dashboard(request: Request):
     .voice-chat-distance-field { padding: 15px; border: 1px solid #cbd5e1; border-radius: 12px; background: #ffffff; }
     .voice-chat-distance-field span { display: block; color: #334155; font-size: 13px; font-weight: 800; }
     .voice-chat-distance-field input { margin-top: 9px; }
+    input[type="range"].voice-chat-distance-range { margin-top: 12px; }
     .voice-chat-distance-field small { display: block; min-height: 31px; margin-top: 7px; color: #64748b; font-size: 10px; line-height: 1.45; }
     .voice-chat-status { min-height: 20px; padding: 12px 14px; border-radius: 10px; background: #e6f4ef; color: #315f55; font-size: 12px; line-height: 1.5; }
     .voice-chat-save-wrap { position: relative; display: inline-flex; }
@@ -2932,12 +2934,7 @@ def dashboard(request: Request):
               </button>
               <button id="voiceChatSettingsBtn" class="management-shortcut voice-chat-shortcut" type="button" onclick="openVoiceChatSettings()" title="보이스챗 설정 열기">
                 <span class="management-shortcut-icon" aria-hidden="true">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
-                    <circle cx="7.5" cy="8" r="2.5" /><circle cx="16.5" cy="8" r="2.5" />
-                    <path d="M3.5 18v-1.5A3.5 3.5 0 0 1 7 13h1a3.5 3.5 0 0 1 2.8 1.4" />
-                    <path d="M20.5 18v-1.5A3.5 3.5 0 0 0 17 13h-1a3.5 3.5 0 0 0-2.8 1.4" />
-                    <path d="M10 5.2c1.25-1.15 2.75-1.15 4 0" /><path d="M9.5 20h5" />
-                  </svg>
+                  <img src="/static/palworld-voice-chat-icon.png" alt="">
                 </span>
                 <span class="management-shortcut-copy"><b>보이스챗 설정</b><small>게임 내 근거리 음성 대화 관리</small></span>
                 <span id="voiceChatSummary" class="voice-chat-hub-summary">설정 정보 확인 중</span>
@@ -3126,12 +3123,7 @@ def dashboard(request: Request):
         <div class="voice-chat-body">
           <div class="voice-chat-intro">
             <div class="voice-chat-intro-icon" aria-hidden="true">
-              <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="14" cy="16" r="5" /><circle cx="34" cy="16" r="5" />
-                <path d="M6 37v-3a8 8 0 0 1 8-8h1a8 8 0 0 1 6.4 3.2" />
-                <path d="M42 37v-3a8 8 0 0 0-8-8h-1a8 8 0 0 0-6.4 3.2" />
-                <path d="M19 8c3-3 7-3 10 0" /><path d="M21 4.5c1.8-1.2 4.2-1.2 6 0" />
-              </svg>
+              <img src="/static/palworld-voice-chat-icon.png" alt="">
             </div>
             <div>
               <strong>두 플레이어 사이의 근거리 음성 대화</strong>
@@ -3152,11 +3144,13 @@ def dashboard(request: Request):
             <label class="voice-chat-distance-field">
               <span>최대 음량 유지 거리</span>
               <input id="voiceChatMaxVolumeDistance" type="number" min="0" step="100" inputmode="decimal">
+              <input id="voiceChatMaxVolumeDistanceRange" class="range-slider voice-chat-distance-range" type="range" min="0" max="50000" step="100" value="3000" aria-label="최대 음량 유지 거리 슬라이더">
               <small>이 거리 안에서는 상대방의 음성이 최대 음량으로 들립니다.</small>
             </label>
             <label class="voice-chat-distance-field">
               <span>음량이 0이 되는 거리</span>
               <input id="voiceChatZeroVolumeDistance" type="number" min="0" step="100" inputmode="decimal">
+              <input id="voiceChatZeroVolumeDistanceRange" class="range-slider voice-chat-distance-range" type="range" min="0" max="50000" step="100" value="15000" aria-label="음량이 0이 되는 거리 슬라이더">
               <small>이 거리 이상 떨어지면 상대방의 음성이 들리지 않습니다.</small>
             </label>
           </div>
@@ -4947,11 +4941,62 @@ def dashboard(request: Request):
       }
     }
 
+    function setVoiceChatDistanceControl(numberId, rangeId, value) {
+      const numberInput = document.getElementById(numberId);
+      const rangeInput = document.getElementById(rangeId);
+      const normalized = Math.max(0, Number(value || 0));
+
+      numberInput.value = normalized;
+      rangeInput.max = Math.max(50000, normalized);
+      rangeInput.value = normalized;
+      updateRangeFill(rangeInput);
+    }
+
+    function bindVoiceChatDistanceControl(numberId, rangeId) {
+      const numberInput = document.getElementById(numberId);
+      const rangeInput = document.getElementById(rangeId);
+
+      if (!numberInput || !rangeInput || rangeInput.dataset.bound === "true") {
+        return;
+      }
+
+      rangeInput.addEventListener("input", function () {
+        numberInput.value = rangeInput.value;
+        updateRangeFill(rangeInput);
+      });
+
+      numberInput.addEventListener("input", function () {
+        if (numberInput.value === "") {
+          return;
+        }
+
+        const value = Math.max(0, Number(numberInput.value || 0));
+        rangeInput.max = Math.max(50000, value);
+        rangeInput.value = value;
+        updateRangeFill(rangeInput);
+      });
+
+      numberInput.addEventListener("change", function () {
+        setVoiceChatDistanceControl(numberId, rangeId, numberInput.value);
+      });
+
+      rangeInput.dataset.bound = "true";
+      updateRangeFill(rangeInput);
+    }
+
     function fillVoiceChatControls(settings) {
       const source = settings || {};
       document.getElementById("voiceChatEnabled").checked = Boolean(source.enabled);
-      document.getElementById("voiceChatMaxVolumeDistance").value = Number(source.max_volume_distance ?? 3000);
-      document.getElementById("voiceChatZeroVolumeDistance").value = Number(source.zero_volume_distance ?? 15000);
+      setVoiceChatDistanceControl(
+        "voiceChatMaxVolumeDistance",
+        "voiceChatMaxVolumeDistanceRange",
+        Number(source.max_volume_distance ?? 3000)
+      );
+      setVoiceChatDistanceControl(
+        "voiceChatZeroVolumeDistance",
+        "voiceChatZeroVolumeDistanceRange",
+        Number(source.zero_volume_distance ?? 15000)
+      );
       document.getElementById("voiceChatStatus").innerText = source.enabled
         ? "보이스챗이 활성화되어 있습니다. 변경사항은 다음 서버 시작부터 적용됩니다."
         : "보이스챗이 비활성화되어 있습니다.";
@@ -5449,6 +5494,8 @@ def dashboard(request: Request):
     setInterval(function () { loadRestartSchedule(false); }, 30000);
     setInterval(function () { refreshServerResources(false); }, 5000);
 
+    bindVoiceChatDistanceControl("voiceChatMaxVolumeDistance", "voiceChatMaxVolumeDistanceRange");
+    bindVoiceChatDistanceControl("voiceChatZeroVolumeDistance", "voiceChatZeroVolumeDistanceRange");
     initializeDashboard();
   </script>
 </body>
